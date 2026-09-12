@@ -1,0 +1,48 @@
+# ============================================================
+#  .gitignore — What NEVER gets uploaded to GitHub
+# ============================================================
+
+# ── 🔑 SECRET: API keys & environment variables ──────────────
+# .env holds your real API key — NEVER commit this!
+.env
+.env.local
+.env.*.local
+
+# ── Python virtual environment ────────────────────────────────
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Compiled C binary (generated locally) ────────────────────
+src/sandbox/seccomp_filter
+src/sandbox/*.o
+
+# ── Logs (can contain sensitive output from runs) ────────────
+logs/*.jsonl
+logs/*.log
+
+# ── OS junk ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE/editor settings ──────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Antigravity internal (not part of this project) ──────────
+.agents/
+skills-lock.json
+
+# ── Temporary sandbox inner scripts ──────────────────────────
+run_sandboxed_inner.py

@@ -1,0 +1,95 @@
+# ============================================================
+# OS-Level Guardrails — Default Policy (Access Matrix)
+# ============================================================
+#
+# This file defines WHAT the AI agent is allowed to do.
+# It maps directly to classical OS access-matrix theory:
+#   - Subject (who):  The AI agent
+#   - Object (what):  Files, commands, network endpoints
+#   - Permission:     ALLOW, BLOCK, or FLAG
+#
+# Rules are evaluated top-down. The FIRST matching rule wins.
+# If no rule matches, the default action applies.
+# ============================================================
+
+# Default action when no rule matches
+default_action: FLAG
+
+# Filesystem access rules
+filesystem:
+  read:
+    allow:
+      - "/tmp/*"
+      - "/home/*/workspace/*"
+      - "/proc/cpuinfo"
+      - "/proc/meminfo"
+      - "/etc/hostname"
+      - "/etc/os-release"
+    block:
+      - "/etc/shadow"
+      - "/etc/passwd"
+      - "/etc/sudoers"
+      - "/root/*"
+      - "/home/*/.ssh/*"
+      - "/home/*/.gnupg/*"
+      - "/home/*/.bash_history"
+      - "/var/log/auth.log"
+  write:
+    allow:
+      - "/tmp/*"
+      - "/home/*/workspace/output/*"
+    block:
+      - "/etc/*"
+      - "/usr/*"
+      - "/bin/*"
+      - "/sbin/*"
+      - "/root/*"
+      - "/home/*/.bashrc"
+      - "/home/*/.profile"
+
+# Shell command execution rules
+process:
+  allow:
+    - "ls"
+    - "cat"
+    - "echo"
+    - "grep"
+    - "wc"
+    - "head"
+    - "tail"
+    - "sort"
+    - "uniq"
+    - "find"
+    - "date"
+    - "whoami"
+    - "uname"
+    - "python3"
+    - "pip"
+  block:
+    - "curl"
+    - "wget"
+    - "nc"
+    - "netcat"
+    - "ncat"
+    - "bash"
+    - "sh"
+    - "zsh"
+    - "sudo"
+    - "su"
+    - "chmod"
+    - "chown"
+    - "rm"
+    - "mkfs"
+    - "dd"
+    - "ssh"
+    - "scp"
+    - "rsync"
+    - "apt"
+    - "yum"
+    - "pip install"
+
+# Network access rules
+network:
+  allow: []
+  block:
+    - "*"  # Block ALL outbound network by default
