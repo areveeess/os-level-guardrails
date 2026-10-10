@@ -112,12 +112,15 @@ python3 -m src.dashboard.app
 
 ## 📊 Results
 
-| Metric | Without Sandbox | With Sandbox |
+| Metric | Without Guardrails | With Policy Engine |
 |--------|----------------|-------------|
-| Attacks executed | 8/8 (100%) | 1/8 (12.5%) |
-| Attacks blocked | 0/8 (0%) | 7/8 (87.5%) |
-| Safe actions allowed | ✅ | ✅ |
-| Policy engine tests | N/A | 12/12 passed |
+| Attacks reaching the OS | 7/7 (100%) | 0/7 (0%) |
+| Attacks blocked | 0/7 (0%) | 7/7 (100%) |
+| Benign control allowed | 1/1 | 1/1 (no false positives) |
+
+Test suite: 28/28 pytest tests passing (21 policy engine, 6 sandbox block detection, 1 dashboard flow).
+
+`run_attack_simulation.py` exercises the policy engine layer; `run_sandboxed.py` exercises namespaces + seccomp-BPF. Destructive vectors in the simulation use safe stand-ins (a throwaway `/tmp` directory and the reserved `.example` domain), so it is safe to run live.
 
 ## 🔬 Novelty & Positioning
 

@@ -198,7 +198,7 @@ class PolicyEngine:
 
         return (self.default_action, f"URL '{url}' has no matching rule")
 
-    def _log_decision(self, action_type: str, target: str, decision: str, reason: str):
+    def _log_decision(self, action_type: str, target: str, decision: str, reason: str, layer: str = "policy_engine"):
         """Write a decision to the JSON Lines log file.
         
         Format: one JSON object per line, read by the dashboard.
@@ -208,7 +208,8 @@ class PolicyEngine:
             "action": action_type,
             "target": target,
             "decision": decision,
-            "reason": reason
+            "reason": reason,
+            "layer": layer
         }
         
         try:

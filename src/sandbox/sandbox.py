@@ -75,6 +75,34 @@ def get_seccomp_filter_path() -> str:
     return os.path.join(os.path.dirname(__file__), 'seccomp_filter')
 
 
+# Error text that indicates an isolation layer stopped the command.
+# seccomp_filter.c returns EPERM for blocked syscalls ("Operation not permitted");
+# the network namespace has no interfaces, so network calls fail to resolve/route.
+SECCOMP_SIGNATURES = ("operation not permitted", "bad system call")
+NAMESPACE_SIGNATURES = (
+    "permission denied",
+    "network is unreachable",
+    "could not resolve host",
+    "temporary failure in name resolution",
+    "unable to resolve host",
+)
+
+
+def detect_enforcement(returncode: int, stdout: str, stderr: str):
+    """Return the layer that blocked a failed command, or None for an ordinary failure."""
+    if returncode == 0:
+        return None
+    # 159 = 128 + SIGSYS: the process was killed by a seccomp kill action
+    if returncode in (159, -31):
+        return "seccomp"
+    text = f"{stdout}\n{stderr}".lower()
+    if any(sig in text for sig in SECCOMP_SIGNATURES):
+        return "seccomp"
+    if any(sig in text for sig in NAMESPACE_SIGNATURES):
+        return "sandbox"
+    return None
+
+
 class Sandbox:
     """OS-level sandbox for the AI agent.
 
@@ -285,8 +313,27 @@ class Sandbox:
                 print(f"\n  🔴 Command failed (exit code {result.returncode})")
                 print(f"    The sandbox may have blocked a syscall.")
 
+            # Only a failure carrying an enforcement signature counts as a block;
+            # ordinary failures (e.g. grep with no match, typos) are not.
+            blocked_layer = detect_enforcement(result.returncode, stdout, stderr)
+            if blocked_layer:
+                self.policy._log_decision(
+                    action_type=action_type,
+                    target=target,
+                    decision="BLOCK",
+                    reason=f"Blocked by {blocked_layer} (exit code {result.returncode})",
+                    layer=blocked_layer
+                )
+
+            if result.returncode == 0:
+                status = "success"
+            elif blocked_layer:
+                status = "blocked_by_sandbox"
+            else:
+                status = "error"
+
             return {
-                "status": "success" if result.returncode == 0 else "blocked_by_sandbox",
+                "status": status,
                 "stdout": stdout,
                 "stderr": stderr,
                 "returncode": result.returncode,

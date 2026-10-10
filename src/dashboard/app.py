@@ -22,66 +22,133 @@ LOG_FILE = os.path.join(PROJECT_ROOT, 'logs', 'guardrails.jsonl')
 app = Flask(__name__)
 
 
-@app.route('/')
-def index():
-    """Serve the main dashboard page."""
-    return render_template('index.html')
+# Cache to avoid re-reading and re-parsing unchanged log file on every 2-second poll
+_log_cache = {
+    "mtime": 0,
+    "logs": [],
+    "stats": {"total": 0, "allowed": 0, "blocked": 0, "flagged": 0, "layers": {}}
+}
 
 
-@app.route('/api/logs')
-def get_logs():
-    """API endpoint: return all log entries as JSON array.
-    
-    The dashboard polls this endpoint every 2 seconds to update.
-    """
+def _get_model_name():
+    """Extract model name from .env or default."""
+    env_file = os.path.join(PROJECT_ROOT, '.env')
+    if os.path.exists(env_file):
+        try:
+            with open(env_file, 'r') as f:
+                for line in f:
+                    if line.startswith('GEMINI_MODEL='):
+                        return line.split('=', 1)[1].strip().strip('"').strip("'")
+        except Exception:
+            pass
+    return "gemini-2.5-flash"
+
+
+def _read_logs_cached():
+    """Read logs with mtime caching to eliminate unnecessary file I/O and JSON parsing."""
+    global _log_cache
+    if not os.path.exists(LOG_FILE):
+        return [], {"total": 0, "allowed": 0, "blocked": 0, "flagged": 0, "layers": {"policy_engine": 0, "sandbox": 0, "seccomp": 0}}
+
+    try:
+        mtime = os.path.getmtime(LOG_FILE)
+    except OSError:
+        mtime = 0
+
+    if mtime == _log_cache["mtime"] and _log_cache["mtime"] > 0:
+        return _log_cache["logs"], _log_cache["stats"]
+
     logs = []
-    # Only read if the log file exists
-    if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, 'r') as f:
+    layers = {"policy_engine": 0, "sandbox": 0, "seccomp": 0}
+    try:
+        with open(LOG_FILE, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if line:
                     try:
-                        logs.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        # Ignore invalid JSON lines gracefully
-                        pass
-    # Return most recent first so the newest logs are at the top
-    logs.reverse()
-    return jsonify(logs)
-
-
-@app.route('/api/stats')
-def get_stats():
-    """API endpoint: return summary statistics."""
-    logs = []
-    if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        logs.append(json.loads(line))
+                        entry = json.loads(line)
+                        # Ensure layer is set
+                        if "layer" not in entry:
+                            entry["layer"] = "policy_engine"
+                        layer_name = entry["layer"]
+                        layers[layer_name] = layers.get(layer_name, 0) + 1
+                        logs.append(entry)
                     except json.JSONDecodeError:
                         pass
-    
-    # Calculate totals and categories
+    except Exception:
+        pass
+
+    # Reverse for newest-first display
+    reversed_logs = list(reversed(logs))
     stats = {
         "total": len(logs),
         "allowed": sum(1 for l in logs if l.get("decision") == "ALLOW"),
         "blocked": sum(1 for l in logs if l.get("decision") == "BLOCK"),
         "flagged": sum(1 for l in logs if l.get("decision") == "FLAG"),
+        "layers": layers
     }
+
+    _log_cache = {
+        "mtime": mtime,
+        "logs": reversed_logs,
+        "stats": stats
+    }
+    return reversed_logs, stats
+
+
+@app.route('/')
+def index():
+    """Serve the main dashboard page with dynamic system info."""
+    info = {
+        "model": _get_model_name(),
+        "platform": sys.platform,
+        "is_linux": sys.platform.startswith('linux')
+    }
+    return render_template('index.html', info=info)
+
+
+@app.route('/api/info')
+def get_info():
+    """Return runtime metadata and active protection layers."""
+    return jsonify({
+        "model": _get_model_name(),
+        "platform": sys.platform,
+        "is_linux": sys.platform.startswith('linux'),
+        "layers": ["Access-Matrix Policy Engine", "Linux Namespaces", "Seccomp-BPF"]
+    })
+
+
+@app.route('/api/logs')
+def get_logs():
+    """API endpoint: return all log entries as JSON array (cached by mtime)."""
+    logs, _ = _read_logs_cached()
+    return jsonify(logs)
+
+
+@app.route('/api/stats')
+def get_stats():
+    """API endpoint: return summary statistics including layer counts."""
+    _, stats = _read_logs_cached()
     return jsonify(stats)
 
 
 @app.route('/api/clear', methods=['POST'])
 def clear_logs():
     """API endpoint: clear all logs (for starting fresh demo runs)."""
-    if os.path.exists(LOG_FILE):
-        # Open in write mode and close to truncate the file
-        open(LOG_FILE, 'w').close()
-    return jsonify({"status": "cleared"})
+    global _log_cache
+    try:
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+        with open(LOG_FILE, 'w', encoding='utf-8') as f:
+            f.truncate(0)
+    except Exception as e:
+        print(f"Error clearing log file: {e}")
+
+    _log_cache = {
+        "mtime": 0,
+        "logs": [],
+        "stats": {"total": 0, "allowed": 0, "blocked": 0, "flagged": 0, "layers": {"policy_engine": 0, "sandbox": 0, "seccomp": 0}}
+    }
+    return jsonify({"status": "cleared", "total": 0})
 
 
 if __name__ == '__main__':
