@@ -187,8 +187,13 @@ def write_charts(summary: list, chart_dir: str):
     plt.close(fig)
 
 
-def generate_report(out_dir: str, charts: bool = True) -> list:
-    rows = load_rows(os.path.join(out_dir, "raw.jsonl"))
+def generate_report(out_dir: str, charts: bool = True, sources: list = None) -> list:
+    """Write the report into out_dir from its raw.jsonl, or from several result
+    directories (`sources`, e.g. one per model run in parallel)."""
+    os.makedirs(out_dir, exist_ok=True)
+    rows = []
+    for src in sources or [out_dir]:
+        rows += load_rows(os.path.join(src, "raw.jsonl"))
     summary = summarize(rows)
     breakdown = kind_breakdown(rows)
     with open(os.path.join(out_dir, "summary.csv"), "w", newline="", encoding="utf-8") as f:

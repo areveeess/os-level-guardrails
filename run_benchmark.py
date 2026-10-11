@@ -12,6 +12,7 @@ Usage (in WSL):
   python run_benchmark.py --models gemini-flash-lite,ollama-llama3.2-3b --runs 1 --dh 3 --ds 3
   python run_benchmark.py --resume results/20261011-1500      # continue an interrupted run
   python run_benchmark.py --report-only results/20261011-1500
+  python run_benchmark.py --report-only results/final --merge results/final/*/   # one run per model
 """
 
 import argparse
@@ -40,10 +41,12 @@ def main():
     parser.add_argument("--sleep", type=float, default=0.0, help="Seconds between episodes (free-tier rate limits)")
     parser.add_argument("--resume", help="Existing results directory to continue")
     parser.add_argument("--report-only", help="Only regenerate the report for a results directory")
+    parser.add_argument("--merge", nargs="+", metavar="DIR",
+                        help="With --report-only: build one report from several result directories")
     args = parser.parse_args()
 
     if args.report_only:
-        generate_report(args.report_only)
+        generate_report(args.report_only, sources=args.merge)
         print(f"Report written to {args.report_only}")
         return
 
