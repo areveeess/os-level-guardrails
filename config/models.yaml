@@ -19,20 +19,36 @@ models:
     family: closed / large
     benchmark: true
 
-  groq-llama-70b:
+  gemma-4-31b:
+    provider: openai_compat
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
+    model: gemma-4-31b-it
+    family: open / medium
+    benchmark: true
+
+  groq-gpt-oss-120b:
     provider: openai_compat
     base_url: https://api.groq.com/openai/v1
     api_key_env: GROQ_API_KEY
-    model: llama-3.3-70b-versatile
+    model: openai/gpt-oss-120b
     family: open / large
     benchmark: true
 
-  groq-llama-8b:
+  groq-gpt-oss-20b:
     provider: openai_compat
     base_url: https://api.groq.com/openai/v1
     api_key_env: GROQ_API_KEY
-    model: llama-3.1-8b-instant
-    family: open / small
+    model: openai/gpt-oss-20b
+    family: open / medium
+    benchmark: true
+
+  groq-qwen3.8-27b:
+    provider: openai_compat
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    model: qwen/qwen3.8-27b
+    family: open / medium
     benchmark: true
 
   ollama-llama3.2-3b:

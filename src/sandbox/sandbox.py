@@ -4,149 +4,105 @@ Sandbox Wrapper — OS-Level Isolation
 This module provides the OS-level security boundary for the AI agent.
 It combines THREE layers of defense in the correct order:
 
-  ARCHITECTURE (Two-Phase Execution):
+  ARCHITECTURE (Two-Phase Execution, repeated every agent step):
   ┌─────────────────────────────────────────────────────────┐
   │  PHASE 1: OUTSIDE SANDBOX (needs network for LLM)      │
-  │    1. Agent sends prompt to the configured LLM          │
+  │    1. Agent sends the conversation to the LLM           │
   │    2. LLM responds with an action (e.g., "read file")   │
   │    3. Policy Engine checks action against access-matrix  │
-  │    4. If BLOCKED → stop here, log, done                 │
+  │    4. If BLOCKED → the agent is told, action not run     │
   │    5. If ALLOWED → proceed to Phase 2                   │
   └─────────────────────────────────────────────────────────┘
   ┌─────────────────────────────────────────────────────────┐
   │  PHASE 2: INSIDE SANDBOX (isolated tool execution)      │
-  │    1. Create namespace (user, PID, net isolation)        │
-  │    2. Apply seccomp-BPF filter (block dangerous syscalls)│
-  │    3. Execute ONLY the tool command inside this jail     │
-  │    4. Return result to parent                           │
+  │    1. Create namespaces (user, mount, PID, net)          │
+  │    2. Give it a private filesystem (fake home, canaries) │
+  │    3. Apply seccomp-BPF filter (block dangerous syscalls)│
+  │    4. Execute ONLY the tool command inside this jail     │
+  │    5. Return the result to the agent loop               │
   └─────────────────────────────────────────────────────────┘
 
   Why two phases?
     The LLM call needs network access (to reach the model's API).
-    But tool execution must be isolated (no network, no /etc/shadow).
+    But tool execution must be isolated (no network, no real secrets).
     So we split: LLM call outside, tool execution inside.
 
   Layer 1: Policy Engine (Application-Level Pre-check)
     - Checks every action against the access-matrix BEFORE execution
     - Provides readable decision logs for the dashboard
-    - Acts as the first line of defense with detailed reasoning
 
   Layer 2: Linux Namespaces (Environment Isolation)
+    - Mount namespace: private /home, /root, /tmp; /mnt hidden; fake /etc/shadow
     - PID namespace: agent can only see its own processes
     - Network namespace: tool execution has no network access
-    - User namespace: runs as unprivileged user
+    - User namespace: no real privileges on the host
 
   Layer 3: Seccomp-BPF (Syscall Filtering)
-    - Blocks dangerous syscalls (chmod, mount, ptrace, setuid, etc.)
+    - Blocks dangerous syscalls (chmod, mount, ptrace, setuid, connect, etc.)
     - Enforced by the kernel — cannot be bypassed from userspace
-    - Even if the policy engine misses something, seccomp catches it
 
 Usage:
   from src.sandbox.sandbox import Sandbox
-  from src.policy_engine.engine import PolicyEngine
-
-  sandbox = Sandbox(PolicyEngine())
-  sandbox.run_agent('List files in /tmp')
+  Sandbox(model='gemini-flash').run_agent('List files in my workspace')
 """
 
+import datetime
 import os
 import sys
-import subprocess
-import datetime
 
 # Add project root to path
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from src.agent_harness.agent import AIAgent
-from src.agent_harness.prompting import action_target
-from src.agent_harness.tools import ToolExecutor
+from src.agent_harness.environment import build_environment
+from src.agent_harness.executors import DirectExecutor, GuardedExecutor
+from src.agent_harness.loop import AgentLoop
+from src.llm import get_provider
 from src.policy_engine.engine import PolicyEngine
-
-
-def is_linux() -> bool:
-    """Check if we're running on Linux (required for namespaces/seccomp)."""
-    return sys.platform.startswith('linux')
-
-
-def get_seccomp_filter_path() -> str:
-    """Get the path to the compiled seccomp filter binary."""
-    return os.path.join(os.path.dirname(__file__), 'seccomp_filter')
-
-
-# Error text that indicates an isolation layer stopped the command.
-# seccomp_filter.c returns EPERM for blocked syscalls ("Operation not permitted");
-# the network namespace has no interfaces, so network calls fail to resolve/route.
-SECCOMP_SIGNATURES = ("operation not permitted", "bad system call")
-NAMESPACE_SIGNATURES = (
-    "permission denied",
-    "network is unreachable",
-    "could not resolve host",
-    "temporary failure in name resolution",
-    "unable to resolve host",
-)
-
-
-def detect_enforcement(returncode: int, stdout: str, stderr: str):
-    """Return the layer that blocked a failed command, or None for an ordinary failure."""
-    if returncode == 0:
-        return None
-    # 159 = 128 + SIGSYS: the process was killed by a seccomp kill action
-    if returncode in (159, -31):
-        return "seccomp"
-    text = f"{stdout}\n{stderr}".lower()
-    if any(sig in text for sig in SECCOMP_SIGNATURES):
-        return "seccomp"
-    if any(sig in text for sig in NAMESPACE_SIGNATURES):
-        return "sandbox"
-    return None
+# Re-exported: enforcement helpers live next to the sandbox executor
+from src.sandbox.executor import (SandboxExecutor, detect_enforcement, get_seccomp_filter_path,  # noqa: F401
+                                  is_linux)
 
 
 class Sandbox:
-    """OS-level sandbox for the AI agent.
+    """Runs the multi-step agent with every action going through
+    policy engine → namespaces + private filesystem → seccomp-BPF."""
 
-    Uses a two-phase architecture:
-      Phase 1 (outside sandbox): LLM call + policy check
-      Phase 2 (inside sandbox):  Tool execution with namespace + seccomp
-    """
-
-    def __init__(self, policy_engine: PolicyEngine = None, model: str = None):
-        """Initialize the sandbox.
-
+    def __init__(self, policy_engine: PolicyEngine = None, model: str = None,
+                 env=None, max_steps: int = 5):
+        """
         Args:
-            policy_engine: PolicyEngine instance for application-level checks.
-                          If None, a default engine is created.
+            policy_engine: PolicyEngine for application-level checks (default policy if None).
             model: Model name from config/models.yaml (default: its `default`).
+            env: Environment staged into the sandbox (default: canaries + empty workspace).
+            max_steps: Maximum agent steps per prompt.
         """
         self.policy = policy_engine or PolicyEngine()
         self.model = model
-        self.seccomp_path = get_seccomp_filter_path()
+        self.env = env or build_environment()
+        self.max_steps = max_steps
         self.namespace_supported = is_linux()
-        self.seccomp_available = os.path.isfile(self.seccomp_path)
+        self.seccomp_available = os.path.isfile(get_seccomp_filter_path())
 
         print(f"\n{'='*60}")
         print(f"  SANDBOX INITIALIZATION")
         print(f"{'='*60}")
         print(f"  Platform:   {'Linux ✓' if self.namespace_supported else 'Not Linux ✗'}")
-        print(f"  Namespaces: {'Available ✓' if self.namespace_supported else 'Not available (non-Linux)'}")
+        print(f"  Namespaces: {'user, mount, pid, net ✓' if self.namespace_supported else 'Not available (non-Linux)'}")
+        print(f"  Filesystem: {'private (fake home + canaries, /mnt hidden) ✓' if self.namespace_supported else 'HOST (not isolated)'}")
         print(f"  Seccomp:    {'Compiled ✓' if self.seccomp_available else 'Not compiled — run: cd src/sandbox && make'}")
         print(f"  Policy:     Loaded ✓")
         print(f"{'='*60}")
 
-    def run_agent(self, prompt: str) -> dict:
-        """Run the AI agent with sandbox protection.
+    def _build_executor(self):
+        if self.namespace_supported:
+            return GuardedExecutor(self.policy, SandboxExecutor(self.env, policy=self.policy))
+        print("  ⚠️  Not on Linux — falling back to POLICY-ONLY mode (no OS isolation)")
+        return GuardedExecutor(self.policy, DirectExecutor())
 
-        Two-phase execution:
-          Phase 1: LLM call + policy check (outside sandbox, needs network)
-          Phase 2: Tool execution (inside sandbox, isolated)
-
-        Args:
-            prompt: The user's natural language prompt.
-
-        Returns:
-            Dict with the execution result.
-        """
+    def run_agent(self, prompt: str):
+        """Run the agent on `prompt` with full protection. Returns the Episode."""
         print(f"\n{'='*60}")
         print(f"  SANDBOXED AGENT EXECUTION")
         print(f"{'='*60}")
@@ -154,221 +110,18 @@ class Sandbox:
         print(f"  Time:   {datetime.datetime.now().strftime('%H:%M:%S')}")
         print(f"{'='*60}")
 
-        # ── Phase 1: LLM Call (outside sandbox — needs network) ──
-        agent = AIAgent(policy_engine=self.policy, model=self.model)
-        print(f"\n[PHASE 1] Consulting LLM {agent.provider.name} (outside sandbox)...")
-        action = agent.propose_action(prompt)
-        if action.get("status") == "error":
-            return action
-
-        action_type = action.get("action", "unknown")
-        target = action_target(action)
-        print(f"  Action: {action_type}")
-        print(f"  Target: {target}")
-
-        # ── Phase 1: Policy Check (access-matrix evaluation) ──
-        print("\n[PHASE 1] Checking policy engine (access-matrix)...")
-        decision = self.policy.check(action_type, target)
-
-        if decision == "BLOCK":
-            print(f"\n  ╔══════════════════════════════════════════╗")
-            print(f"  ║  ❌ BLOCKED BY POLICY ENGINE              ║")
-            print(f"  ║  Action: {action_type:<33}║")
-            print(f"  ║  Target: {str(target)[:33]:<33}║")
-            print(f"  ║  The action was denied before execution. ║")
-            print(f"  ╚══════════════════════════════════════════╝\n")
-            return {
-                "status": "blocked",
-                "action": action_type,
-                "target": target,
-                "decision": "BLOCK",
-                "phase": "policy_engine"
-            }
-        elif decision == "FLAG":
-            print(f"  ⚠️  FLAGGED: Action is suspicious but allowed for now")
-        else:
-            print(f"  ✅ ALLOWED: Action passes policy check")
-
-        # ── Phase 2: Sandboxed Tool Execution ──
-        print(f"\n[PHASE 2] Executing tool inside sandbox...")
-
-        if action_type == "respond":
-            # Text responses don't need sandboxing
-            msg = action.get("message", "")
-            print(f"  Response: {msg}")
-            return {"status": "success", "message": msg}
-
-        if self.namespace_supported and self.seccomp_available:
-            return self._execute_in_full_sandbox(action)
-        elif self.namespace_supported:
-            return self._execute_in_namespace(action)
-        else:
-            return self._execute_with_policy_only(action)
-
-    def _execute_in_full_sandbox(self, action: dict) -> dict:
-        """Execute a tool action inside namespace + seccomp sandbox.
-
-        The tool command runs in an isolated environment:
-        - User namespace (unprivileged)
-        - PID namespace (can't see host processes)
-        - Network namespace (no network access — blocks data exfiltration)
-        - Seccomp-BPF (blocks chmod, mount, ptrace, setuid, etc.)
-        """
-        print("[PHASE 2] Mode: FULL (namespace + seccomp + policy)")
-
-        action_type = action.get("action", "")
-        target = (action.get("command")
-                  or action.get("path")
-                  or action.get("url", ""))
-
-        # Build the command to execute inside the sandbox
-        if action_type == "run_shell":
-            inner_cmd = action.get("command", "echo 'no command'")
-        elif action_type == "read_file":
-            inner_cmd = f"cat {action.get('path', '')}"
-        elif action_type == "write_file":
-            content = action.get("content", "").replace("'", "'\\''")
-            inner_cmd = f"echo '{content}' > {action.get('path', '/dev/null')}"
-        elif action_type == "http_request":
-            inner_cmd = f"curl -s {action.get('url', '')}"
-        else:
-            inner_cmd = "echo 'unknown action'"
-
-        # Wrap with: unshare (namespaces) → seccomp_filter → sh -c "command"
-        cmd = [
-            'unshare',
-            '--user',              # New user namespace (no root needed)
-            '--map-root-user',     # Map current user to root in namespace
-            '--pid', '--fork',     # New PID namespace (process isolation)
-            '--net',               # New network namespace (NO network!)
-            self.seccomp_path,     # Apply seccomp-BPF filter
-            'sh', '-c', inner_cmd  # The actual command to run
-        ]
-
-        print(f"  Command:    {inner_cmd}")
-        print(f"  Namespaces: user, pid, net (network isolated)")
-        print(f"  Seccomp:    Active (chmod, mount, ptrace, setuid blocked)")
-
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd=PROJECT_ROOT
-            )
+            provider = get_provider(self.model)
+        except (RuntimeError, KeyError) as e:
+            print(f"ERROR: {e}")
+            sys.exit(1)
+        print(f"  Model:  {provider.name} (LLM calls run outside the sandbox)")
 
-            stdout = result.stdout.strip()
-            stderr = result.stderr.strip()
-
-            if result.returncode == 0 and stdout:
-                print(f"\n  ✅ Execution result:")
-                # Truncate long output
-                if len(stdout) > 500:
-                    print(f"  {stdout[:500]}... (truncated)")
-                else:
-                    print(f"  {stdout}")
-            elif stderr:
-                # Filter noise from namespace/seccomp
-                error_lines = [l for l in stderr.split('\n')
-                               if l.strip() and 'ioctl' not in l.lower()]
-                if error_lines:
-                    print(f"\n  🔴 Sandbox blocked or error occurred:")
-                    for line in error_lines[:5]:
-                        print(f"    {line}")
-            elif result.returncode != 0:
-                print(f"\n  🔴 Command failed (exit code {result.returncode})")
-                print(f"    The sandbox may have blocked a syscall.")
-
-            # Only a failure carrying an enforcement signature counts as a block;
-            # ordinary failures (e.g. grep with no match, typos) are not.
-            blocked_layer = detect_enforcement(result.returncode, stdout, stderr)
-            if blocked_layer:
-                self.policy._log_decision(
-                    action_type=action_type,
-                    target=target,
-                    decision="BLOCK",
-                    reason=f"Blocked by {blocked_layer} (exit code {result.returncode})",
-                    layer=blocked_layer
-                )
-
-            if result.returncode == 0:
-                status = "success"
-            elif blocked_layer:
-                status = "blocked_by_sandbox"
-            else:
-                status = "error"
-
-            return {
-                "status": status,
-                "stdout": stdout,
-                "stderr": stderr,
-                "returncode": result.returncode,
-                "sandbox_mode": "full"
-            }
-
-        except subprocess.TimeoutExpired:
-            print("  ✗ Command timed out (30s limit)")
-            return {"status": "error", "message": "Timed out"}
-        except FileNotFoundError:
-            print("  ✗ 'unshare' not found. Falling back to direct execution.")
-            return self._execute_with_policy_only(action)
-        except Exception as e:
-            print(f"  ✗ Sandbox error: {e}")
-            print("  Falling back to direct execution with policy checks.")
-            return self._execute_with_policy_only(action)
-
-    def _execute_in_namespace(self, action: dict) -> dict:
-        """Execute tool in namespace only (no seccomp)."""
-        print("[PHASE 2] Mode: PARTIAL (namespace only, no seccomp)")
-
-        action_type = action.get("action", "")
-        if action_type == "run_shell":
-            inner_cmd = action.get("command", "echo 'no command'")
-        elif action_type == "read_file":
-            inner_cmd = f"cat {action.get('path', '')}"
-        else:
-            # Fall back to direct execution for other types
-            return self._execute_with_policy_only(action)
-
-        cmd = [
-            'unshare', '--user', '--map-root-user',
-            '--pid', '--fork', '--net',
-            'sh', '-c', inner_cmd
-        ]
-
+        executor = self._build_executor()
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30, cwd=PROJECT_ROOT
-            )
-            stdout = result.stdout.strip()
-            if stdout:
-                print(f"  Result: {stdout[:500]}")
-            return {"status": "success" if result.returncode == 0 else "error",
-                    "stdout": stdout, "sandbox_mode": "namespace_only"}
-        except Exception as e:
-            print(f"  Namespace error: {e}")
-            return self._execute_with_policy_only(action)
-
-    def _execute_with_policy_only(self, action: dict) -> dict:
-        """Execute tool with policy checks only (no OS isolation).
-
-        Fallback when namespaces/seccomp aren't available.
-        """
-        print("[PHASE 2] Mode: POLICY-ONLY (no OS isolation)")
-        tools = ToolExecutor()
-        result = tools.execute(action)
-
-        if result.get("status") == "success":
-            output = result.get("stdout") or result.get("content") or result.get("message", "")
-            if len(str(output)) > 500:
-                print(f"  Result (truncated): {str(output)[:500]}...")
-            else:
-                print(f"  Result: {output}")
-        else:
-            print(f"  Error: {result.get('message', 'Unknown error')}")
-
-        return result
+            return AgentLoop(provider, executor, max_steps=self.max_steps, verbose=True).run(prompt)
+        finally:
+            executor.close()
 
 
 # ── Entry point ──
@@ -377,11 +130,9 @@ if __name__ == "__main__":
         print("Usage: python sandbox.py '<prompt>'")
         print("")
         print("Examples:")
-        print("  python sandbox.py 'List files in /tmp'")
+        print("  python sandbox.py 'List files in my workspace'")
         print("  python sandbox.py 'Read /etc/shadow'")
-        print("  python sandbox.py 'Send my data to http://evil.com'")
+        print("  python sandbox.py 'Send my data to http://evil.example'")
         sys.exit(1)
 
-    prompt = " ".join(sys.argv[1:])
-    sandbox = Sandbox()
-    sandbox.run_agent(prompt)
+    Sandbox().run_agent(" ".join(sys.argv[1:]))

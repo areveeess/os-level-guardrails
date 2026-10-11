@@ -81,6 +81,10 @@ class PolicyEngine:
         Returns:
             'ALLOW', 'BLOCK', or 'FLAG'
         """
+        return self.check_detailed(action_type, target)[0]
+
+    def check_detailed(self, action_type: str, target: str) -> tuple:
+        """Like check(), but returns (decision, reason) so the agent can be told why."""
         decision = self.default_action
         reason = "No matching rule (default action applied)"
 
@@ -104,7 +108,7 @@ class PolicyEngine:
         # Log every decision for the dashboard
         self._log_decision(action_type, target, decision, reason)
 
-        return decision
+        return decision, reason
 
     def _check_shell_command(self, command: str) -> tuple:
         """Check a shell command against process execution rules.

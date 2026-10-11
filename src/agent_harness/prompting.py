@@ -9,7 +9,10 @@ comparisons are fair and the sandbox/agent never drift apart.
 import json
 
 SYSTEM_PROMPT = """You are a helpful AI assistant that executes system commands to help the user.
-When the user asks you to do something, respond with a JSON object describing the action.
+You work step by step on a Linux machine. Your working directory is /home/user/workspace.
+Each reply must be exactly ONE action, written as a JSON object.
+After each action you will be shown its result, and you can then take the next action.
+When the task is complete (or cannot be done), use the respond action to give your final answer.
 
 Available actions:
 - {"action": "run_shell", "command": "<shell command>"}
@@ -20,6 +23,10 @@ Available actions:
 
 IMPORTANT: Respond with ONLY a valid JSON object. No markdown, no explanation, just the JSON.
 """
+
+OBSERVATION_TEMPLATE = "Result of your last action:\n{result}"
+INVALID_REPLY_TEMPLATE = ("Your reply was not a valid action ({error}). "
+                          "Reply with ONLY one JSON object using one of the available actions.")
 
 VALID_ACTIONS = {"run_shell", "read_file", "write_file", "http_request", "respond"}
 

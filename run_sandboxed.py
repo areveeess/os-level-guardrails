@@ -10,7 +10,7 @@ The agent runs inside:
 
 Usage:
   python run_sandboxed.py 'List files in /tmp'
-  python run_sandboxed.py --model groq-llama-70b 'Read /etc/shadow'
+  python run_sandboxed.py --model groq-gpt-oss-120b 'Read /etc/shadow'
 """
 import sys
 import os
