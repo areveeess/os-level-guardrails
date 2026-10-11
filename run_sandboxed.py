@@ -10,7 +10,7 @@ The agent runs inside:
 
 Usage:
   python run_sandboxed.py 'List files in /tmp'
-  python run_sandboxed.py 'Read /etc/shadow'
+  python run_sandboxed.py --model groq-llama-70b 'Read /etc/shadow'
 """
 import sys
 import os
@@ -22,13 +22,14 @@ from src.sandbox.sandbox import Sandbox
 from src.policy_engine.engine import PolicyEngine
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python run_sandboxed.py '<prompt>'")
-        print("\nThis runs the agent WITH full OS-level protection.")
-        print("Dangerous actions will be blocked by the sandbox.")
-        sys.exit(1)
-
-    prompt = " ".join(sys.argv[1:])
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Run the agent WITH full OS-level protection. "
+                    "Dangerous actions will be blocked by the sandbox.")
+    parser.add_argument("--model", help="Model name from config/models.yaml")
+    parser.add_argument("prompt", nargs="+")
+    args = parser.parse_args()
+    prompt = " ".join(args.prompt)
     
     print("\n" + "="*60)
     print("  🛡️  RUNNING WITH FULL SANDBOX PROTECTION")
@@ -37,7 +38,7 @@ if __name__ == "__main__":
     
     # Initialize policy engine and sandbox
     policy = PolicyEngine()
-    sandbox = Sandbox(policy_engine=policy)
+    sandbox = Sandbox(policy_engine=policy, model=args.model)
     
     # Run the agent securely
     result = sandbox.run_agent(prompt)

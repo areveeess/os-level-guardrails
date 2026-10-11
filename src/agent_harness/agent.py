@@ -1,12 +1,13 @@
 """
 AI Agent Harness — The Untrusted Principal
 ============================================
-This module creates a tool-using AI agent powered by Google Gemini.
+This module creates a tool-using AI agent powered by any configured LLM
+(Gemini, Groq, Ollama, or the from-scratch model — see config/models.yaml).
 
 How it works:
   1. User gives a natural language prompt (e.g., 'List files in /tmp')
-  2. The agent sends this to the Gemini LLM
-  3. Gemini responds with a structured action (e.g., {'action': 'run_shell', 'command': 'ls /tmp'})
+  2. The agent sends this to the LLM
+  3. The LLM responds with a structured action (e.g., {'action': 'run_shell', 'command': 'ls /tmp'})
   4. The agent executes that action using ToolExecutor
   5. The result is returned
 
@@ -17,24 +18,12 @@ Why this is the 'untrusted principal':
 
 Usage:
   python agent.py 'List all files in /tmp'
-  python agent.py 'What is my username?'
+  python agent.py --model groq-llama-70b 'What is my username?'
 """
 
 import os
 import sys
-import json
 import datetime
-
-# ── Load API keys from .env file (if present) ────────────────────────────────
-# This lets you store GEMINI_API_KEY in a .env file instead of exporting it
-# manually every time. The .env file is in .gitignore so it stays secret.
-try:
-    from dotenv import load_dotenv
-    # Look for .env starting from this file, going up to project root
-    _PROJECT_ROOT_FOR_ENV = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-    load_dotenv(os.path.join(_PROJECT_ROOT_FOR_ENV, '.env'))
-except ImportError:
-    pass  # python-dotenv not installed yet; fall back to manual export
 
 # Add the project root to Python's import path so we can import sibling modules
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -42,69 +31,51 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from src.agent_harness.tools import ToolExecutor
-
-# Attempt to import the Gemini SDK
-try:
-    import google.generativeai as genai
-except ImportError:
-    print("ERROR: google-generativeai not installed.")
-    print("Fix:   pip install google-generativeai")
-    sys.exit(1)
-
-
-# The system prompt tells the LLM how to behave and what format to respond in.
-# It instructs the LLM to always return a JSON action object.
-SYSTEM_PROMPT = """You are a helpful AI assistant that executes system commands to help the user.
-When the user asks you to do something, respond with a JSON object describing the action.
-
-Available actions:
-- {"action": "run_shell", "command": "<shell command>"}
-- {"action": "read_file", "path": "<file path>"}
-- {"action": "write_file", "path": "<file path>", "content": "<content>"}
-- {"action": "http_request", "url": "<url>"}
-- {"action": "respond", "message": "<text response>"}
-
-IMPORTANT: Respond with ONLY a valid JSON object. No markdown, no explanation, just the JSON.
-"""
+from src.agent_harness.prompting import build_messages, parse_action, action_target, ActionParseError
+from src.llm import get_provider
 
 
 class AIAgent:
-    """A tool-using AI agent powered by Google Gemini.
+    """A tool-using AI agent powered by a pluggable LLM provider.
     
     Attributes:
-        model: The Gemini generative model instance.
+        provider: The LLMProvider that turns prompts into actions.
         tools: The ToolExecutor that actually runs system operations.
         policy_engine: Optional PolicyEngine for checking actions before execution.
     """
 
-    def __init__(self, policy_engine=None):
-        """Initialize the agent with Gemini API and optional policy engine.
+    def __init__(self, policy_engine=None, model: str = None, provider=None):
+        """Initialize the agent with an LLM provider and optional policy engine.
         
         Args:
             policy_engine: If provided, every action is checked against
                           the policy before execution. Pass None to run
                           without any restrictions (dangerous!).
+            model: Model name from config/models.yaml (default: its `default`).
+            provider: A ready-made LLMProvider (overrides `model`; used in tests).
         """
-        # Check for API key (loaded from .env file or environment)
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            print("ERROR: GEMINI_API_KEY not found.")
-            print("")
-            print("Option A — Use a .env file (recommended, stays secret):")
-            print("  1. Copy .env.example to .env")
-            print("  2. Open .env and paste your real key")
-            print("")
-            print("Option B — Export it manually (only lasts for this terminal session):")
-            print("  export GEMINI_API_KEY='your-key-here'")
-            print("")
-            print("Get a free key at: https://aistudio.google.com/apikey")
+        try:
+            self.provider = provider or get_provider(model)
+        except (RuntimeError, KeyError) as e:
+            print(f"ERROR: {e}")
+            print("Copy .env.example to .env and add the API key for this model.")
             sys.exit(1)
-
-        # Configure the Gemini SDK
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel("gemini-3.6-flash")
         self.tools = ToolExecutor()
         self.policy_engine = policy_engine
+
+    def propose_action(self, user_prompt: str) -> dict:
+        """Ask the LLM for an action. Returns the action dict, or an error result
+        dict with status 'error' (LLM failure or unparseable reply)."""
+        response = self.provider.generate(build_messages(user_prompt))
+        if not response.ok:
+            print(f"  ✗ LLM call failed: {response.error}")
+            return {"status": "error", "message": f"LLM error: {response.error}"}
+        print(f"  LLM says ({response.latency_ms:.0f} ms): {response.text}")
+        try:
+            return parse_action(response.text)
+        except ActionParseError as e:
+            print(f"  ✗ Could not parse LLM response: {e}")
+            return {"status": "error", "message": "Invalid LLM response", "raw": response.text}
 
     def run(self, user_prompt: str) -> dict:
         """Process a user prompt end-to-end: LLM → parse → check policy → execute.
@@ -123,40 +94,15 @@ class AIAgent:
         print(f"  Policy: {'ENABLED' if self.policy_engine else 'DISABLED (no sandbox)'}")
         print(f"{'='*60}")
 
-        # ── Step 1: Ask the LLM what action to take ──
-        print("\n[1] Consulting Gemini LLM...")
-        try:
-            response = self.model.generate_content(
-                f"{SYSTEM_PROMPT}\n\nUser request: {user_prompt}"
-            )
-            raw_text = response.text.strip()
-        except Exception as e:
-            print(f"  ✗ LLM call failed: {e}")
-            return {"status": "error", "message": f"LLM error: {e}"}
+        # ── Step 1 + 2: Ask the LLM what action to take, then parse it ──
+        print(f"\n[1] Consulting LLM ({self.provider.name})...")
+        action = self.propose_action(user_prompt)
+        if action.get("status") == "error":
+            return action
 
-        # Clean markdown code fences if the LLM wraps its response
-        if raw_text.startswith("```"):
-            lines = raw_text.split("\n")
-            # Remove first line (```json) and last line (```)
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            raw_text = "\n".join(lines).strip()
-
-        print(f"  LLM says: {raw_text}")
-
-        # ── Step 2: Parse the JSON action ──
-        print("\n[2] Parsing action...")
-        try:
-            action = json.loads(raw_text)
-        except json.JSONDecodeError:
-            print(f"  ✗ Could not parse LLM response as JSON")
-            return {"status": "error", "message": "Invalid LLM response", "raw": raw_text}
-
+        print("\n[2] Parsed action:")
         action_type = action.get("action", "unknown")
-        # Determine the 'target' based on the action type
-        target = (action.get("command")
-                  or action.get("path")
-                  or action.get("url")
-                  or action.get("message", ""))
+        target = action_target(action)
         print(f"  Action: {action_type}")
         print(f"  Target: {target}")
 
@@ -207,9 +153,14 @@ if __name__ == "__main__":
         print("Examples:")
         print("  python agent.py 'List all files in /tmp'")
         print("  python agent.py 'What is my username?'")
-        print("  python agent.py 'Read the file /etc/hostname'")
+        print("  python agent.py --model ollama-llama3.2-3b 'Read the file /etc/hostname'")
         sys.exit(1)
 
-    prompt = " ".join(sys.argv[1:])
-    agent = AIAgent()  # No policy engine = no restrictions!
+    import argparse
+    parser = argparse.ArgumentParser(description="Run the agent without protection")
+    parser.add_argument("--model", help="Model name from config/models.yaml")
+    parser.add_argument("prompt", nargs="+")
+    args = parser.parse_args()
+    agent = AIAgent(model=args.model)  # No policy engine = no restrictions!
+    prompt = " ".join(args.prompt)
     agent.run(prompt)

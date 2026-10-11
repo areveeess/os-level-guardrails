@@ -1,11 +1,8 @@
 # OS-Level Guardrails for Autonomous AI Agents
 # Install: pip install -r requirements.txt
 
-# LLM API (Google Gemini - free tier)
-google-generativeai>=0.8.0
-
-# Load API keys from .env file
-python-dotenv>=1.0.0
+# LLM access — one OpenAI-compatible client for Gemini, Groq, OpenRouter, Ollama
+openai>=1.40.0
 
 # Load API keys from .env file automatically (keeps secrets out of code)
 python-dotenv>=1.0.0
@@ -13,8 +10,14 @@ python-dotenv>=1.0.0
 # Dashboard web framework
 flask>=3.0.0
 
-# Policy file parsing
+# Policy / model config parsing
 pyyaml>=6.0
+
+# Benchmark charts
+matplotlib>=3.8.0
 
 # Testing
 pytest>=8.0.0
+
+# From-scratch model (Phase 4) — install the CUDA build separately:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124

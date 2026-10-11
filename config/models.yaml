@@ -1,0 +1,49 @@
+# ============================================================
+# Models available to the agent and the benchmark
+# ============================================================
+# Every hosted/local model is reached through the OpenAI-compatible
+# chat API; only base_url, api_key_env and model differ.
+#   provider: openai_compat | scratch
+#   benchmark: include in `run_benchmark.py --models all`
+# Model ids change over time; check the provider's model list if one 404s.
+# ============================================================
+
+default: gemini-flash
+
+models:
+  gemini-flash:
+    provider: openai_compat
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
+    model: gemini-3.6-flash
+    family: closed / large
+    benchmark: true
+
+  groq-llama-70b:
+    provider: openai_compat
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    model: llama-3.3-70b-versatile
+    family: open / large
+    benchmark: true
+
+  groq-llama-8b:
+    provider: openai_compat
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    model: llama-3.1-8b-instant
+    family: open / small
+    benchmark: true
+
+  ollama-llama3.2-3b:
+    provider: openai_compat
+    base_url: http://localhost:11434/v1
+    model: llama3.2:3b
+    family: open / small / local
+    benchmark: true
+
+  scratch-gpt:
+    provider: scratch
+    checkpoint: models/scratch/scratch_gpt.pt
+    family: from-scratch / unaligned baseline
+    benchmark: true

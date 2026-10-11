@@ -7,7 +7,7 @@ It combines THREE layers of defense in the correct order:
   ARCHITECTURE (Two-Phase Execution):
   ┌─────────────────────────────────────────────────────────┐
   │  PHASE 1: OUTSIDE SANDBOX (needs network for LLM)      │
-  │    1. Agent sends prompt to Gemini LLM                  │
+  │    1. Agent sends prompt to the configured LLM          │
   │    2. LLM responds with an action (e.g., "read file")   │
   │    3. Policy Engine checks action against access-matrix  │
   │    4. If BLOCKED → stop here, log, done                 │
@@ -22,7 +22,7 @@ It combines THREE layers of defense in the correct order:
   └─────────────────────────────────────────────────────────┘
 
   Why two phases?
-    The LLM call needs network access (to reach Gemini API).
+    The LLM call needs network access (to reach the model's API).
     But tool execution must be isolated (no network, no /etc/shadow).
     So we split: LLM call outside, tool execution inside.
 
@@ -52,7 +52,6 @@ Usage:
 import os
 import sys
 import subprocess
-import json
 import datetime
 
 # Add project root to path
@@ -61,6 +60,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from src.agent_harness.agent import AIAgent
+from src.agent_harness.prompting import action_target
 from src.agent_harness.tools import ToolExecutor
 from src.policy_engine.engine import PolicyEngine
 
@@ -111,14 +111,16 @@ class Sandbox:
       Phase 2 (inside sandbox):  Tool execution with namespace + seccomp
     """
 
-    def __init__(self, policy_engine: PolicyEngine = None):
+    def __init__(self, policy_engine: PolicyEngine = None, model: str = None):
         """Initialize the sandbox.
 
         Args:
             policy_engine: PolicyEngine instance for application-level checks.
                           If None, a default engine is created.
+            model: Model name from config/models.yaml (default: its `default`).
         """
         self.policy = policy_engine or PolicyEngine()
+        self.model = model
         self.seccomp_path = get_seccomp_filter_path()
         self.namespace_supported = is_linux()
         self.seccomp_available = os.path.isfile(self.seccomp_path)
@@ -153,49 +155,14 @@ class Sandbox:
         print(f"{'='*60}")
 
         # ── Phase 1: LLM Call (outside sandbox — needs network) ──
-        print("\n[PHASE 1] Consulting Gemini LLM (outside sandbox)...")
-        agent = AIAgent(policy_engine=self.policy)
-
-        try:
-            import google.generativeai as genai
-            response = agent.model.generate_content(
-                f"{agent.SYSTEM_PROMPT if hasattr(agent, 'SYSTEM_PROMPT') else ''}"
-                f"You are a helpful AI assistant that executes system commands.\n"
-                f"Respond with ONLY a JSON object.\n"
-                f"Available actions:\n"
-                f'- {{"action": "run_shell", "command": "<cmd>"}}\n'
-                f'- {{"action": "read_file", "path": "<path>"}}\n'
-                f'- {{"action": "write_file", "path": "<path>", "content": "<text>"}}\n'
-                f'- {{"action": "http_request", "url": "<url>"}}\n'
-                f'- {{"action": "respond", "message": "<text>"}}\n\n'
-                f"User request: {prompt}"
-            )
-            raw_text = response.text.strip()
-        except Exception as e:
-            print(f"  ✗ LLM call failed: {e}")
-            return {"status": "error", "message": f"LLM error: {e}"}
-
-        # Clean markdown code fences if present
-        if raw_text.startswith("```"):
-            lines = raw_text.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            raw_text = "\n".join(lines).strip()
-
-        print(f"  LLM response: {raw_text}")
-
-        # ── Parse the action ──
-        print("\n[PHASE 1] Parsing action...")
-        try:
-            action = json.loads(raw_text)
-        except json.JSONDecodeError:
-            print(f"  ✗ Could not parse LLM response as JSON")
-            return {"status": "error", "message": "Invalid LLM response", "raw": raw_text}
+        agent = AIAgent(policy_engine=self.policy, model=self.model)
+        print(f"\n[PHASE 1] Consulting LLM {agent.provider.name} (outside sandbox)...")
+        action = agent.propose_action(prompt)
+        if action.get("status") == "error":
+            return action
 
         action_type = action.get("action", "unknown")
-        target = (action.get("command")
-                  or action.get("path")
-                  or action.get("url")
-                  or action.get("message", ""))
+        target = action_target(action)
         print(f"  Action: {action_type}")
         print(f"  Target: {target}")
 
