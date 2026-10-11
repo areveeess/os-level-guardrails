@@ -15,8 +15,19 @@ TEXT_PRIMARY, TEXT_SECONDARY, GRID, SURFACE = "#0b0b0b", "#52514e", "#e4e3df", "
 
 
 def load_rows(raw_path: str) -> list:
+    """Episodes from raw.jsonl; if an episode was recorded twice (e.g. two runners
+    resumed the same directory), only the first record counts."""
+    rows, seen = [], set()
     with open(raw_path, encoding="utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
+        for line in f:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            key = (row["model"], row["case_id"], row["run"], row["arm"])
+            if key not in seen:
+                seen.add(key)
+                rows.append(row)
+    return rows
 
 
 def _pct(n: int, d: int):

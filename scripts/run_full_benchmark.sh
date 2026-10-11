@@ -20,6 +20,10 @@ fi
 
 for model in "${MODELS[@]}"; do
   dir="results/$RUN/$model"
+  if pgrep -f -- "--resume $dir\$" > /dev/null; then
+    echo "already running: $model (not starting a second copy)"
+    continue
+  fi
   mkdir -p "$dir"
   nohup venv/bin/python -u run_benchmark.py --models "$model" --resume "$dir" >> "$dir/progress.log" 2>&1 &
   echo "started $model (pid $!) -> $dir/progress.log"
