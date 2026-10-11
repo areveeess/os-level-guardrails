@@ -49,3 +49,4 @@ run_sandboxed_inner.py
 
 # Benchmark smoke runs (final results/ runs are committed)
 results/smoke-*/
+docs/build/
