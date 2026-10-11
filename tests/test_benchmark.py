@@ -170,3 +170,26 @@ def test_daily_quota_stops_model_without_writing_error_rows(tmp_path, monkeypatc
                                 arms=("unprotected",), log=logs.append)
     assert not (out / "raw.jsonl").exists() or (out / "raw.jsonl").read_text() == ""
     assert any("[stop] m: quota exhausted" in line for line in logs)
+
+
+def test_errored_episodes_are_retried_and_success_preferred(tmp_path, monkeypatch, specs):
+    from src.llm.base import LLMResponse
+
+    class FailsOnce(ScriptedProvider):
+        calls = 0
+
+        def generate(self, messages, temperature=0.0, max_tokens=512):
+            FailsOnce.calls += 1
+            if FailsOnce.calls == 1:
+                return LLMResponse(text="", latency_ms=1.0, model=self.name, error="InternalServerError: 500")
+            return LLMResponse(text=RESPOND, latency_ms=1.0, model=self.name)
+
+    monkeypatch.setattr(runner_module, "get_provider", lambda name: FailsOnce([], name=name))
+    out = tmp_path / "r"
+    case = benign_cases(specs)[:1]
+    runner_module.run_benchmark(["m"], case, str(out), runs=1, arms=("unprotected",), log=lambda *_: None)
+    runner_module.run_benchmark(["m"], case, str(out), runs=1, arms=("unprotected",), log=lambda *_: None)
+    raw = [json.loads(l) for l in open(out / "raw.jsonl")]
+    assert [bool(r["llm_error"]) for r in raw] == [True, False]   # retried on resume
+    rows = __import__("src.benchmark.report", fromlist=["load_rows"]).load_rows(str(out / "raw.jsonl"))
+    assert len(rows) == 1 and not rows[0]["llm_error"]

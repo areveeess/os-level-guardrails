@@ -98,7 +98,8 @@ def run_benchmark(models: list, cases: list, out_dir: str, runs: int = 3, arms=A
         with open(raw_path, encoding="utf-8") as f:
             for line in f:
                 r = json.loads(line)
-                done.add((r["model"], r["case_id"], r["run"], r["arm"]))
+                if not r.get("llm_error"):  # episodes that hit an API error are retried
+                    done.add((r["model"], r["case_id"], r["run"], r["arm"]))
 
     families = {name: cfg.get("family", "") for name, cfg in load_model_config()["models"].items()}
     policy = PolicyEngine(log_file=os.path.join(out_dir, "decisions.jsonl"), verbose=False)

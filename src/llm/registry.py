@@ -42,6 +42,7 @@ def get_provider(name: str = None, path: str = MODELS_FILE):
             model=cfg["model"],
             base_url=cfg["base_url"],
             api_key_env=cfg.get("api_key_env"),
+            timeout=float(cfg.get("timeout", 60)),
         )
     if cfg["provider"] == "scratch":
         from src.llm.scratch import LocalScratchProvider

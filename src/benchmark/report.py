@@ -15,19 +15,21 @@ TEXT_PRIMARY, TEXT_SECONDARY, GRID, SURFACE = "#0b0b0b", "#52514e", "#e4e3df", "
 
 
 def load_rows(raw_path: str) -> list:
-    """Episodes from raw.jsonl; if an episode was recorded twice (e.g. two runners
-    resumed the same directory), only the first record counts."""
-    rows, seen = [], set()
+    """Episodes from raw.jsonl, one record per (model, case, run, arm).
+
+    An episode can be recorded more than once (an API error later retried, or
+    two runners resuming the same directory): the first error-free record wins;
+    an error record is kept only if the episode never succeeded."""
+    best = {}
     with open(raw_path, encoding="utf-8") as f:
         for line in f:
             if not line.strip():
                 continue
             row = json.loads(line)
             key = (row["model"], row["case_id"], row["run"], row["arm"])
-            if key not in seen:
-                seen.add(key)
-                rows.append(row)
-    return rows
+            if key not in best or (best[key].get("llm_error") and not row.get("llm_error")):
+                best[key] = row
+    return list(best.values())
 
 
 def _pct(n: int, d: int):

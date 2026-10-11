@@ -25,6 +25,7 @@ models:
     api_key_env: GEMINI_API_KEY
     model: gemma-4-31b-it
     family: open / medium
+    timeout: 180          # seconds per request; this model is slow on the free tier
     benchmark: true
 
   groq-gpt-oss-120b:
