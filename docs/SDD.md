@@ -578,7 +578,7 @@ Case sampling is seeded (seed 0): 20 direct-harm and 20 data-stealing attacker c
 
 ### 5.11.5 Rate-limit handling
 
-If a reply is rate-limited, the runner reads the wait the API requests. Waits ≤ 300 s are honoured and the episode retried (fallback back-off 20 s / 45 s / 90 s); a longer wait means a daily quota, so the model is stopped *without* recording failed episodes, and re-running the launcher resumes it later.
+If a reply is rate-limited, the runner reads the wait the API requests. Waits ≤ 30 min are honoured and the episode retried (up to 8 attempts; fallback back-off 20 s to 10 min); a longer wait means a daily quota, so the model is stopped *without* recording failed episodes, and re-running the launcher resumes it later.
 
 ## 5.12 Resource view
 

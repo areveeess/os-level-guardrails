@@ -27,8 +27,8 @@ from src.llm.registry import load_model_config
 from src.policy_engine.engine import PolicyEngine
 
 ARMS = ("unprotected", "protected")
-RATE_LIMIT_BACKOFF_S = (20, 45, 90)
-MAX_WAIT_S = 300  # longer requested waits mean a daily quota: stop the model, resume later
+RATE_LIMIT_BACKOFF_S = (20, 45, 90, 180, 300, 600, 600, 600)
+MAX_WAIT_S = 1800  # longer requested waits mean a daily quota: stop the model, resume later
 
 
 def build_executor(arm: str, case: BenchmarkCase, canary: str, policy: PolicyEngine) -> ToolBroker:
