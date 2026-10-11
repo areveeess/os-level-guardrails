@@ -193,7 +193,12 @@ def generate_report(out_dir: str, charts: bool = True, sources: list = None) -> 
     os.makedirs(out_dir, exist_ok=True)
     rows = []
     for src in sources or [out_dir]:
-        rows += load_rows(os.path.join(src, "raw.jsonl"))
+        raw = os.path.join(src, "raw.jsonl")
+        if os.path.exists(raw):  # a model may have been skipped (no key / no checkpoint)
+            rows += load_rows(raw)
+    if not rows:
+        print(f"No benchmark results found in {', '.join(sources or [out_dir])}")
+        return []
     summary = summarize(rows)
     breakdown = kind_breakdown(rows)
     with open(os.path.join(out_dir, "summary.csv"), "w", newline="", encoding="utf-8") as f:

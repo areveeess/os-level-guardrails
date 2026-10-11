@@ -21,6 +21,6 @@ fi
 for model in "${MODELS[@]}"; do
   dir="results/$RUN/$model"
   mkdir -p "$dir"
-  nohup venv/bin/python run_benchmark.py --models "$model" --resume "$dir" >> "$dir/progress.log" 2>&1 &
+  nohup venv/bin/python -u run_benchmark.py --models "$model" --resume "$dir" >> "$dir/progress.log" 2>&1 &
   echo "started $model (pid $!) -> $dir/progress.log"
 done
