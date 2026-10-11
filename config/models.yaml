@@ -8,15 +8,15 @@
 # Model ids change over time; check the provider's model list if one 404s.
 # ============================================================
 
-default: gemini-flash
+default: gemini-flash-lite
 
 models:
-  gemini-flash:
+  gemini-flash-lite:
     provider: openai_compat
     base_url: https://generativelanguage.googleapis.com/v1beta/openai/
     api_key_env: GEMINI_API_KEY
-    model: gemini-3.6-flash
-    family: closed / large
+    model: gemini-3.5-flash-lite
+    family: closed / small-fast
     benchmark: true
 
   gemma-4-31b:

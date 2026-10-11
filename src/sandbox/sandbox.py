@@ -43,7 +43,7 @@ It combines THREE layers of defense in the correct order:
 
 Usage:
   from src.sandbox.sandbox import Sandbox
-  Sandbox(model='gemini-flash').run_agent('List files in my workspace')
+  Sandbox(model='gemini-flash-lite').run_agent('List files in my workspace')
 """
 
 import datetime

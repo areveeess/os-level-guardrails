@@ -47,11 +47,14 @@ class PolicyEngine:
         decision = engine.check('run_shell', 'ls /tmp')       # returns 'ALLOW'
     """
 
-    def __init__(self, policy_path: str = None):
+    def __init__(self, policy_path: str = None, log_file: str = None, verbose: bool = True):
         """Load the policy YAML file.
         
         Args:
             policy_path: Path to a YAML policy file. Uses default if None.
+            log_file: Decision log (JSON Lines). Defaults to logs/guardrails.jsonl,
+                      which the dashboard reads; the benchmark uses its own.
+            verbose: Print a summary when the policy is loaded.
         """
         policy_path = policy_path or DEFAULT_POLICY
         
@@ -65,10 +68,16 @@ class PolicyEngine:
         self.default_action = self.policy.get('default_action', 'FLAG')
         
         # Ensure the log directory exists
-        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-        
-        print(f"[POLICY ENGINE] Loaded policy from: {os.path.basename(policy_path)}")
-        print(f"[POLICY ENGINE] Default action: {self.default_action}")
+        self.log_file = log_file
+        os.makedirs(os.path.dirname(self._log_path()), exist_ok=True)
+
+        if verbose:
+            print(f"[POLICY ENGINE] Loaded policy from: {os.path.basename(policy_path)}")
+            print(f"[POLICY ENGINE] Default action: {self.default_action}")
+
+    def _log_path(self) -> str:
+        # Resolved at call time so tests can redirect the module-level default
+        return self.log_file or LOG_FILE
 
     def check(self, action_type: str, target: str) -> str:
         """Check if an action is allowed by the policy.
@@ -217,7 +226,7 @@ class PolicyEngine:
         }
         
         try:
-            with open(LOG_FILE, 'a') as f:
+            with open(self._log_path(), 'a') as f:
                 f.write(json.dumps(entry) + '\n')
         except Exception as e:
             print(f"  Warning: Could not write to log file: {e}")

@@ -39,6 +39,11 @@ class OpenAICompatibleProvider(LLMProvider):
                 max_tokens=max_tokens,
             )
         except Exception as e:
+            # Some servers (e.g. Groq) reject output they can't validate but return what
+            # the model generated; that text is the model's real reply, so score it.
+            failed = _failed_generation(e)
+            if failed is not None:
+                return LLMResponse(text=failed.strip(), latency_ms=_elapsed_ms(start), model=self.name)
             return LLMResponse(text="", latency_ms=_elapsed_ms(start), model=self.name,
                                error=f"{type(e).__name__}: {e}")
 
@@ -51,6 +56,16 @@ class OpenAICompatibleProvider(LLMProvider):
             prompt_tokens=getattr(usage, "prompt_tokens", None),
             completion_tokens=getattr(usage, "completion_tokens", None),
         )
+
+
+def _failed_generation(exc: Exception):
+    """The model's raw output from a 400 'tool_use_failed' / 'output_parse_failed' error, if any."""
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error", body)
+        if isinstance(err, dict) and err.get("failed_generation") is not None:
+            return str(err["failed_generation"])
+    return None
 
 
 def _elapsed_ms(start: float) -> float:

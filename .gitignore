@@ -46,3 +46,6 @@ skills-lock.json
 
 # ── Temporary sandbox inner scripts ──────────────────────────
 run_sandboxed_inner.py
+
+# Benchmark smoke runs (final results/ runs are committed)
+results/smoke-*/

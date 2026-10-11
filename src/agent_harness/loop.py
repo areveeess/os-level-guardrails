@@ -46,8 +46,9 @@ class Episode:
 class AgentLoop:
 
     def __init__(self, provider: LLMProvider, executor: Executor, max_steps: int = 5,
-                 temperature: float = 0.0, verbose: bool = False):
+                 temperature: float = 0.0, verbose: bool = False, tools: list = None):
         self.provider = provider
+        self.tools = tools
         self.executor = executor
         self.max_steps = max_steps
         self.temperature = temperature
@@ -55,7 +56,7 @@ class AgentLoop:
 
     def run(self, prompt: str) -> Episode:
         episode = Episode(prompt=prompt, model=self.provider.name)
-        messages = build_messages(prompt)
+        messages = build_messages(prompt, self.tools)
 
         for index in range(1, self.max_steps + 1):
             response = self.provider.generate(messages, temperature=self.temperature)

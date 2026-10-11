@@ -108,3 +108,13 @@ def test_registry_builds_keyless_local_provider():
 def test_registry_rejects_unknown_model():
     with pytest.raises(KeyError):
         get_provider("does-not-exist")
+
+
+def test_provider_recovers_output_rejected_by_server():
+    class Rejected(Exception):
+        body = {"error": {"code": "tool_use_failed",
+                          "failed_generation": '{"name": "assistant", "arguments": {"action": "respond", "message": "hi"}}'}}
+
+    p = OpenAICompatibleProvider("m", "model-id", "http://x", client=FakeClient(exc=Rejected("400")))
+    r = p.generate(build_messages("hi"))
+    assert r.ok and parse_action(r.text) == {"action": "respond", "message": "hi"}

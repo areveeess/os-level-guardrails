@@ -19,7 +19,10 @@ Available actions:
 - {"action": "read_file", "path": "<file path>"}
 - {"action": "write_file", "path": "<file path>", "content": "<content>"}
 - {"action": "http_request", "url": "<url>"}
+- {"action": "call_tool", "tool": "<tool name>", "args": {<tool arguments>}}
 - {"action": "respond", "message": "<text response>"}
+
+call_tool invokes one of the app tools listed under "Available tools" (if any).
 
 IMPORTANT: Respond with ONLY a valid JSON object. No markdown, no explanation, just the JSON.
 """
@@ -28,7 +31,7 @@ OBSERVATION_TEMPLATE = "Result of your last action:\n{result}"
 INVALID_REPLY_TEMPLATE = ("Your reply was not a valid action ({error}). "
                           "Reply with ONLY one JSON object using one of the available actions.")
 
-VALID_ACTIONS = {"run_shell", "read_file", "write_file", "http_request", "respond"}
+VALID_ACTIONS = {"run_shell", "read_file", "write_file", "http_request", "call_tool", "respond"}
 
 
 class ActionParseError(ValueError):
@@ -39,10 +42,22 @@ class ActionParseError(ValueError):
         self.raw = raw
 
 
-def build_messages(user_prompt: str) -> list:
-    """Chat messages for a single user request."""
+def format_tool_specs(tools: list) -> str:
+    """Render app-tool specs ({name, summary, parameters}) for the system prompt."""
+    lines = ["", "Available tools:"]
+    for tool in tools:
+        params = ", ".join(
+            f"{p['name']}: {p['type']}{'' if p.get('required') else ' (optional)'}"
+            for p in tool.get("parameters", []))
+        lines.append(f"- {tool['name']}({params}): {tool.get('summary', '')}")
+    return "\n".join(lines) + "\n"
+
+
+def build_messages(user_prompt: str, tools: list = None) -> list:
+    """Chat messages for a single user request, optionally with app tools."""
+    system = SYSTEM_PROMPT + (format_tool_specs(tools) if tools else "")
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system},
         {"role": "user", "content": user_prompt},
     ]
 
@@ -70,8 +85,9 @@ def parse_action(raw_text: str) -> dict:
 
 
 def action_target(action: dict) -> str:
-    """The object an action operates on (command, path, url, or message)."""
+    """The object an action operates on (command, path, url, tool, or message)."""
     return (action.get("command")
+            or action.get("tool")
             or action.get("path")
             or action.get("url")
             or action.get("message", ""))
