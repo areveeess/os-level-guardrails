@@ -16,7 +16,9 @@ from src.benchmark import runner as runner_module
 from src.benchmark.injecagent import benign_cases, load_tool_specs
 from src.benchmark.report import generate_report
 from src.llm.base import LLMProvider, LLMResponse
+from src.llm.openai_compat import OpenAICompatibleProvider
 from src.policy_engine.engine import PolicyEngine
+from tests.test_llm_layer import FakeClient
 
 RESPOND = '{"action": "respond", "message": "done"}'
 MODEL = "ollama-llama3.2-3b"       # in config/models.yaml: provider openai_compat, model llama3.2:3b
@@ -145,3 +147,75 @@ def test_report_marks_records_without_stamps_as_unstamped(tmp_path, monkeypatch,
     generate_report(str(out), charts=False)
     section = (out / "summary.md").read_text(encoding="utf-8").split("## Provenance and data quality", 1)[1]
     assert "unstamped (recorded before EVAL-06)" in section
+
+
+# ── Hosted provider through the runner ──
+
+def test_openai_compatible_provider_stamps_rows_end_to_end(tmp_path, monkeypatch, specs):
+    client = FakeClient(reply=RESPOND, model="gpt-oss-120b-2026-09", finish_reason="stop")
+    _, rows = run_one(tmp_path, monkeypatch, specs,
+                      lambda case: OpenAICompatibleProvider(MODEL, "llama3.2:3b", "http://x", client=client))
+    row = rows[0]
+    assert row["resolved_model"] == "gpt-oss-120b-2026-09"
+    assert row["finish_reasons"] == ["stop"] * row["steps"]
+    assert row["prompt_tokens"] == [10] * row["steps"]
+
+
+# ── Provenance table: truncation, filtering, mixed provenance ──
+
+def provenance_table(md: str) -> dict:
+    """{model: {column: cell}} parsed from the provenance section's table."""
+    lines = [l for l in md.split("## Provenance and data quality", 1)[1].splitlines() if l.startswith("|")]
+    header = [c.strip() for c in lines[0].strip("|").split("|")]
+    return {cells[0]: dict(zip(header, cells))
+            for cells in ([c.strip() for c in l.strip("|").split("|")] for l in lines[2:])}
+
+
+def report_for(tmp_path, row_edits, specs, monkeypatch):
+    """Report on a hand-written raw.jsonl: the real stamped row, copied once per edit."""
+    _, rows = run_one(tmp_path, monkeypatch, specs, lambda case: StampedProvider(case.user_tool), name="base")
+    out = tmp_path / "hand"
+    out.mkdir()
+    with open(out / "raw.jsonl", "w", encoding="utf-8") as f:
+        for i, edit in enumerate(row_edits):
+            f.write(json.dumps(dict(rows[0], case_id=f"case-{i}", **edit)) + "\n")
+    generate_report(str(out), charts=False)
+    return provenance_table((out / "summary.md").read_text(encoding="utf-8"))
+
+
+def test_provenance_counts_length_and_content_filter_stops_and_max_prompt_tokens(tmp_path, monkeypatch, specs):
+    table = report_for(tmp_path, [
+        {"finish_reasons": ["length", "stop"], "prompt_tokens": [100, 4096]},
+        {"finish_reasons": ["length", "content_filter"], "prompt_tokens": [200, None]},
+    ], specs, monkeypatch)[MODEL]
+    assert table["Length stops"] == "2" and table["Content-filter stops"] == "1"
+    assert table["Max prompt_tokens"] == "4096"
+
+
+def test_provenance_reports_prompt_tokens_not_reported(tmp_path, monkeypatch, specs):
+    table = report_for(tmp_path, [{"finish_reasons": [None], "prompt_tokens": [None]}], specs, monkeypatch)[MODEL]
+    assert table["Max prompt_tokens"] == "not reported" and table["Length stops"] == "0"
+
+
+def test_provenance_marks_mixed_commits_and_policy_hashes(tmp_path, monkeypatch, specs):
+    table = report_for(tmp_path, [
+        {"code_commit": "a" * 40, "policy_sha256": "1" * 64},
+        {"code_commit": "b" * 40, "policy_sha256": "2" * 64},
+    ], specs, monkeypatch)[MODEL]
+    assert table["Code commit(s)"].startswith("MIXED") and "aaaaaaaa" in table["Code commit(s)"]
+    assert table["Policy hash(es)"].startswith("MIXED") and "222222222222" in table["Policy hash(es)"]
+
+
+def test_provenance_single_commit_is_not_mixed(tmp_path, monkeypatch, specs):
+    table = report_for(tmp_path, [{}, {}], specs, monkeypatch)[MODEL]
+    assert "MIXED" not in table["Code commit(s)"] and "MIXED" not in table["Policy hash(es)"]
+
+
+def test_provenance_escapes_model_supplied_ids(tmp_path, monkeypatch, specs):
+    _, rows = run_one(tmp_path, monkeypatch, specs,
+                      lambda case: StampedProvider(case.user_tool, resolved_model="evil|model\nsecond-line"),
+                      name="evil")
+    out = tmp_path / "evil"
+    generate_report(str(out), charts=False)
+    section = (out / "summary.md").read_text(encoding="utf-8").split("## Provenance and data quality", 1)[1]
+    assert "evil\\|model second-line" in section

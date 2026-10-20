@@ -55,19 +55,24 @@ def test_action_target_and_messages():
 # ── OpenAICompatibleProvider with a fake client ──
 
 class FakeClient:
-    def __init__(self, reply=None, exc=None):
+    def __init__(self, reply=None, exc=None, model=None, finish_reason=None):
         self.calls = []
         self._reply, self._exc = reply, exc
+        self._model, self._finish_reason = model, finish_reason
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     def _create(self, **kwargs):
         self.calls.append(kwargs)
         if self._exc:
             raise self._exc
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=self._reply))],
-            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
-        )
+        choice = SimpleNamespace(message=SimpleNamespace(content=self._reply))
+        response = SimpleNamespace(choices=[choice], usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5))
+        # Only set when asked, so the default keeps the shape of a server that reports neither
+        if self._finish_reason is not None:
+            choice.finish_reason = self._finish_reason
+        if self._model is not None:
+            response.model = self._model
+        return response
 
 
 def test_provider_returns_text_and_usage():
@@ -118,3 +123,27 @@ def test_provider_recovers_output_rejected_by_server():
     p = OpenAICompatibleProvider("m", "model-id", "http://x", client=FakeClient(exc=Rejected("400")))
     r = p.generate(build_messages("hi"))
     assert r.ok and parse_action(r.text) == {"action": "respond", "message": "hi"}
+
+
+# ── finish_reason and resolved model id (EVAL-06) ──
+
+def test_provider_reports_finish_reason_and_resolved_model():
+    client = FakeClient(reply="partial", model="gpt-oss-120b-2026-09", finish_reason="length")
+    r = OpenAICompatibleProvider("m", "gpt-oss-120b", "http://x", client=client).generate(build_messages("hi"))
+    assert r.finish_reason == "length" and r.resolved_model == "gpt-oss-120b-2026-09"
+
+
+def test_provider_without_model_or_finish_reason_leaves_them_none():
+    r = OpenAICompatibleProvider("m", "model-id", "http://x", client=FakeClient(reply="hi")).generate(
+        build_messages("hi"))
+    assert r.ok and r.finish_reason is None and r.resolved_model is None
+
+
+def test_recovered_generation_is_tagged_as_recovered_from_error():
+    class Rejected(Exception):
+        body = {"error": {"code": "tool_use_failed",
+                          "failed_generation": '{"action": "respond", "message": "hi"}'}}
+
+    r = OpenAICompatibleProvider("m", "model-id", "http://x", client=FakeClient(exc=Rejected("400"))).generate(
+        build_messages("hi"))
+    assert r.ok and r.finish_reason == "recovered_from_error"

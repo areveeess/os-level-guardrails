@@ -43,18 +43,24 @@ class OpenAICompatibleProvider(LLMProvider):
             # the model generated; that text is the model's real reply, so score it.
             failed = _failed_generation(e)
             if failed is not None:
-                return LLMResponse(text=failed.strip(), latency_ms=_elapsed_ms(start), model=self.name)
+                return LLMResponse(text=failed.strip(), latency_ms=_elapsed_ms(start), model=self.name,
+                                   finish_reason="recovered_from_error")
             return LLMResponse(text="", latency_ms=_elapsed_ms(start), model=self.name,
                                error=f"{type(e).__name__}: {e}")
 
         text = (resp.choices[0].message.content or "") if resp.choices else ""
         usage = getattr(resp, "usage", None)
+        # Stop reason and the model id the server actually answered with; a server that
+        # reports neither leaves them None.
+        finish_reason = getattr(resp.choices[0], "finish_reason", None) if resp.choices else None
         return LLMResponse(
             text=text.strip(),
             latency_ms=_elapsed_ms(start),
             model=self.name,
             prompt_tokens=getattr(usage, "prompt_tokens", None),
             completion_tokens=getattr(usage, "completion_tokens", None),
+            finish_reason=finish_reason,
+            resolved_model=getattr(resp, "model", None),
         )
 
 

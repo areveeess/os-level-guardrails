@@ -203,33 +203,52 @@ def provenance_summary(rows: list) -> list:
             "policy_hashes": _distinct((r.get("policy_sha256") or "")[:12] or None for r in stamped),
             "resolved_models": _distinct(r.get("resolved_model") for r in stamped),
             "config_models": _distinct(r.get("config_model") for r in stamped),
+            # Step-level counts over stamped rows only; unstamped rows have no step lists
+            "length_stops": sum((r.get("finish_reasons") or []).count("length") for r in stamped),
+            "content_filter_stops": sum((r.get("finish_reasons") or []).count("content_filter") for r in stamped),
+            "max_prompt_tokens": max((t for r in stamped for t in (r.get("prompt_tokens") or [])
+                                      if isinstance(t, int)), default=None),
         })
     return out
+
+
+def _mixed(values: list) -> str:
+    """Comma-joined values, led by MIXED when a model's stamped rows disagree (a resumed
+    run that crossed a code or policy change must not read as one clean run)."""
+    return ("MIXED " if len(values) > 1 else "") + ", ".join(values)
 
 
 def _provenance_row(p: dict) -> list:
     if not p["stamped"]:
         commits, dirty = "unstamped (recorded before EVAL-06)", "—"
     else:
-        commits = ", ".join(p["commits"])
+        commits = _mixed(p["commits"])
         if p["unstamped"]:
             commits += f", unstamped ({p['unstamped']})"
         dirty = "yes" if any(d is True for d in p["dirty"]) else ("no" if all(d is False for d in p["dirty"])
                                                                    else "unknown")
     return [_cell(p["model"]), _cell(commits), dirty,
-            _cell(", ".join(p["policy_hashes"]) or "unstamped"),
+            _cell(_mixed(p["policy_hashes"]) or "unstamped"),
             _cell(", ".join(p["resolved_models"]) or "not reported"),
-            _cell(", ".join(p["config_models"]) or "—")]
+            _cell(", ".join(p["config_models"]) or "—"),
+            str(p["length_stops"]) if p["stamped"] else "—",
+            str(p["content_filter_stops"]) if p["stamped"] else "—",
+            "not reported" if p["max_prompt_tokens"] is None else str(p["max_prompt_tokens"])]
 
 
 def _provenance_lines(provenance: list) -> list:
-    header = ["Model", "Code commit(s)", "Dirty tree", "Policy hash(es)", "Resolved model id(s)", "Config model"]
+    header = ["Model", "Code commit(s)", "Dirty tree", "Policy hash(es)", "Resolved model id(s)", "Config model",
+              "Length stops", "Content-filter stops", "Max prompt_tokens"]
     lines = ["", "## Provenance and data quality", "",
              "Each episode record is stamped with the code commit and policy-file hash it was produced",
              "under and the model id the provider reported. Records written before these stamps existed",
              "are shown as *unstamped*.", "",
              "| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     lines += ["| " + " | ".join(_provenance_row(p)) + " |" for p in provenance]
+    lines += ["", "A *length stop* means the reply was cut off by the token cap, so the action may be",
+              "incomplete. If a model's `prompt_tokens` plateaus at its context size, the prompt itself was",
+              "truncated by the server and the model never saw the whole conversation. Counts are steps,",
+              "over stamped records only."]
     return lines
 
 
