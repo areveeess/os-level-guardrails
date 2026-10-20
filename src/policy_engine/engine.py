@@ -24,9 +24,10 @@ import sys
 import json
 import fnmatch
 import datetime
-import shlex
 
 import yaml
+
+from src.policy_engine.shell_split import parse_shell, ShellParseError
 
 # Project root for resolving relative paths
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -121,32 +122,58 @@ class PolicyEngine:
 
     def _check_shell_command(self, command: str) -> tuple:
         """Check a shell command against process execution rules.
-        
-        Extracts the base command (first word) and checks it against
-        the allow/block lists in the policy.
+
+        The executor hands the whole string to /bin/sh, so the policy must see
+        every simple command the shell would run, not just the first word.
+        parse_shell() splits the string; each piece is checked on its own and
+        the first BLOCK wins. Input that cannot be parsed is refused.
         """
-        process_rules = self.policy.get('process', {})
-        
-        # Extract the base command (first word)
-        # e.g., 'ls -la /tmp' → 'ls'
-        # e.g., 'curl http://evil.com' → 'curl'
         try:
-            tokens = shlex.split(command)
-            base_cmd = os.path.basename(tokens[0]) if tokens else ""
-        except ValueError:
-            # shlex can fail on malformed strings
-            base_cmd = command.split()[0] if command.split() else ""
+            commands = parse_shell(command)
+        except ShellParseError as e:
+            return ('BLOCK', f"Unparseable shell command (fail closed): {e}")
+
+        if not commands:
+            return (self.default_action, "Command '' has no matching rule")
+
+        results = [(cmd, self._check_simple_command(cmd)) for cmd in commands]
+
+        for cmd, (decision, reason) in results:
+            if decision == 'BLOCK':
+                if len(commands) == 1:
+                    return ('BLOCK', reason)
+                return ('BLOCK', f"Sub-command '{cmd.text}' blocked: {reason}")
+
+        for cmd, (decision, reason) in results:
+            if decision != 'ALLOW':
+                if len(commands) == 1:
+                    return (decision, reason)
+                return (decision, f"Sub-command '{cmd.text}': {reason}")
+
+        if len(commands) == 1:
+            return results[0][1]
+        return ('ALLOW', f"All {len(commands)} sub-commands are in the allow list")
+
+    def _check_simple_command(self, cmd) -> tuple:
+        """Check one simple command (already split out of any chain)."""
+        process_rules = self.policy.get('process', {})
+        argv = cmd.argv
+        if not argv:
+            return ('ALLOW', 'No command to run')
+
+        base_cmd = os.path.basename(argv[0])
+        full = ' '.join(argv)
 
         # Check block list first (security: deny takes priority)
         for blocked in process_rules.get('block', []):
-            if base_cmd == blocked or command.startswith(blocked):
+            if base_cmd == blocked or full.startswith(blocked):
                 return ('BLOCK', f"Command '{base_cmd}' is in the block list")
 
         # Check allow list
         for allowed in process_rules.get('allow', []):
             if base_cmd == allowed:
                 # Additionally check if the command targets a blocked file
-                fs_decision, fs_reason = self._check_command_file_args(tokens)
+                fs_decision, fs_reason = self._check_command_file_args(argv)
                 if fs_decision == 'BLOCK':
                     return ('BLOCK', fs_reason)
                 return ('ALLOW', f"Command '{base_cmd}' is in the allow list")
