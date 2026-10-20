@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 current_phase: 1
 current_phase_name: Evaluation Hardening & Policy Fix
-status: executing
-stopped_at: Completed 01-03-PLAN.md
-last_updated: "2026-10-20T18:40:17.733Z"
+status: verifying
+stopped_at: Completed 01-04-PLAN.md
+last_updated: "2026-10-20T18:57:23.989Z"
 last_activity: 2026-10-20
 last_activity_desc: Phase 1 execution started
-state_head: 1de7488afe86dffa33130f990d7b22700c18df17
+state_head: 230224e931307d642576f19d9df8ef6a5ce8dce6
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 4
-  completed_plans: 3
+  completed_plans: 4
   percent: 0
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-10-20)
 
 Phase: 1 (Evaluation Hardening & Policy Fix) — EXECUTING
 Plan: 4 of 4
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-20 — Phase 1 execution started
 
 Progress: [░░░░░░░░░░] 0%
@@ -59,6 +59,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P01 | 9 min | 2 tasks | 5 files |
 | Phase 01 P02 | 50 min | 3 tasks | 6 files |
 | Phase 01 P03 | 15 min | 3 tasks | 9 files |
+| Phase 01 P04 | 35 min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -76,6 +77,7 @@ Recent decisions affecting current work:
 - [Phase 01]: Dashboard defaults to 127.0.0.1:5000 with debug off; DASHBOARD_HOST/PORT/DEBUG env vars opt in
 - [Phase 01]: 01-03: report completeness denominator precedence is explicit expected, then source manifest.json, then 342; merged dirs use the largest manifest value per model
 - [Phase 01]: 01-03: infra errors get one bounded re-queue pass per invocation (skipped after quota stop) and are retried on every resume; provider refusals are outcomes, never retried
+- [Phase 01]: 01-04: Control rows (provider scripted) are excluded from every LLM report table and chart, not only headline and pooled; attribution sentence scoped to the control (sandbox/seccomp not reached by it)
 
 ### Pending Todos
 
@@ -100,6 +102,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-20T18:40:17.641Z
-Stopped at: Completed 01-03-PLAN.md
+Last session: 2026-10-20T18:57:23.902Z
+Stopped at: Completed 01-04-PLAN.md
 Resume file: None
