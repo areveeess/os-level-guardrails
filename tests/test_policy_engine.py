@@ -103,3 +103,15 @@ class TestTextResponses:
 
     def test_allow_any_text(self, engine):
         assert engine.check("respond", "I cannot access that file.") == "ALLOW"
+
+
+class TestPolicyHash:
+    """The policy file's identity is exposed so benchmark results can be stamped with it."""
+
+    def test_policy_hash_matches_file(self):
+        import hashlib
+        from src.policy_engine.engine import DEFAULT_POLICY
+        engine = PolicyEngine(verbose=False)
+        with open(DEFAULT_POLICY, 'rb') as f:
+            assert engine.policy_sha256 == hashlib.sha256(f.read()).hexdigest()
+        assert engine.policy_path == os.path.abspath(DEFAULT_POLICY)

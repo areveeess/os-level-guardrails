@@ -22,6 +22,7 @@ Key concepts:
 import os
 import sys
 import json
+import hashlib
 import fnmatch
 import datetime
 
@@ -63,8 +64,12 @@ class PolicyEngine:
             print(f"ERROR: Policy file not found: {policy_path}")
             sys.exit(1)
         
-        with open(policy_path, 'r') as f:
-            self.policy = yaml.safe_load(f)
+        # Read the bytes once: the hash identifies exactly which policy produced a result
+        with open(policy_path, 'rb') as f:
+            raw = f.read()
+        self.policy_path = os.path.abspath(policy_path)
+        self.policy_sha256 = hashlib.sha256(raw).hexdigest()
+        self.policy = yaml.safe_load(raw.decode('utf-8'))
         
         self.default_action = self.policy.get('default_action', 'FLAG')
         
@@ -158,6 +163,19 @@ class PolicyEngine:
         """Check one simple command (already split out of any chain)."""
         process_rules = self.policy.get('process', {})
         argv = cmd.argv
+
+        # Redirection targets are file accesses the shell makes on the command's behalf
+        for target in cmd.writes:
+            if target.startswith('/'):
+                decision, reason = self._check_filesystem(target, 'write')
+                if decision == 'BLOCK':
+                    return ('BLOCK', f"Redirect to '{target}' is blocked: {reason}")
+        for target in cmd.reads:
+            if target.startswith('/'):
+                decision, reason = self._check_filesystem(target, 'read')
+                if decision == 'BLOCK':
+                    return ('BLOCK', f"Redirect from '{target}' is blocked: {reason}")
+
         if not argv:
             return ('ALLOW', 'No command to run')
 
