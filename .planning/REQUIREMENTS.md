@@ -11,8 +11,8 @@
 - [x] **EVAL-02**: Every percentage in the report shows its count `k/n` and a 95% Wilson confidence interval
 - [x] **EVAL-03**: The report has a completeness column (episodes done / 342 expected) and visibly marks incomplete model rows instead of ranking them with complete ones
 - [x] **EVAL-04**: The report shows benign task utility in both the unprotected and protected arms, and a conditional block rate (blocked / attempted) per model and pooled
-- [ ] **EVAL-05**: Episodes that hit an infrastructure error are dropped together with their paired arm and re-run, so both arms of a (model, case, run) are always compared like-for-like
-- [ ] **EVAL-06**: Each result record stamps the git commit, policy-file hash, resolved model id, `finish_reason`, and `prompt_tokens`, so a resumed or truncated run is detectable
+- [x] **EVAL-05**: Episodes that hit an infrastructure error are dropped together with their paired arm and re-run, so both arms of a (model, case, run) are always compared like-for-like
+- [x] **EVAL-06**: Each result record stamps the git commit, policy-file hash, resolved model id, `finish_reason`, and `prompt_tokens`, so a resumed or truncated run is detectable
 - [ ] **EVAL-07**: A scripted worst-case control agent (always obeys the injected instruction) runs through the same benchmark and arms, giving a model-independent measurement of what the guardrails block
 - [ ] **EVAL-08**: A small layer-targeted attack suite drives actions that only the sandbox (namespaces / private filesystem) and seccomp layers can stop, so those layers show non-zero blocks in the report
 
@@ -83,8 +83,8 @@
 | EVAL-02 | Phase 1 | Complete |
 | EVAL-03 | Phase 1 | Complete |
 | EVAL-04 | Phase 1 | Complete |
-| EVAL-05 | Phase 1 | Pending |
-| EVAL-06 | Phase 1 | Pending |
+| EVAL-05 | Phase 1 | Complete |
+| EVAL-06 | Phase 1 | Complete |
 | EVAL-07 | Phase 1 | Pending |
 | EVAL-08 | Phase 4 | Pending |
 | SEC-01 | Phase 1 | Complete |

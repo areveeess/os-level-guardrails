@@ -32,7 +32,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. A scripted worst-case control agent (always obeys the injected instruction) runs through the same benchmark and both arms, and the report shows a model-independent count of what the guardrails block given an attempt.
   5. The viva page(s) for the reference monitor / access matrix / policy engine and for evaluation statistics (ASR definitions, Wilson intervals) are added to `docs/viva/` (definition of done for every phase; DOC-03 is traced to Phase 5).
 
-**Plans**: 2/4 plans executed
+**Plans**: 3/4 plans executed
 
 Plans:
 **Wave 1**
@@ -40,7 +40,7 @@ Plans:
 - [x] 01-02-PLAN.md — Shell-chaining bypass reproduced red then fixed (fail-closed parser), policy hash, dashboard on 127.0.0.1 with debug off (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 01-03-PLAN.md — Provenance stamps on every record, provenance report section, paired interleaved queue, infra re-queue, manifest.json (wave 2)
+- [x] 01-03-PLAN.md — Provenance stamps on every record, provenance report section, paired interleaved queue, infra re-queue, manifest.json (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 01-04-PLAN.md — Scripted always-comply control agent through both arms with its own report section; docs/viva Phase 1 page and index (wave 3)
@@ -107,7 +107,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (the `hf_local` provi
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Evaluation Hardening & Policy Fix | 2/4 | In Progress | - |
+| 1. Evaluation Hardening & Policy Fix | 3/4 | In Progress | - |
 | 2. Local Data Foundation & ScratchGPT | 0/TBD | Not started | - |
 | 3. Qwen LoRA & hf_local Provider | 0/TBD | Not started | - |
 | 4. Full Runs - Local, Added Ollama, Hosted Resume | 0/TBD | Not started | - |

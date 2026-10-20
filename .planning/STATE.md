@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 1
 current_phase_name: Evaluation Hardening & Policy Fix
 status: executing
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-10-20T18:22:37.380Z"
+stopped_at: Completed 01-03-PLAN.md
+last_updated: "2026-10-20T18:40:17.733Z"
 last_activity: 2026-10-20
 last_activity_desc: Phase 1 execution started
-state_head: b53d4de036505231c09746750c3b7ac5eb0d1040
+state_head: 1de7488afe86dffa33130f990d7b22700c18df17
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 4
-  completed_plans: 2
+  completed_plans: 3
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-20)
 ## Current Position
 
 Phase: 1 (Evaluation Hardening & Policy Fix) — EXECUTING
-Plan: 3 of 4
+Plan: 4 of 4
 Status: Ready to execute
 Last activity: 2026-10-20 — Phase 1 execution started
 
@@ -58,6 +58,7 @@ Progress: [░░░░░░░░░░] 0%
 |------|----------|-------|-------|
 | Phase 01 P01 | 9 min | 2 tasks | 5 files |
 | Phase 01 P02 | 50 min | 3 tasks | 6 files |
+| Phase 01 P03 | 15 min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -73,6 +74,8 @@ Recent decisions affecting current work:
 - [Phase 01]: [01-01] episodes_done counts finished episodes (outcome != llm_error) before pair dropping; provider content-filter refusals are outcome 'refused' and stay in denominators; blocked_given_attempt = attempted protected episodes with non-empty blocked_by
 - [Phase 01]: Own shell lexer instead of shlex.split in policy_engine/shell_split.py; unparseable input, dynamic command/redirect names, heredocs and ANSI-C quoting fail closed
 - [Phase 01]: Dashboard defaults to 127.0.0.1:5000 with debug off; DASHBOARD_HOST/PORT/DEBUG env vars opt in
+- [Phase 01]: 01-03: report completeness denominator precedence is explicit expected, then source manifest.json, then 342; merged dirs use the largest manifest value per model
+- [Phase 01]: 01-03: infra errors get one bounded re-queue pass per invocation (skipped after quota stop) and are retried on every resume; provider refusals are outcomes, never retried
 
 ### Pending Todos
 
@@ -97,6 +100,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-20T18:22:37.303Z
-Stopped at: Completed 01-02-PLAN.md
+Last session: 2026-10-20T18:40:17.641Z
+Stopped at: Completed 01-03-PLAN.md
 Resume file: None
