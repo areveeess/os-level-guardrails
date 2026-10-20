@@ -79,13 +79,41 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (filled by roadmap) | | |
+| EVAL-01 | Phase 1 | Pending |
+| EVAL-02 | Phase 1 | Pending |
+| EVAL-03 | Phase 1 | Pending |
+| EVAL-04 | Phase 1 | Pending |
+| EVAL-05 | Phase 1 | Pending |
+| EVAL-06 | Phase 1 | Pending |
+| EVAL-07 | Phase 1 | Pending |
+| EVAL-08 | Phase 4 | Pending |
+| SEC-01 | Phase 1 | Pending |
+| SEC-02 | Phase 1 | Pending |
+| SCRATCH-01 | Phase 2 | Pending |
+| SCRATCH-02 | Phase 2 | Pending |
+| SCRATCH-03 | Phase 2 | Pending |
+| SCRATCH-04 | Phase 2 | Pending |
+| SCRATCH-05 | Phase 2 | Pending |
+| LORA-01 | Phase 3 | Pending |
+| LORA-02 | Phase 3 | Pending |
+| LORA-03 | Phase 3 | Pending |
+| LORA-04 | Phase 3 | Pending |
+| CMP-01 | Phase 4 | Pending |
+| CMP-02 | Phase 4 | Pending |
+| CMP-03 | Phase 4 | Pending |
+| DOC-01 | Phase 5 | Pending |
+| DOC-02 | Phase 5 | Pending |
+| DOC-03 | Phase 5 | Pending |
+| DOC-04 | Phase 5 | Pending |
+| DOC-05 | Phase 5 | Pending |
+
+DOC-03 note: traced to Phase 5 (where the set is completed and the examiner Q&A is written), but each of Phases 1-4 lists adding its own `docs/viva/` page as a success criterion.
 
 **Coverage:**
-- v1 requirements: 26 total
-- Mapped to phases: 0 (pending roadmap)
-- Unmapped: 26 ⚠️
+- v1 requirements: 27 total (corrected from 26: EVAL 8, SEC 2, SCRATCH 5, LORA 4, CMP 3, DOC 5)
+- Mapped to phases: 27
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-10-20*
-*Last updated: 2026-10-20 after initial definition*
+*Last updated: 2026-10-20 after roadmap creation*
