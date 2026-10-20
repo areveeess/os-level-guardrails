@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 1
 current_phase_name: Evaluation Hardening & Policy Fix
 status: executing
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-10-20T18:04:54.586Z"
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-10-20T18:22:37.380Z"
 last_activity: 2026-10-20
 last_activity_desc: Phase 1 execution started
-state_head: 7e17e02ced53e8a29e1816428cc9611021d631fe
+state_head: b53d4de036505231c09746750c3b7ac5eb0d1040
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 4
-  completed_plans: 1
+  completed_plans: 2
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-20)
 ## Current Position
 
 Phase: 1 (Evaluation Hardening & Policy Fix) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-10-20 — Phase 1 execution started
 
@@ -57,6 +57,7 @@ Progress: [░░░░░░░░░░] 0%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 01 P01 | 9 min | 2 tasks | 5 files |
+| Phase 01 P02 | 50 min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -70,6 +71,8 @@ Recent decisions affecting current work:
 - [Roadmap]: DOC-03 (viva notes) traced to Phase 5, but every phase's success criteria require its viva page (definition of done)
 - [Roadmap]: Policy fix (SEC-01) precedes all final protected-arm runs; policy-file hash is stamped on every result record
 - [Phase 01]: [01-01] episodes_done counts finished episodes (outcome != llm_error) before pair dropping; provider content-filter refusals are outcome 'refused' and stay in denominators; blocked_given_attempt = attempted protected episodes with non-empty blocked_by
+- [Phase 01]: Own shell lexer instead of shlex.split in policy_engine/shell_split.py; unparseable input, dynamic command/redirect names, heredocs and ANSI-C quoting fail closed
+- [Phase 01]: Dashboard defaults to 127.0.0.1:5000 with debug off; DASHBOARD_HOST/PORT/DEBUG env vars opt in
 
 ### Pending Todos
 
@@ -94,6 +97,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-20T18:04:54.512Z
-Stopped at: Completed 01-01-PLAN.md
+Last session: 2026-10-20T18:22:37.303Z
+Stopped at: Completed 01-02-PLAN.md
 Resume file: None

