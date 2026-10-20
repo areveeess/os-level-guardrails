@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 1
 current_phase_name: Evaluation Hardening & Policy Fix
 status: executing
-stopped_at: Roadmap and state initialized; ready to run `/gsd-plan-phase 1`
-last_updated: "2026-10-20T17:52:58.764Z"
+stopped_at: Completed 01-01-PLAN.md
+last_updated: "2026-10-20T18:04:54.586Z"
 last_activity: 2026-10-20
 last_activity_desc: Phase 1 execution started
-state_head: a7c6bf7bb4cf1b56b7a53107a03e2253adcbb6d8
+state_head: 7e17e02ced53e8a29e1816428cc9611021d631fe
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 4
-  completed_plans: 0
+  completed_plans: 1
   percent: 0
 ---
 
@@ -28,8 +28,8 @@ See: .planning/PROJECT.md (updated 2026-10-20)
 ## Current Position
 
 Phase: 1 (Evaluation Hardening & Policy Fix) — EXECUTING
-Plan: 1 of 4
-Status: Executing Phase 1
+Plan: 2 of 4
+Status: Ready to execute
 Last activity: 2026-10-20 — Phase 1 execution started
 
 Progress: [░░░░░░░░░░] 0%
@@ -52,6 +52,11 @@ Progress: [░░░░░░░░░░] 0%
 - Trend: -
 
 *Updated after each plan completion*
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 01 P01 | 9 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -64,6 +69,7 @@ Recent decisions affecting current work:
 - [Roadmap]: EVAL-08 (layer-targeted attack suite) placed in Phase 4 as CPU-side work alongside background GPU runs; EVAL-07 control agent stays in Phase 1
 - [Roadmap]: DOC-03 (viva notes) traced to Phase 5, but every phase's success criteria require its viva page (definition of done)
 - [Roadmap]: Policy fix (SEC-01) precedes all final protected-arm runs; policy-file hash is stamped on every result record
+- [Phase 01]: [01-01] episodes_done counts finished episodes (outcome != llm_error) before pair dropping; provider content-filter refusals are outcome 'refused' and stay in denominators; blocked_given_attempt = attempted protected episodes with non-empty blocked_by
 
 ### Pending Todos
 
@@ -88,6 +94,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-20
-Stopped at: Roadmap and state initialized; ready to run `/gsd-plan-phase 1`
+Last session: 2026-10-20T18:04:54.512Z
+Stopped at: Completed 01-01-PLAN.md
 Resume file: None
