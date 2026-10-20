@@ -13,6 +13,9 @@ Usage (in WSL):
   python run_benchmark.py --resume results/20261011-1500      # continue an interrupted run
   python run_benchmark.py --report-only results/20261011-1500
   python run_benchmark.py --report-only results/final --merge results/final/*/   # one run per model
+
+A resumed run re-queues episodes that ended in an infrastructure error (provider refusals
+are outcomes and are not retried), and each invocation is recorded in <dir>/manifest.json.
 """
 
 import argparse
@@ -61,7 +64,8 @@ def main():
     print(f"Cases:  {len(cases)} ({args.benign} benign, {args.dh} direct-harm, {args.ds} data-stealing) × {args.runs} runs")
     print(f"Output: {out_dir}\n")
     run_benchmark(models, cases, out_dir, runs=args.runs, arms=tuple(args.arms.split(",")),
-                  max_steps=args.max_steps, sleep_s=args.sleep)
+                  max_steps=args.max_steps, sleep_s=args.sleep, queue_seed=args.seed,
+                  manifest_extra={"seed": args.seed, "dh": args.dh, "ds": args.ds, "benign": args.benign})
     arms = tuple(args.arms.split(","))
     summary = generate_report(out_dir, expected=args.expected or len(cases) * args.runs * len(arms))
     print(f"\nReport: {os.path.join(out_dir, 'summary.md')}")

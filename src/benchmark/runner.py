@@ -7,21 +7,30 @@ Benchmark runner — every model × case × run × arm
                    → SandboxExecutor (namespaces + private fs + seccomp)
 
 Results are appended to <out>/raw.jsonl one episode per line, so an
-interrupted run resumes where it stopped.
+interrupted run resumes where it stopped. The queue is run-major with both arms
+of a (case, run) adjacent, so a run cut short by a quota still holds complete
+pairs of every attack kind. An episode that hit an infrastructure error is
+re-run from scratch (one bounded pass in the same invocation, and again on every
+resume); a provider refusal is an outcome and is never retried. Every row is
+stamped with the code commit and policy hash, and manifest.json records the
+planned size and one entry per invocation.
 """
 
-import itertools
 import json
 import os
+import random
 import re
 import subprocess
 import time
+from collections import Counter
+from datetime import datetime
 
 from src.agent_harness.environment import build_environment
 from src.agent_harness.executors import GuardedExecutor, MockExecutor
 from src.agent_harness.loop import AgentLoop
 from src.agent_harness.tool_broker import ToolBroker
 from src.benchmark.injecagent import PROJECT_ROOT, BenchmarkCase, new_canary
+from src.benchmark.outcomes import classify_llm_error
 from src.benchmark.scoring import score_episode
 from src.llm import get_provider
 from src.llm.registry import load_model_config
@@ -114,8 +123,57 @@ def _run_with_backoff(provider, case, arm, policy, max_steps, log):
     return episode, score
 
 
+def _work_queue(cases: list, runs: int, arms, seed: int) -> list:
+    """(case, run, arm) items, run-major. Within a run the cases are shuffled with a
+    generator seeded from (seed, run) and each case's arms stay adjacent, so a run
+    stopped by a quota still holds both attack kinds and complete (case, run) pairs."""
+    queue = []
+    for run in range(runs):
+        order = list(cases)
+        random.Random(seed * 1_000_003 + run).shuffle(order)
+        queue += [(case, run, arm) for case in order for arm in arms]
+    return queue
+
+
+def _write_manifest(out_dir: str, *, models: list, cases: list, runs: int, arms, max_steps: int,
+                    extra: dict, code_commit: str, code_dirty, policy_sha256: str) -> None:
+    """Create or update <out_dir>/manifest.json: the planned size of the run and one
+    entry per invocation. A fixed field list: no environment values, keys or URLs."""
+    path = os.path.join(out_dir, "manifest.json")
+    previous = {}
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                loaded = json.load(f)
+            previous = loaded if isinstance(loaded, dict) else {}
+        except (OSError, ValueError):  # a corrupt manifest is rewritten, never fatal
+            previous = {}
+    known = previous.get("models") if isinstance(previous.get("models"), list) else []
+    invocations = previous.get("invocations") if isinstance(previous.get("invocations"), list) else []
+    manifest = {
+        "schema": 1,
+        "expected_episodes_per_model": len(cases) * runs * len(arms),
+        "cases": dict(Counter(c.kind for c in cases)),
+        "runs": runs,
+        "arms": list(arms),
+        "max_steps": max_steps,
+        "models": list(dict.fromkeys([*known, *models])),
+        "extra": dict(extra or {}),
+        "invocations": invocations + [{
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "code_commit": code_commit, "code_dirty": code_dirty,
+            "policy_sha256": policy_sha256, "models": list(models),
+        }],
+    }
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    os.replace(tmp, path)
+
+
 def run_benchmark(models: list, cases: list, out_dir: str, runs: int = 3, arms=ARMS,
-                  max_steps: int = 5, sleep_s: float = 0.0, log=print) -> str:
+                  max_steps: int = 5, sleep_s: float = 0.0, log=print, queue_seed: int = 0,
+                  requeue_passes: int = 1, manifest_extra: dict = None) -> str:
     os.makedirs(out_dir, exist_ok=True)
     raw_path = os.path.join(out_dir, "raw.jsonl")
     done = set()
@@ -123,15 +181,44 @@ def run_benchmark(models: list, cases: list, out_dir: str, runs: int = 3, arms=A
         with open(raw_path, encoding="utf-8") as f:
             for line in f:
                 r = json.loads(line)
-                if not r.get("llm_error"):  # episodes that hit an API error are retried
+                # Finished, or ended by a provider refusal (an outcome, never retried).
+                # Infrastructure-errored episodes stay pending and are re-run from scratch.
+                if classify_llm_error(r.get("llm_error")) != "infra":
                     done.add((r["model"], r["case_id"], r["run"], r["arm"]))
 
     configs = load_model_config()["models"]
     families = {name: cfg.get("family", "") for name, cfg in configs.items()}
     policy = PolicyEngine(log_file=os.path.join(out_dir, "decisions.jsonl"), verbose=False)
     code_commit, code_dirty = _git_commit(), _git_dirty()
+    _write_manifest(out_dir, models=models, cases=cases, runs=runs, arms=arms, max_steps=max_steps,
+                    extra=manifest_extra, code_commit=code_commit, code_dirty=code_dirty,
+                    policy_sha256=policy.policy_sha256)
+    queue = _work_queue(cases, runs, arms, queue_seed)
     total = len(models) * len(cases) * runs * len(arms)
     count = len(done)
+
+    def record(model, cfg, case, run, arm, episode, score) -> str:
+        row = {
+            "model": model, "family": families.get(model, ""),
+            "case_id": case.id, "kind": case.kind, "attack_type": case.attack_type,
+            "run": run, "arm": arm, **score,
+            "actions": [s.action for s in episode.steps if s.action],
+            "final_message": episode.final_message[:500],
+            # Provenance (EVAL-06): enough to tell resumed, drifted or truncated runs apart
+            "code_commit": code_commit, "code_dirty": code_dirty,
+            "policy_sha256": policy.policy_sha256,
+            "provider": cfg.get("provider", "unknown"), "config_model": cfg.get("model"),
+            "resolved_model": next((s.resolved_model for s in episode.steps if s.resolved_model), None),
+            "finish_reasons": [s.finish_reason for s in episode.steps],
+            "prompt_tokens": [s.prompt_tokens for s in episode.steps],
+            "completion_tokens": [s.completion_tokens for s in episode.steps],
+        }
+        with open(raw_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+        return ("ATTEMPTED" if score["attempted"] else "ok") + \
+               (" SUCCEEDED" if score["succeeded"] else "") + \
+               (f" blocked:{','.join(score['blocked_by'])}" if score["blocked_by"] else "") + \
+               (f" ERROR:{score['llm_error'][:60]}" if score["llm_error"] else "")
 
     for model in models:
         try:
@@ -140,39 +227,46 @@ def run_benchmark(models: list, cases: list, out_dir: str, runs: int = 3, arms=A
             log(f"[skip] {model}: {e}")
             continue
         cfg = configs.get(model, {})
-        for case, run, arm in itertools.product(cases, range(runs), arms):
-            key = (model, case.id, run, arm)
-            if key in done:
+        errored = []      # infra-errored items awaiting the bounded re-queue
+        stopped = False
+        for case, run, arm in queue:
+            if (model, case.id, run, arm) in done:
                 continue
             try:
                 episode, score = _run_with_backoff(provider, case, arm, policy, max_steps, log)
             except QuotaExhausted as e:
                 log(f"[stop] {model}: quota exhausted ({e}). Re-run with --resume {out_dir} later.")
+                stopped = True
                 break
-
-            row = {
-                "model": model, "family": families.get(model, ""),
-                "case_id": case.id, "kind": case.kind, "attack_type": case.attack_type,
-                "run": run, "arm": arm, **score,
-                "actions": [s.action for s in episode.steps if s.action],
-                "final_message": episode.final_message[:500],
-                # Provenance (EVAL-06): enough to tell resumed, drifted or truncated runs apart
-                "code_commit": code_commit, "code_dirty": code_dirty,
-                "policy_sha256": policy.policy_sha256,
-                "provider": cfg.get("provider", "unknown"), "config_model": cfg.get("model"),
-                "resolved_model": next((s.resolved_model for s in episode.steps if s.resolved_model), None),
-                "finish_reasons": [s.finish_reason for s in episode.steps],
-                "prompt_tokens": [s.prompt_tokens for s in episode.steps],
-                "completion_tokens": [s.completion_tokens for s in episode.steps],
-            }
-            with open(raw_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(row) + "\n")
+            status = record(model, cfg, case, run, arm, episode, score)
             count += 1
-            status = ("ATTEMPTED" if score["attempted"] else "ok") + \
-                     (" SUCCEEDED" if score["succeeded"] else "") + \
-                     (f" blocked:{','.join(score['blocked_by'])}" if score["blocked_by"] else "") + \
-                     (f" ERROR:{score['llm_error'][:60]}" if score["llm_error"] else "")
             log(f"[{count}/{total}] {model:20} {case.id:16} run{run} {arm:11} {status}")
+            if classify_llm_error(score["llm_error"]) == "infra":
+                errored.append((case, run, arm))
             if sleep_s:
                 time.sleep(sleep_s)
+
+        # Bounded re-queue: a fresh episode (new executor and canary) for each infra error.
+        # Never after a quota stop (it would burn what is left), and the good sibling arm
+        # is not re-run: the report pairs it with the re-run of the errored arm.
+        for _ in range(0 if stopped else requeue_passes):
+            if not errored:
+                break
+            again = []
+            for case, run, arm in errored:
+                try:
+                    episode, score = _run_with_backoff(provider, case, arm, policy, max_steps, log)
+                except QuotaExhausted as e:
+                    log(f"[stop] {model}: quota exhausted ({e}). Re-run with --resume {out_dir} later.")
+                    stopped = True
+                    break
+                status = record(model, cfg, case, run, arm, episode, score)
+                log(f"[requeue] {model} {case.id} run{run} {arm} {status}")
+                if classify_llm_error(score["llm_error"]) == "infra":
+                    again.append((case, run, arm))
+                if sleep_s:
+                    time.sleep(sleep_s)
+            if stopped:
+                break
+            errored = again
     return raw_path

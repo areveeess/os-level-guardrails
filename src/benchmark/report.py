@@ -74,15 +74,20 @@ def _usable(rows: list) -> tuple:
     return [r for r in kept if r["outcome"] != "llm_error"], dropped
 
 
-def summarize(rows: list, expected: int = None) -> list:
-    """One summary row per model (models in first-seen order)."""
-    expected = DEFAULT_EXPECTED_EPISODES if expected is None else expected
+def summarize(rows: list, expected=None) -> list:
+    """One summary row per model (models in first-seen order). `expected` is the planned
+    episodes per model: an int for every model, or a {model: int} dict (a model missing
+    from it, or None, gets DEFAULT_EXPECTED_EPISODES)."""
     by_model = defaultdict(list)
     for r in rows:
         by_model[r["model"]].append(r)
 
     summary = []
     for model, model_rows in by_model.items():
+        if isinstance(expected, dict):
+            model_expected = expected.get(model, DEFAULT_EXPECTED_EPISODES)
+        else:
+            model_expected = DEFAULT_EXPECTED_EPISODES if expected is None else expected
         rs = _classified(model_rows)
         usable, pairs_dropped = _usable(model_rows)
 
@@ -124,7 +129,7 @@ def summarize(rows: list, expected: int = None) -> list:
         # because its sibling failed; the errored arm is what a resume must redo.
         infra_errors = sum(1 for r in rs if r["outcome"] == "llm_error")
         episodes_done = len(rs) - infra_errors
-        if episodes_done >= expected:
+        if episodes_done >= model_expected:
             status = "complete"
         elif infra_errors > episodes_done:
             status = "error-dominated"
@@ -136,7 +141,7 @@ def summarize(rows: list, expected: int = None) -> list:
             "family": rs[0].get("family", ""),
             "status": status,
             "episodes_done": episodes_done,
-            "episodes_expected": expected,
+            "episodes_expected": model_expected,
             "pairs_complete": pairs_complete,
             "infra_errors": infra_errors,
             "pairs_dropped": pairs_dropped,
@@ -185,10 +190,11 @@ def _distinct(values) -> list:
     return list(dict.fromkeys(v for v in values if v is not None))
 
 
-def provenance_summary(rows: list) -> list:
+def provenance_summary(rows: list, invocations: dict = None) -> list:
     """One provenance record per model, over every loaded row (not the pair-dropped
     set), so each record is accounted for. A row is *stamped* when it carries
-    code_commit; rows written before EVAL-06 do not."""
+    code_commit; rows written before EVAL-06 do not. `invocations` maps a model to
+    the number of manifest.json invocation entries that included it."""
     out = []
     for model in dict.fromkeys(r["model"] for r in rows):
         rs = [r for r in rows if r["model"] == model]
@@ -196,6 +202,7 @@ def provenance_summary(rows: list) -> list:
         out.append({
             "model": model,
             "rows": len(rs),
+            "invocations": (invocations or {}).get(model),
             "stamped": len(stamped),
             "unstamped": len(rs) - len(stamped),
             "commits": _distinct(r["code_commit"][:8] for r in stamped),
@@ -233,12 +240,13 @@ def _provenance_row(p: dict) -> list:
             _cell(", ".join(p["config_models"]) or "—"),
             str(p["length_stops"]) if p["stamped"] else "—",
             str(p["content_filter_stops"]) if p["stamped"] else "—",
-            "not reported" if p["max_prompt_tokens"] is None else str(p["max_prompt_tokens"])]
+            "not reported" if p["max_prompt_tokens"] is None else str(p["max_prompt_tokens"]),
+            "—" if p["invocations"] is None else str(p["invocations"])]
 
 
 def _provenance_lines(provenance: list) -> list:
     header = ["Model", "Code commit(s)", "Dirty tree", "Policy hash(es)", "Resolved model id(s)", "Config model",
-              "Length stops", "Content-filter stops", "Max prompt_tokens"]
+              "Length stops", "Content-filter stops", "Max prompt_tokens", "Invocations"]
     lines = ["", "## Provenance and data quality", "",
              "Each episode record is stamped with the code commit and policy-file hash it was produced",
              "under and the model id the provider reported. Records written before these stamps existed",
@@ -478,12 +486,40 @@ def write_charts(summary: list, chart_dir: str):
     plt.close(fig)
 
 
+def read_manifest(src: str):
+    """The parsed manifest.json of a results directory, or None if absent or unreadable."""
+    try:
+        with open(os.path.join(src, "manifest.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return manifest if isinstance(manifest, dict) else None
+
+
+def _manifest_expected(manifest: dict):
+    value = manifest.get("expected_episodes_per_model")
+    return value if type(value) is int and value > 0 else None
+
+
+def _manifest_invocations(manifest: dict, model: str) -> int:
+    """Invocation entries that included `model` (entries without a models list count for all)."""
+    entries = manifest.get("invocations")
+    if not isinstance(entries, list):
+        return 0
+    return sum(1 for e in entries if isinstance(e, dict)
+               and (not isinstance(e.get("models"), list) or model in e["models"]))
+
+
 def generate_report(out_dir: str, charts: bool = True, sources: list = None, expected: int = None) -> list:
     """Write the report into out_dir from its raw.jsonl, or from several result
-    directories (`sources`, e.g. one per model run in parallel). `expected` is the
-    planned number of episodes per model (default DEFAULT_EXPECTED_EPISODES)."""
+    directories (`sources`, e.g. one per model run in parallel).
+
+    `expected` is the planned number of episodes per model. Precedence: the explicit
+    argument, then the manifest.json of the directory a model's rows came from (the
+    largest, if a model appears in several), then DEFAULT_EXPECTED_EPISODES."""
     os.makedirs(out_dir, exist_ok=True)
     rows = []
+    manifest_expected, invocations = {}, {}
     for src in sources or [out_dir]:
         raw = os.path.join(src, "raw.jsonl")
         if os.path.exists(raw):  # a model may have been skipped (no key / no checkpoint)
@@ -491,16 +527,23 @@ def generate_report(out_dir: str, charts: bool = True, sources: list = None, exp
             rows += loaded
             if skipped:
                 print(f"Skipped {skipped} undecodable line(s) in {raw}")
+            manifest = read_manifest(src)
+            if manifest:
+                planned = _manifest_expected(manifest)
+                for model in dict.fromkeys(r["model"] for r in loaded):
+                    if planned:
+                        manifest_expected[model] = max(manifest_expected.get(model, 0), planned)
+                    invocations[model] = invocations.get(model, 0) + _manifest_invocations(manifest, model)
     if not rows:
         print(f"No benchmark results found in {', '.join(sources or [out_dir])}")
         return []
-    summary = summarize(rows, expected=expected)
+    summary = summarize(rows, expected=expected if expected is not None else manifest_expected)
     breakdown = kind_breakdown(rows)
     with open(os.path.join(out_dir, "summary.csv"), "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(summary[0].keys()))
         writer.writeheader()
         writer.writerows(summary)
-    write_markdown(summary, breakdown, os.path.join(out_dir, "summary.md"), provenance=provenance_summary(rows))
+    write_markdown(summary, breakdown, os.path.join(out_dir, "summary.md"), provenance=provenance_summary(rows, invocations))
     if charts:
         write_charts(summary, os.path.join(out_dir, "charts"))
     return summary
