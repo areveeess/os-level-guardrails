@@ -7,7 +7,13 @@ action was Allowed, Blocked, or Flagged.
 
 Usage:
   python -m src.dashboard.app
-  Then open http://localhost:5000 in your browser
+  Then open http://127.0.0.1:5000 in your browser
+
+  Safe by default: the server listens on 127.0.0.1 only, with Flask debug off.
+  DASHBOARD_HOST=<addr>  listen on another interface (only on a trusted network)
+  DASHBOARD_PORT=<port>  listen on another port
+  DASHBOARD_DEBUG=1      enable the Werkzeug debugger. WARNING: the debugger allows
+                         arbitrary code execution for anyone who can reach the port.
 """
 
 import os
@@ -151,12 +157,31 @@ def clear_logs():
     return jsonify({"status": "cleared", "total": 0})
 
 
-if __name__ == '__main__':
+DEFAULT_HOST = '127.0.0.1'
+DEFAULT_PORT = 5000
+
+
+def _run_settings():
+    """Server settings: loopback only and debugger off unless explicitly overridden."""
+    return {
+        'host': os.environ.get('DASHBOARD_HOST') or DEFAULT_HOST,
+        'port': int(os.environ.get('DASHBOARD_PORT') or DEFAULT_PORT),
+        'debug': os.environ.get('DASHBOARD_DEBUG', '').strip().lower() in ('1', 'true', 'yes', 'on'),
+    }
+
+
+def main():
+    settings = _run_settings()
     print(f"\n{'='*50}")
     print(f"  OS-Level Guardrails — Dashboard")
     print(f"{'='*50}")
     print(f"  Log file: {LOG_FILE}")
-    print(f"  Open:     http://localhost:5000")
+    print(f"  Open:     http://{settings['host']}:{settings['port']}")
+    if settings['debug']:
+        print(f"  WARNING:  Werkzeug debugger enabled (DASHBOARD_DEBUG) - arbitrary code execution")
     print(f"{'='*50}\n")
-    # Start the Flask development server on all interfaces
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(**settings)
+
+
+if __name__ == '__main__':
+    main()
