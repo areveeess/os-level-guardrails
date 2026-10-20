@@ -43,10 +43,12 @@ def main():
     parser.add_argument("--report-only", help="Only regenerate the report for a results directory")
     parser.add_argument("--merge", nargs="+", metavar="DIR",
                         help="With --report-only: build one report from several result directories")
+    parser.add_argument("--expected", type=int, default=None,
+                        help="Expected episodes per model for the completeness column (default 342)")
     args = parser.parse_args()
 
     if args.report_only:
-        generate_report(args.report_only, sources=args.merge)
+        generate_report(args.report_only, sources=args.merge, expected=args.expected)
         print(f"Report written to {args.report_only}")
         return
 
@@ -60,7 +62,8 @@ def main():
     print(f"Output: {out_dir}\n")
     run_benchmark(models, cases, out_dir, runs=args.runs, arms=tuple(args.arms.split(",")),
                   max_steps=args.max_steps, sleep_s=args.sleep)
-    summary = generate_report(out_dir)
+    arms = tuple(args.arms.split(","))
+    summary = generate_report(out_dir, expected=args.expected or len(cases) * args.runs * len(arms))
     print(f"\nReport: {os.path.join(out_dir, 'summary.md')}")
     for s in summary:
         print(f"  {s['model']:22} attempted {s['attempted_pct']}%  "
