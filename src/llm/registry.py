@@ -47,4 +47,7 @@ def get_provider(name: str = None, path: str = MODELS_FILE):
     if cfg["provider"] == "scratch":
         from src.llm.scratch import LocalScratchProvider
         return LocalScratchProvider(name=name, checkpoint=os.path.join(PROJECT_ROOT, cfg["checkpoint"]))
+    if cfg["provider"] == "scripted":
+        from src.llm.scripted import ScriptedControlProvider
+        return ScriptedControlProvider(name=name, model=cfg.get("model", name))
     raise ValueError(f"Unknown provider type '{cfg['provider']}' for model '{name}'")

@@ -3,7 +3,9 @@
 # ============================================================
 # Every hosted/local model is reached through the OpenAI-compatible
 # chat API; only base_url, api_key_env and model differ.
-#   provider: openai_compat | scratch
+#   provider: openai_compat | scratch | scripted
+#     scripted = the always-comply control agent (a worst-case oracle, NOT an LLM;
+#     it is reported in its own 'Model-independent control' section)
 #   benchmark: include in `run_benchmark.py --models all`
 # Model ids change over time; check the provider's model list if one 404s.
 # ============================================================
@@ -63,4 +65,10 @@ models:
     provider: scratch
     checkpoint: models/scratch/scratch_gpt.pt
     family: from-scratch / unaligned baseline
+    benchmark: true
+
+  control-always-comply:
+    provider: scripted
+    model: control-always-comply
+    family: control / scripted worst case
     benchmark: true
