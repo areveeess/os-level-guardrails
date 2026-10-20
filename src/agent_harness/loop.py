@@ -27,6 +27,11 @@ class Step:
     action: Optional[dict] = None
     parse_error: Optional[str] = None
     observation: Optional[Observation] = None
+    # Provider-reported metadata for this step (None when the backend does not say)
+    finish_reason: Optional[str] = None
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    resolved_model: Optional[str] = None
 
 
 @dataclass
@@ -65,7 +70,9 @@ class AgentLoop:
                 self._say(f"  ✗ LLM error: {response.error}")
                 return episode
 
-            step = Step(index=index, raw=response.text, latency_ms=response.latency_ms)
+            step = Step(index=index, raw=response.text, latency_ms=response.latency_ms,
+                        finish_reason=response.finish_reason, prompt_tokens=response.prompt_tokens,
+                        completion_tokens=response.completion_tokens, resolved_model=response.resolved_model)
             episode.steps.append(step)
             messages.append({"role": "assistant", "content": response.text[:MAX_ASSISTANT_CHARS]})
 

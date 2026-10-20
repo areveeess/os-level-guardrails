@@ -180,6 +180,59 @@ def kind_breakdown(rows: list) -> list:
     return out
 
 
+def _distinct(values) -> list:
+    """Distinct non-None values in first-seen order."""
+    return list(dict.fromkeys(v for v in values if v is not None))
+
+
+def provenance_summary(rows: list) -> list:
+    """One provenance record per model, over every loaded row (not the pair-dropped
+    set), so each record is accounted for. A row is *stamped* when it carries
+    code_commit; rows written before EVAL-06 do not."""
+    out = []
+    for model in dict.fromkeys(r["model"] for r in rows):
+        rs = [r for r in rows if r["model"] == model]
+        stamped = [r for r in rs if r.get("code_commit") is not None]
+        out.append({
+            "model": model,
+            "rows": len(rs),
+            "stamped": len(stamped),
+            "unstamped": len(rs) - len(stamped),
+            "commits": _distinct(r["code_commit"][:8] for r in stamped),
+            "dirty": [r.get("code_dirty") for r in stamped],
+            "policy_hashes": _distinct((r.get("policy_sha256") or "")[:12] or None for r in stamped),
+            "resolved_models": _distinct(r.get("resolved_model") for r in stamped),
+            "config_models": _distinct(r.get("config_model") for r in stamped),
+        })
+    return out
+
+
+def _provenance_row(p: dict) -> list:
+    if not p["stamped"]:
+        commits, dirty = "unstamped (recorded before EVAL-06)", "—"
+    else:
+        commits = ", ".join(p["commits"])
+        if p["unstamped"]:
+            commits += f", unstamped ({p['unstamped']})"
+        dirty = "yes" if any(d is True for d in p["dirty"]) else ("no" if all(d is False for d in p["dirty"])
+                                                                   else "unknown")
+    return [_cell(p["model"]), _cell(commits), dirty,
+            _cell(", ".join(p["policy_hashes"]) or "unstamped"),
+            _cell(", ".join(p["resolved_models"]) or "not reported"),
+            _cell(", ".join(p["config_models"]) or "—")]
+
+
+def _provenance_lines(provenance: list) -> list:
+    header = ["Model", "Code commit(s)", "Dirty tree", "Policy hash(es)", "Resolved model id(s)", "Config model"]
+    lines = ["", "## Provenance and data quality", "",
+             "Each episode record is stamped with the code commit and policy-file hash it was produced",
+             "under and the model id the provider reported. Records written before these stamps existed",
+             "are shown as *unstamped*.", "",
+             "| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+    lines += ["| " + " | ".join(_provenance_row(p)) + " |" for p in provenance]
+    return lines
+
+
 def _fmt(v):
     return "—" if v is None else (f"{v:g}" if isinstance(v, float) else str(v))
 
@@ -229,7 +282,7 @@ def _table(columns: list, summary: list) -> list:
     return lines
 
 
-def write_markdown(summary: list, breakdown: list, path: str):
+def write_markdown(summary: list, breakdown: list, path: str, provenance: list = None):
     complete = [s for s in summary if s["status"] == "complete"]
     others = [s for s in summary if s["status"] != "complete"]
     lines = ["# Benchmark summary", "",
@@ -316,6 +369,7 @@ def write_markdown(summary: list, breakdown: list, path: str):
               "|---|---|---|---|---|---|"]
     lines += [f"| {_cell(b['model'])} | {b['kind']} | {b['episodes']} | {_prop(b, 'attempted')} | "
               f"{_prop(b, 'success_unprotected')} | {_prop(b, 'success_protected')} |" for b in breakdown]
+    lines += _provenance_lines(provenance or [])
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -427,7 +481,7 @@ def generate_report(out_dir: str, charts: bool = True, sources: list = None, exp
         writer = csv.DictWriter(f, fieldnames=list(summary[0].keys()))
         writer.writeheader()
         writer.writerows(summary)
-    write_markdown(summary, breakdown, os.path.join(out_dir, "summary.md"))
+    write_markdown(summary, breakdown, os.path.join(out_dir, "summary.md"), provenance=provenance_summary(rows))
     if charts:
         write_charts(summary, os.path.join(out_dir, "charts"))
     return summary

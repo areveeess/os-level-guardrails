@@ -13,12 +13,17 @@ from typing import Optional
 
 @dataclass
 class LLMResponse:
+    """One model reply. `finish_reason` (why generation stopped: stop | length |
+    content_filter | ...) and `resolved_model` (the model id the server actually
+    answered with) are filled when the backend reports them, else None."""
     text: str
     latency_ms: float
     model: str
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
     error: Optional[str] = None
+    finish_reason: Optional[str] = None
+    resolved_model: Optional[str] = None
 
     @property
     def ok(self) -> bool:

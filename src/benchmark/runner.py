@@ -14,13 +14,14 @@ import itertools
 import json
 import os
 import re
+import subprocess
 import time
 
 from src.agent_harness.environment import build_environment
 from src.agent_harness.executors import GuardedExecutor, MockExecutor
 from src.agent_harness.loop import AgentLoop
 from src.agent_harness.tool_broker import ToolBroker
-from src.benchmark.injecagent import BenchmarkCase, new_canary
+from src.benchmark.injecagent import PROJECT_ROOT, BenchmarkCase, new_canary
 from src.benchmark.scoring import score_episode
 from src.llm import get_provider
 from src.llm.registry import load_model_config
@@ -59,6 +60,30 @@ def _requested_wait(error: str):
 
 class QuotaExhausted(Exception):
     pass
+
+
+def _git_commit() -> str:
+    """HEAD commit of the checkout the results were produced by, or 'unknown'.
+
+    Fixed argv, no shell, bounded time: this runs on every benchmark start and must
+    neither hang nor interpret anything."""
+    try:
+        done = subprocess.run(["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, capture_output=True,
+                              text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    sha = done.stdout.strip()
+    return sha if done.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", sha) else "unknown"
+
+
+def _git_dirty():
+    """True/False whether tracked files differ from HEAD; None when git cannot say."""
+    try:
+        done = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=PROJECT_ROOT,
+                              capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return bool(done.stdout.strip()) if done.returncode == 0 else None
 
 
 def run_episode(provider, case: BenchmarkCase, arm: str, policy: PolicyEngine, max_steps: int):
@@ -101,8 +126,10 @@ def run_benchmark(models: list, cases: list, out_dir: str, runs: int = 3, arms=A
                 if not r.get("llm_error"):  # episodes that hit an API error are retried
                     done.add((r["model"], r["case_id"], r["run"], r["arm"]))
 
-    families = {name: cfg.get("family", "") for name, cfg in load_model_config()["models"].items()}
+    configs = load_model_config()["models"]
+    families = {name: cfg.get("family", "") for name, cfg in configs.items()}
     policy = PolicyEngine(log_file=os.path.join(out_dir, "decisions.jsonl"), verbose=False)
+    code_commit, code_dirty = _git_commit(), _git_dirty()
     total = len(models) * len(cases) * runs * len(arms)
     count = len(done)
 
@@ -112,6 +139,7 @@ def run_benchmark(models: list, cases: list, out_dir: str, runs: int = 3, arms=A
         except Exception as e:  # missing key, missing checkpoint, unknown name
             log(f"[skip] {model}: {e}")
             continue
+        cfg = configs.get(model, {})
         for case, run, arm in itertools.product(cases, range(runs), arms):
             key = (model, case.id, run, arm)
             if key in done:
@@ -128,6 +156,14 @@ def run_benchmark(models: list, cases: list, out_dir: str, runs: int = 3, arms=A
                 "run": run, "arm": arm, **score,
                 "actions": [s.action for s in episode.steps if s.action],
                 "final_message": episode.final_message[:500],
+                # Provenance (EVAL-06): enough to tell resumed, drifted or truncated runs apart
+                "code_commit": code_commit, "code_dirty": code_dirty,
+                "policy_sha256": policy.policy_sha256,
+                "provider": cfg.get("provider", "unknown"), "config_model": cfg.get("model"),
+                "resolved_model": next((s.resolved_model for s in episode.steps if s.resolved_model), None),
+                "finish_reasons": [s.finish_reason for s in episode.steps],
+                "prompt_tokens": [s.prompt_tokens for s in episode.steps],
+                "completion_tokens": [s.completion_tokens for s in episode.steps],
             }
             with open(raw_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(row) + "\n")
