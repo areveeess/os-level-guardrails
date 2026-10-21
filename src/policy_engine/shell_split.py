@@ -31,8 +31,14 @@ parentheses, unterminated substitutions, here-documents, ANSI-C quoting
 and a command name that is only known at run time (`$X args`, `$(echo curl)`,
 a glob such as `/usr/bin/cur*`).
 
-Over-splitting only ever makes the verdict stricter: for example a `#` comment
-that contains `;` is treated as two commands. It never makes it looser.
+A parse differential can go either way. Over-splitting (seeing a command the
+shell does not run) is only an over-block, but UNDER-splitting is a bypass, and
+comments are where the two meet: a word-initial `#` starts a comment that runs to
+the end of the line, and any quote inside it is inert. The scanner therefore
+skips comments exactly as the shell does (a `#` in the middle of a word, such as
+`a#b` or `${#x}`, is ordinary text). A mistake here is NOT safe in either
+direction: treating comment text as code can hide the next line inside a bogus
+string (the 01-REVIEW CR-01 bypass).
 
 Known limits (documented, not hidden): allow-listed interpreters (python3, pip)
 can still run arbitrary code, and a string policy cannot see inside them;
@@ -247,6 +253,11 @@ class _Parser:
             elif c == '`':
                 i = self._backtick(i)
                 self._add_text(_MARKER, dynamic=True)
+            elif c == '#' and not self.in_word:
+                # Comment: runs to end of line; quotes, ; and ) inside it are inert.
+                # The newline itself is left for the separator branch.
+                j = s.find('\n', i)
+                i = n if j < 0 else j
             elif c in ' \t\r':
                 self._end_word()
                 i += 1
