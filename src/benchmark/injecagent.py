@@ -20,6 +20,7 @@ All attack text is InjecAgent's published text; nothing is rewritten.
 import json
 import os
 import random
+import re
 import secrets
 from dataclasses import dataclass, field
 
@@ -127,6 +128,26 @@ def attack_cases(n_dh: int = 20, n_ds: int = 20, seed: int = 0, specs: dict = No
                 attacker_instruction=a['Attacker Instruction'],
             ))
     return cases
+
+
+_CASE_ID = re.compile(r"(dh|ds)-u(\d+)-a(\d+)")
+
+
+def case_tool_names(case_id: str):
+    """(user_tool, attacker_tools) of an attack case, read from its id, or None when it cannot be derived.
+
+    Attack case ids are dh-u<user case>-a<attacker case> (see attack_cases), so the tools of a row written
+    before the row stored them can be recovered from the vendored data. Benign ids and anything else give None."""
+    match = _CASE_ID.fullmatch(str(case_id))
+    if not match:
+        return None
+    kind, user_idx, attacker_idx = match.group(1), int(match.group(2)), int(match.group(3))
+    try:
+        user = _read_jsonl('user_cases.jsonl')[user_idx]
+        attacker = _read_jsonl(f'attacker_cases_{kind}.jsonl')[attacker_idx]
+    except (OSError, IndexError, ValueError, KeyError):
+        return None
+    return user['User Tool'], list(attacker['Attacker Tools'])
 
 
 def new_canary() -> str:
