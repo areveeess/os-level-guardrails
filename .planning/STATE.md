@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 2
 current_phase_name: Local Data Foundation & ScratchGPT
 status: executing
-stopped_at: Phase 1 complete, ready to plan Phase 2
-last_updated: "2026-10-21T04:00:08.643Z"
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-10-21T04:22:44.970Z"
 last_activity: 2026-10-21
 last_activity_desc: Phase 2 execution started
-state_head: 375df26bcc603e7697d3a1904ec995a58090194f
+state_head: 2741b9d7a9cd5c97c8401dcea8b415219427e2bd
 progress:
   total_phases: 5
   completed_phases: 1
   total_plans: 8
-  completed_plans: 4
+  completed_plans: 5
   percent: 20
 ---
 
@@ -28,8 +28,8 @@ See: .planning/PROJECT.md (updated 2026-10-21)
 ## Current Position
 
 Phase: 2 (Local Data Foundation & ScratchGPT) — EXECUTING
-Plan: 1 of 4
-Status: Executing Phase 2
+Plan: 2 of 4
+Status: Ready to execute
 Last activity: 2026-10-21 — Phase 2 execution started
 
 Progress: [██░░░░░░░░] 20% (Phase 1 of 5 complete)
@@ -60,6 +60,7 @@ Progress: [██░░░░░░░░] 20% (Phase 1 of 5 complete)
 | Phase 01 P02 | 50 min | 3 tasks | 6 files |
 | Phase 01 P03 | 15 min | 3 tasks | 9 files |
 | Phase 01 P04 | 35 min | 2 tasks | 7 files |
+| Phase 2 P01 | 20 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -78,6 +79,8 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-03: report completeness denominator precedence is explicit expected, then source manifest.json, then 342; merged dirs use the largest manifest value per model
 - [Phase 01]: 01-03: infra errors get one bounded re-queue pass per invocation (skipped after quota stop) and are retried on every resume; provider refusals are outcomes, never retried
 - [Phase 01]: 01-04: Control rows (provider scripted) are excluded from every LLM report table and chart, not only headline and pooled; attribution sentence scoped to the control (sandbox/seccomp not reached by it)
+- [Phase 2]: Plan 02-01: write_episodes preserves key insertion order (no sort_keys) so call_tool args keep the spec's required order and the gold action text keeps the documented action/tool/args grammar
+- [Phase 2]: Plan 02-01: leakage gate checks 8-word shingles under two normalisations (union 2780, research-only 2035) and benchmark sentences in U:, O: and A: lines; signature rule applies to synthetic tools only
 
 ### Pending Todos
 
@@ -105,6 +108,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-21T02:43:22Z
-Stopped at: Phase 1 complete, ready to plan Phase 2
+Last session: 2026-10-21T04:22:44.822Z
+Stopped at: Completed 02-01-PLAN.md
 Resume file: None

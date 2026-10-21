@@ -57,11 +57,11 @@ Plans:
   4. `scratch-gpt` runs end-to-end through the benchmark (the provider loads the checkpoint via `inference.load_generator`) and produces valid actions on a smoke run.
   5. The viva page(s) for LLM foundations (transformers, tokenization, the training loop, decoding) and for the synthetic-data / leakage design are added to `docs/viva/` (DOC-03 is traced to Phase 5).
 
-**Plans**: 4 plans
+**Plans**: 1/4 plans executed
 
 Plans:
 **Wave 1**
-- [ ] 02-01-PLAN.md — Format version 2 (required params on the T: line, context 2048, version/vocab/fingerprint stamps), episode schema, training text = render_context output, loss mask, strict leakage gate with planted-violation tests, benign generator slice (wave 1)
+- [x] 02-01-PLAN.md — Format version 2 (required params on the T: line, context 2048, version/vocab/fingerprint stamps), episode schema, training text = render_context output, loss mask, strict leakage gate with planted-violation tests, benign generator slice (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 02-02-PLAN.md — Full 50/25/25 generator (self-written dh/ds injections, synthetic tools, OS-action and blocked-tail episodes), dev split on tools and templates, dataset CLI, committed 40k+2k dataset manifest (wave 2)
@@ -121,7 +121,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (the `hf_local` provi
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Evaluation Hardening & Policy Fix | 4/4 | Complete    | 2026-10-21 |
-| 2. Local Data Foundation & ScratchGPT | 0/4 | Planned | - |
+| 2. Local Data Foundation & ScratchGPT | 1/4 | In Progress | - |
 | 3. Qwen LoRA & hf_local Provider | 0/TBD | Not started | - |
 | 4. Full Runs - Local, Added Ollama, Hosted Resume | 0/TBD | Not started | - |
 | 5. Comparison Report & Deliverables | 0/TBD | Not started | - |
