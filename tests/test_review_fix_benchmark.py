@@ -421,3 +421,12 @@ def test_wr05_control_section_reports_distinct_cases(tmp_path):
     assert "deterministic" in body and "not independent" in body
     assert "3 distinct cases" in body and "9 protected attack episodes" in body
     assert "100.0% (3/3)" in body                    # case-level blocked given attempt
+
+
+def test_wr05_rows_without_a_case_id_still_summarise():
+    # hand-built rows (and very old raw.jsonl) may lack case_id; the case-level view must not crash
+    rows = [make_row("m", "dh-0", 0, arm, "dh", attempted=True) for arm in ("unprotected", "protected")]
+    for r in rows:
+        del r["case_id"]
+    s = summarize(rows, expected=2)[0]
+    assert s["case_attempted_n"] == 1

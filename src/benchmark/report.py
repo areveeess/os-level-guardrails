@@ -84,7 +84,7 @@ def _blocked_at_attack(r: dict) -> bool:
 def _case_ids(rows: list, predicate=None) -> set:
     """Distinct case ids among `rows` (optionally only those satisfying `predicate`). Repeated
     runs of a case at temperature 0 are near-duplicates, so a case is the independent unit."""
-    return {r["case_id"] for r in rows if predicate is None or predicate(r)}
+    return {r.get("case_id") for r in rows if predicate is None or predicate(r)}
 
 
 def _usable(rows: list) -> tuple:
