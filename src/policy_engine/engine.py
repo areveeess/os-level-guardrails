@@ -191,11 +191,10 @@ class PolicyEngine:
             return ('ALLOW', 'No command to run')
 
         base_cmd = os.path.basename(argv[0])
-        full = ' '.join(argv)
 
         # Check block list first (security: deny takes priority)
         for blocked in process_rules.get('block', []):
-            if base_cmd == blocked or full.startswith(blocked):
+            if self._rule_matches(blocked, argv):
                 return ('BLOCK', f"Command '{base_cmd}' is in the block list")
 
         # Check allow list
@@ -208,6 +207,22 @@ class PolicyEngine:
                 return ('ALLOW', f"Command '{base_cmd}' is in the allow list")
 
         return (self.default_action, f"Command '{base_cmd}' has no matching rule")
+
+    @staticmethod
+    def _rule_matches(rule: str, argv: list) -> bool:
+        """Does a process block rule match this command?
+
+        The first token of the rule must equal the command word's basename (so the
+        rule `su` does not catch `sum`, nor `sh` catch `sha256sum`). Further tokens
+        (`pip install`) must appear, in order, among the non-option arguments, so
+        `pip -q install x` and `pip --index-url U install x` are caught like
+        `pip install x`.
+        """
+        parts = rule.split()
+        if not parts or os.path.basename(argv[0]) != parts[0]:
+            return False
+        operands = iter(a for a in argv[1:] if not a.startswith('-'))
+        return all(token in operands for token in parts[1:])
 
     def _check_command_file_args(self, tokens: list) -> tuple:
         """Check if a shell command's file arguments are allowed.

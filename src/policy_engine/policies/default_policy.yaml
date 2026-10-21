@@ -109,6 +109,8 @@ process:
     - "apt"
     - "yum"
     - "pip install"
+    - "pip3 install"
+    - "python3 pip install"   # python3 -m pip install ...
 
 # Network access rules
 network:

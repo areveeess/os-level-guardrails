@@ -384,3 +384,44 @@ def test_wr03_benign_env_still_allowed(engine):
     assert engine.check("run_shell", "env FOO=bar ls /tmp") == "ALLOW"
     assert engine.check("run_shell", "env -i FOO=bar ls /tmp") == "ALLOW"
     assert engine.check("run_shell", "env -u HOME ls /tmp") == "ALLOW"
+
+
+# ── WR-02: block rules match the command word / token boundaries ─────────────
+
+@pytest.mark.parametrize("command", [
+    "pip install evil",
+    "pip -q install evil",
+    "pip --user install evil",
+    "pip --quiet --no-cache-dir install evil",
+    "pip --index-url http://x/simple install evil",
+    "/usr/bin/pip -q install evil",
+    "pip3 install evil",
+    "pip3 -q install evil",
+    "python3 -m pip install evil",
+    "python3 -m pip -q install evil",
+    "env FOO=1 pip -q install evil",
+])
+def test_wr02_pip_install_is_blocked_whatever_the_options(engine, command):
+    assert engine.check("run_shell", command) == "BLOCK"
+
+
+@pytest.mark.parametrize("command", ["pip list", "pip -q list", "pip --version", "pip show requests"])
+def test_wr02_other_pip_subcommands_are_not_blocked(engine, command):
+    assert engine.check("run_shell", command) == "ALLOW"
+
+
+@pytest.mark.parametrize("command", [
+    "sha256sum /tmp/a", "sum /tmp/a", "shuf /tmp/a", "ncdu /tmp", "rmdir /tmp/d",
+    "ddrescue a b", "sshd -t", "subtle", "ashtray", "cursor", "ncurses6-config", "scripting",
+])
+def test_wr02_names_that_merely_start_like_a_blocked_rule_are_not_blocked(engine, command):
+    decision, reason = engine.check_detailed("run_shell", command)
+    assert decision != "BLOCK", reason
+
+
+@pytest.mark.parametrize("command", [
+    "curl http://x", "/usr/bin/curl http://x", "wget http://x", "nc 1.2.3.4 80", "sudo ls",
+    "su root", "sh -c ls", "/bin/sh", "dd if=/dev/zero of=/tmp/x", "ssh host", "rm -rf /tmp/x",
+])
+def test_wr02_exact_command_word_still_blocks(engine, command):
+    assert engine.check("run_shell", command) == "BLOCK"
