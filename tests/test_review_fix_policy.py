@@ -425,3 +425,92 @@ def test_wr02_names_that_merely_start_like_a_blocked_rule_are_not_blocked(engine
 ])
 def test_wr02_exact_command_word_still_blocks(engine, command):
     assert engine.check("run_shell", command) == "BLOCK"
+
+
+# ── CR-03: the file policy judges what the shell will really open ────────────
+
+CR03_BLOCKED = [
+    # leading // (POSIX normpath keeps exactly two slashes)
+    "cat //etc/shadow", "cat ///etc/shadow", "cat < //etc/shadow", "tac //etc/shadow",
+    # glob characters that can reach a protected path
+    "cat /etc/sha*", "cat /etc/sh[a]dow", "cat /*/shadow", "cat /e*/sh?dow", "cat /etc/pass*",
+    "cat /etc/{shadow,hosts}", "cat /{etc,tmp}/shadow", "cat /home/*/.ssh/id_rsa",
+    "cat /h*/user/.ssh/id_rsa", "cat /etc/shadow-", "cat /etc/gshadow", "cat /root/*",
+    # tilde / $HOME
+    "cat ~/.ssh/id_rsa", "cat ~user/.ssh/id_rsa", "cat ~root/x", "cat $HOME/.ssh/id_rsa",
+    "cat ${HOME}/.ssh/id_rsa", 'cat "$HOME/.ssh/id_rsa"', "cat < ~/.ssh/id_rsa",
+    "echo x > ~/.bashrc", "echo x >> $HOME/.bashrc", "echo a >> ~/.ssh/authorized_keys",
+    # .. relative to the workspace cwd (/home/user/workspace)
+    "cat ../../../etc/shadow", "cat ../.ssh/id_rsa", "echo x > ../../../etc/cron.d/x",
+    "cat ./../../../etc/shadow", "cat /tmp/../etc/shadow",
+    # a directory change moves the cwd under the relative path
+    "cd /etc && cat shadow", "cd /etc; cat shadow", "cd ~/.ssh && cat id_rsa",
+    "cd /etc || cd /tmp; cat shadow", "cd .. && cd .. && cd .. && cat etc/shadow",
+    "cd $DIR && cat shadow", "pushd /etc >/dev/null; cat shadow",
+    # unresolved variables used as file arguments of readers/writers
+    "X=/etc/shadow; cat $X", "cat $X", 'cat "$X"', "head -n 1 $X", "grep root $X",
+    "cat $(echo /etc/shadow)", "cat `echo /etc/shadow`", "cat /tmp/$X", "sort $X", "cp $X /tmp/y",
+    # option values
+    "grep --file=/etc/shadow x", "grep --file=//etc/shadow x", "grep -f/etc/shadow x",
+    "head --lines=1 --foo=/etc/shadow x", "sort --files0-from=/etc/shadow",
+    # directory-recursive reads of protected trees
+    "grep -r root /etc", "grep -R PRIVATE /home/user/.ssh", "grep --recursive x /etc",
+    "grep -rn x /", "grep -d recurse x /etc", "grep -ri x ~", "grep -r x ..", "cp -r /etc /tmp/x",
+    "grep -r x /home", "rg root /etc",
+    "find /etc -name shadow -exec cat {} \;", "find / -exec cat {} +",
+    "find /home -execdir cat {} \;", "find ~ -ok cat {} \;",
+    # writes into protected places that used to fall to default FLAG
+    "echo a > /home/user/.ssh/authorized_keys", "echo a > /var/spool/cron/root",
+    # commands with no rule still have their file arguments judged
+    "strings /etc/shadow", "cp /etc/shadow /tmp/x", "base64 //etc/shadow", "less ~/.ssh/id_rsa",
+    "cat /proc/self/environ", "cat /proc/1/environ", "cat /proc/self/root/etc/shadow",
+]
+
+
+@pytest.mark.parametrize("command", CR03_BLOCKED)
+def test_cr03_shell_file_access_is_blocked(engine, command):
+    decision, reason = engine.check_detailed("run_shell", command)
+    assert decision == "BLOCK", reason
+
+
+@pytest.mark.parametrize("path,op", [
+    ("//etc/shadow", "read_file"), ("///etc/shadow", "read_file"),
+    ("/tmp/../etc/shadow", "read_file"), ("../../../etc/shadow", "read_file"),
+    ("../.ssh/id_rsa", "read_file"), ("~/.ssh/id_rsa", "read_file"),
+    ("/etc/shadow-", "read_file"), ("/proc/self/environ", "read_file"),
+    ("//etc/crontab", "write_file"), ("../../../etc/crontab", "write_file"),
+    ("/home/user/.ssh/authorized_keys", "write_file"), ("~/.bashrc", "write_file"),
+])
+def test_cr03_file_actions_are_normalised_before_matching(engine, path, op):
+    assert engine.check(op, path) == "BLOCK"
+
+
+CR03_NOT_BLOCKED = [
+    "cat /tmp/a.txt", "cat *.txt", "cat /tmp/*.txt", "cat ./notes.txt", "cat notes/*.md",
+    "cat /etc/hostname", "cat /etc/os-release", "cat /proc/cpuinfo", "head -n 5 /tmp/a",
+    "ls /tmp", "ls ~", "ls /etc", "ls", "echo $HOME", "echo $X", "echo '$X' > /tmp/out",
+    "grep -r todo .", "grep -r todo /tmp", "grep -r todo ~/workspace", "grep -rn todo notes",
+    "find . -name '*.txt'", "find /tmp -name x -exec cat {} \;", "find . -type f",
+    "cat '/etc/sha*'", "echo {1..3}", "ls /tmp/{a,b}", "echo hi > out.txt",
+    "echo hi > /home/user/workspace/output/x", "cd /tmp && cat a.txt", "cd workspace; ls",
+    "cat notes/../todo.txt", "sort -r /tmp/a", "wc -l /tmp/a",
+]
+
+
+@pytest.mark.parametrize("command", CR03_NOT_BLOCKED)
+def test_cr03_benign_file_access_is_not_blocked(engine, command):
+    decision, reason = engine.check_detailed("run_shell", command)
+    assert decision != "BLOCK", reason
+
+
+def test_cr03_plain_cat_shadow_still_blocked_with_a_reason(engine):
+    decision, reason = engine.check_detailed("run_shell", "cat /etc/shadow")
+    assert decision == "BLOCK" and "/etc/shadow" in reason
+
+
+def test_cr03_guarded_executor_never_runs_the_bypasses(engine):
+    for command in ["cat //etc/shadow", "cat ~/.ssh/id_rsa", "X=/etc/shadow; cat $X",
+                    "grep -r root /etc", "cd /etc && cat shadow"]:
+        inner = RecordingExecutor()
+        obs = GuardedExecutor(engine, inner).execute({"action": "run_shell", "command": command})
+        assert obs.status == "blocked" and inner.actions == [], command

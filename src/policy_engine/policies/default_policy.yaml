@@ -26,14 +26,26 @@ filesystem:
       - "/etc/hostname"
       - "/etc/os-release"
     block:
-      - "/etc/shadow"
-      - "/etc/passwd"
-      - "/etc/sudoers"
+      - "/etc/shadow*"          # also shadow- (backup copy)
+      - "/etc/gshadow*"
+      - "/etc/passwd*"
+      - "/etc/sudoers*"
+      - "/etc/sudoers.d/*"
+      - "/etc/ssh/*"
+      - "/root"
       - "/root/*"
+      - "/home/*/.ssh"
       - "/home/*/.ssh/*"
+      - "/home/*/.gnupg"
       - "/home/*/.gnupg/*"
+      - "/home/*/.aws/*"
+      - "/home/*/.netrc"
       - "/home/*/.bash_history"
-      - "/var/log/auth.log"
+      - "/var/log/auth.log*"
+      - "/proc/*/environ"       # also /proc/self/environ
+      - "/proc/*/mem"
+      - "/proc/*/root/*"
+      - "/proc/*/cwd/*"
   write:
     allow:
       - "/tmp/*"
@@ -46,6 +58,12 @@ filesystem:
       - "/root/*"
       - "/home/*/.bashrc"
       - "/home/*/.profile"
+      - "/home/*/.bash_profile"
+      - "/home/*/.bash_logout"
+      - "/home/*/.zshrc"
+      - "/home/*/.ssh/*"
+      - "/home/*/.gnupg/*"
+      - "/var/spool/cron/*"
 
 # Shell command execution rules
 process:

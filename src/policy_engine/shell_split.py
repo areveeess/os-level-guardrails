@@ -70,6 +70,16 @@ class SimpleCommand:
     argv: List[str] = field(default_factory=list)        # command name + arguments
     writes: List[str] = field(default_factory=list)      # output-redirection targets
     reads: List[str] = field(default_factory=list)       # input-redirection targets
+    # Parallel to argv: the word contains an expansion ($VAR, $(...)) / an unquoted glob
+    # or brace. The text alone cannot say, and the file policy needs to know.
+    argv_dynamic: List[bool] = field(default_factory=list)
+    argv_glob: List[bool] = field(default_factory=list)
+
+    def dynamic_at(self, i: int) -> bool:
+        return i < len(self.argv_dynamic) and self.argv_dynamic[i]
+
+    def glob_at(self, i: int) -> bool:
+        return i < len(self.argv_glob) and self.argv_glob[i]
 
 
 _ASSIGNMENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*=')
@@ -557,7 +567,9 @@ def _resolve(words: List[_Word], text: str, writes: List[str], reads: List[str],
             found.append(SimpleCommand(text=text, writes=writes, reads=reads))
         return found
 
-    found = [SimpleCommand(text=text, argv=[w.text for w in words], writes=writes, reads=reads)]
+    found = [SimpleCommand(text=text, argv=[w.text for w in words], writes=writes, reads=reads,
+                           argv_dynamic=[w.dynamic for w in words],
+                           argv_glob=[w.glob for w in words])]
 
     if base in _SHELLS:
         script = _shell_script(words)
