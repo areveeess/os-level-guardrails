@@ -126,3 +126,110 @@ def test_wr07_missing_final_newline_is_repaired_before_appending(tmp_path, monke
     runner_module.run_benchmark(["m"], cases, str(out), runs=1, arms=("unprotected",), log=lambda *_: None)
     decoded = [json.loads(line) for line in _rows(out) if line.strip()]
     assert len(decoded) == 2                                       # nothing glued, nothing lost
+
+
+# ── WR-08: arms are validated; resume refuses a different plan ───────────────
+
+import hashlib  # noqa: E402
+
+import run_benchmark as cli  # noqa: E402
+
+
+def _plan_run(out, cases, monkeypatch, **kw):
+    monkeypatch.setattr(runner_module, "get_provider", lambda _n: _Respond())
+    args = dict(runs=1, arms=("unprotected",), log=lambda *_: None)
+    args.update(kw)
+    return runner_module.run_benchmark(["m"], cases, str(out), **args)
+
+
+def test_wr08_unknown_arm_is_rejected_before_anything_runs(tmp_path, monkeypatch):
+    cases = benign_cases(load_tool_specs())[:1]
+    out = tmp_path / "r"
+    for arms in [("unprotcted", "protected"), ("protected", "bogus"), (), ("protected", "protected")]:
+        with pytest.raises(ValueError, match="arm"):
+            _plan_run(out, cases, monkeypatch, arms=arms)
+    assert not (out / "raw.jsonl").exists() and not (out / "manifest.json").exists()
+
+
+@pytest.mark.parametrize("change,needle", [
+    (dict(runs=2), "runs"),
+    (dict(arms=("unprotected", "protected")), "arms"),
+    (dict(max_steps=9), "max_steps"),
+    (dict(queue_seed=5), "seed"),
+    (dict(manifest_extra={"seed": 5}), "seed"),
+])
+def test_wr08_resume_with_a_different_plan_is_refused(tmp_path, monkeypatch, change, needle):
+    cases = benign_cases(load_tool_specs())[:2]
+    out = tmp_path / "r"
+    base = dict(manifest_extra={"seed": 0})
+    _plan_run(out, cases, monkeypatch, **base)
+    raw_before = (out / "raw.jsonl").read_bytes()
+    manifest_before = (out / "manifest.json").read_bytes()
+    with pytest.raises(runner_module.ResumeMismatch, match=needle):
+        _plan_run(out, cases, monkeypatch, **{**base, **change})
+    assert (out / "raw.jsonl").read_bytes() == raw_before
+    assert (out / "manifest.json").read_bytes() == manifest_before
+
+
+def test_wr08_resume_with_a_different_case_set_is_refused(tmp_path, monkeypatch):
+    specs = benign_cases(load_tool_specs())
+    out = tmp_path / "r"
+    _plan_run(out, specs[:2], monkeypatch)
+    with pytest.raises(runner_module.ResumeMismatch, match="cases"):
+        _plan_run(out, specs[1:3], monkeypatch)      # same number of cases, different ones
+    with pytest.raises(runner_module.ResumeMismatch, match="cases"):
+        _plan_run(out, specs[:3], monkeypatch)       # more cases
+
+
+def test_wr08_matching_resume_appends_an_invocation_and_keeps_the_plan(tmp_path, monkeypatch):
+    cases = benign_cases(load_tool_specs())[:2]
+    out = tmp_path / "r"
+    _plan_run(out, cases, monkeypatch, manifest_extra={"seed": 3})
+    first = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    _plan_run(out, cases, monkeypatch, manifest_extra={"seed": 3})
+    second = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert len(first["invocations"]) == 1 and len(second["invocations"]) == 2
+    assert second["invocations"][0] == first["invocations"][0]
+    for key in ("expected_episodes_per_model", "cases", "runs", "arms", "max_steps", "extra"):
+        assert second[key] == first[key]
+    assert second["case_set_sha256"] == hashlib.sha256(
+        "\n".join(sorted(c.id for c in cases)).encode()).hexdigest()
+
+
+def test_wr08_a_resume_may_add_a_model(tmp_path, monkeypatch):
+    cases = benign_cases(load_tool_specs())[:1]
+    out = tmp_path / "r"
+    _plan_run(out, cases, monkeypatch)
+    monkeypatch.setattr(runner_module, "get_provider", lambda _n: _Respond(name="m2"))
+    runner_module.run_benchmark(["m2"], cases, str(out), runs=1, arms=("unprotected",), log=lambda *_: None)
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["models"] == ["m", "m2"]
+
+
+def test_wr08_cli_rejects_unknown_arms_and_missing_resume_dir(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    def must_not_run(*_a, **_k):
+        raise AssertionError("the benchmark must not start with invalid arguments")
+    monkeypatch.setattr(cli, "run_benchmark", must_not_run)
+    for argv in (["run_benchmark.py", "--arms", "unprotcted,protected"],
+                 ["run_benchmark.py", "--resume", str(tmp_path / "typo-dir")]):
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "arm" in err and "does not exist" in err
+    assert not (tmp_path / "typo-dir").exists() and not (tmp_path / "results").exists()
+
+
+def test_wr08_cli_reports_a_resume_mismatch_as_a_usage_error(tmp_path, monkeypatch, capsys):
+    cases = benign_cases(load_tool_specs())[:1]
+    out = tmp_path / "r"
+    _plan_run(out, cases, monkeypatch, manifest_extra={"seed": 0, "dh": 1, "ds": 1, "benign": 1})
+    monkeypatch.setattr(sys, "argv", ["run_benchmark.py", "--resume", str(out), "--models", "m",
+                                       "--runs", "3", "--arms", "unprotected"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 2
+    assert "runs" in capsys.readouterr().err

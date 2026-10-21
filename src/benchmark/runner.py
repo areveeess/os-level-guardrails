@@ -16,6 +16,7 @@ stamped with the code commit and policy hash, and manifest.json records the
 planned size and one entry per invocation.
 """
 
+import hashlib
 import json
 import os
 import random
@@ -69,6 +70,66 @@ def _requested_wait(error: str):
 
 class QuotaExhausted(Exception):
     pass
+
+
+class ResumeMismatch(ValueError):
+    """--resume was given a plan that differs from the one the directory was started with."""
+
+
+def _validate_arms(arms) -> tuple:
+    """build_executor treats any arm other than 'unprotected' as the protected stack, so a
+    typo would silently run the sandbox under a mislabeled arm. Refuse it up front."""
+    arms = tuple(arms)
+    if not arms or len(set(arms)) != len(arms) or any(a not in ARMS for a in arms):
+        raise ValueError(f"invalid --arms {list(arms)!r}: expected a non-empty list without "
+                         f"duplicates drawn from {list(ARMS)}")
+    return arms
+
+
+def _case_set_sha256(cases: list) -> str:
+    return hashlib.sha256("\n".join(sorted(c.id for c in cases)).encode("utf-8")).hexdigest()
+
+
+def _plan(cases: list, runs: int, arms, max_steps: int, extra: dict, queue_seed: int) -> dict:
+    """What a results directory is a run *of*: everything that must not change on resume."""
+    return {
+        "expected_episodes_per_model": len(cases) * runs * len(arms),
+        "cases": dict(Counter(c.kind for c in cases)),
+        "case_set_sha256": _case_set_sha256(cases),
+        "runs": runs,
+        "arms": list(arms),
+        "max_steps": max_steps,
+        "queue_seed": queue_seed,
+        "extra": dict(extra or {}),
+    }
+
+
+def _read_manifest(out_dir: str) -> dict:
+    path = os.path.join(out_dir, "manifest.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            loaded = json.load(f)
+    except (OSError, ValueError):  # a corrupt manifest is rewritten, never fatal
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+_PLAN_LABELS = {"runs": "runs", "arms": "arms", "max_steps": "max_steps", "cases": "cases",
+                "case_set_sha256": "cases (different case ids)", "queue_seed": "seed (queue order)"}
+
+
+def _plan_differences(previous: dict, plan: dict) -> list:
+    """Human-readable differences between the stored manifest and this invocation. Only
+    fields the stored manifest has are compared, so older manifests still resume."""
+    diffs = [f"{_PLAN_LABELS[k]}: directory has {previous[k]!r}, this invocation has {plan[k]!r}"
+             for k in _PLAN_LABELS if k in previous and previous[k] != plan[k]]
+    old = (previous.get("extra") or {}).get("seed")
+    new = plan["extra"].get("seed")
+    if old is not None and new is not None and old != new:
+        diffs.append(f"seed: directory has {old!r}, this invocation has {new!r}")
+    return diffs
 
 
 def _git_commit() -> str:
@@ -171,30 +232,19 @@ def _work_queue(cases: list, runs: int, arms, seed: int) -> list:
     return queue
 
 
-def _write_manifest(out_dir: str, *, models: list, cases: list, runs: int, arms, max_steps: int,
-                    extra: dict, code_commit: str, code_dirty, policy_sha256: str) -> None:
+def _write_manifest(out_dir: str, *, models: list, plan: dict, previous: dict,
+                    code_commit: str, code_dirty, policy_sha256: str) -> None:
     """Create or update <out_dir>/manifest.json: the planned size of the run and one
-    entry per invocation. A fixed field list: no environment values, keys or URLs."""
+    entry per invocation, appended (never replaced). `plan` was already checked against
+    `previous` by the caller, so an existing directory keeps the plan it was started with.
+    A fixed field list: no environment values, keys or URLs."""
     path = os.path.join(out_dir, "manifest.json")
-    previous = {}
-    if os.path.exists(path):
-        try:
-            with open(path, encoding="utf-8") as f:
-                loaded = json.load(f)
-            previous = loaded if isinstance(loaded, dict) else {}
-        except (OSError, ValueError):  # a corrupt manifest is rewritten, never fatal
-            previous = {}
     known = previous.get("models") if isinstance(previous.get("models"), list) else []
     invocations = previous.get("invocations") if isinstance(previous.get("invocations"), list) else []
     manifest = {
         "schema": 1,
-        "expected_episodes_per_model": len(cases) * runs * len(arms),
-        "cases": dict(Counter(c.kind for c in cases)),
-        "runs": runs,
-        "arms": list(arms),
-        "max_steps": max_steps,
+        **plan,
         "models": list(dict.fromkeys([*known, *models])),
-        "extra": dict(extra or {}),
         "invocations": invocations + [{
             "started_at": datetime.now().isoformat(timespec="seconds"),
             "code_commit": code_commit, "code_dirty": code_dirty,
@@ -210,6 +260,14 @@ def _write_manifest(out_dir: str, *, models: list, cases: list, runs: int, arms,
 def run_benchmark(models: list, cases: list, out_dir: str, runs: int = 3, arms=ARMS,
                   max_steps: int = 5, sleep_s: float = 0.0, log=print, queue_seed: int = 0,
                   requeue_passes: int = 1, manifest_extra: dict = None) -> str:
+    arms = _validate_arms(arms)
+    plan = _plan(cases, runs, arms, max_steps, manifest_extra, queue_seed)
+    previous = _read_manifest(out_dir)
+    differences = _plan_differences(previous, plan) if previous else []
+    if differences:
+        raise ResumeMismatch(
+            f"{out_dir} was started with a different plan; resume it with the same arguments "
+            f"(or start a new directory):\n  " + "\n  ".join(differences))
     os.makedirs(out_dir, exist_ok=True)
     raw_path = os.path.join(out_dir, "raw.jsonl")
     done = set()
@@ -223,8 +281,8 @@ def run_benchmark(models: list, cases: list, out_dir: str, runs: int = 3, arms=A
     families = {name: cfg.get("family", "") for name, cfg in configs.items()}
     policy = PolicyEngine(log_file=os.path.join(out_dir, "decisions.jsonl"), verbose=False)
     code_commit, code_dirty = _git_commit(), _git_dirty()
-    _write_manifest(out_dir, models=models, cases=cases, runs=runs, arms=arms, max_steps=max_steps,
-                    extra=manifest_extra, code_commit=code_commit, code_dirty=code_dirty,
+    _write_manifest(out_dir, models=models, plan=plan, previous=previous,
+                    code_commit=code_commit, code_dirty=code_dirty,
                     policy_sha256=policy.policy_sha256)
     queue = _work_queue(cases, runs, arms, queue_seed)
     total = len(models) * len(cases) * runs * len(arms)

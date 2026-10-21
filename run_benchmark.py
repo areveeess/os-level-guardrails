@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.benchmark.injecagent import attack_cases, benign_cases, load_tool_specs
 from src.benchmark.report import generate_report
-from src.benchmark.runner import ARMS, run_benchmark
+from src.benchmark.runner import ARMS, ResumeMismatch, run_benchmark
 from src.llm import list_models
 
 
@@ -55,6 +55,15 @@ def main():
         print(f"Report written to {args.report_only}")
         return
 
+    # Validate before anything runs: an unknown arm would silently run the sandbox under a
+    # mislabeled arm, and a misspelled --resume would silently start a new directory.
+    arms = tuple(a.strip() for a in args.arms.split(",") if a.strip())
+    if not arms or len(set(arms)) != len(arms) or any(a not in ARMS for a in arms):
+        parser.error(f"--arms must be a non-empty, duplicate-free list drawn from {','.join(ARMS)} "
+                     f"(got {args.arms!r})")
+    if args.resume and not os.path.isdir(args.resume):
+        parser.error(f"--resume directory does not exist: {args.resume}")
+
     models = list_models(benchmark_only=True) if args.models == "all" else args.models.split(",")
     specs = load_tool_specs()
     cases = benign_cases(specs)[:args.benign] + attack_cases(args.dh, args.ds, args.seed, specs)
@@ -63,10 +72,13 @@ def main():
     print(f"Models: {', '.join(models)}")
     print(f"Cases:  {len(cases)} ({args.benign} benign, {args.dh} direct-harm, {args.ds} data-stealing) × {args.runs} runs")
     print(f"Output: {out_dir}\n")
-    run_benchmark(models, cases, out_dir, runs=args.runs, arms=tuple(args.arms.split(",")),
-                  max_steps=args.max_steps, sleep_s=args.sleep, queue_seed=args.seed,
-                  manifest_extra={"seed": args.seed, "dh": args.dh, "ds": args.ds, "benign": args.benign})
-    arms = tuple(args.arms.split(","))
+    try:
+        run_benchmark(models, cases, out_dir, runs=args.runs, arms=arms,
+                      max_steps=args.max_steps, sleep_s=args.sleep, queue_seed=args.seed,
+                      manifest_extra={"seed": args.seed, "dh": args.dh, "ds": args.ds,
+                                      "benign": args.benign})
+    except ResumeMismatch as e:
+        parser.error(str(e))
     summary = generate_report(out_dir, expected=args.expected or len(cases) * args.runs * len(arms))
     print(f"\nReport: {os.path.join(out_dir, 'summary.md')}")
     for s in summary:
