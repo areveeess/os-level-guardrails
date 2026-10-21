@@ -173,11 +173,30 @@ def _autocast(device):
 RESPOND_HEAD = '{"action":"respond","message":"'      # the part of a respond line the model can predict
 RESPOND_TAG = '{"action":"respond"'                   # enough characters to tell a respond line from any other action
 SELECTION_METRIC = "dev_loss_action"
-REMEDIATION_RULE = ("Applied once, after the first run, from this manifest's dev metrics only (never the benchmark "
-                    "or smoke outcomes): if best.dev_action_exact < 0.50 and the selection metric was still improving "
-                    "at the end (stop_reason max_steps and best_step >= steps - 2 x eval_every), retrain once from "
-                    "scratch with max_steps doubled (capped at about 60 minutes of training); otherwise no retry and "
-                    "a sub-threshold value is recorded as a finding.")
+REMEDIATION_THRESHOLD = 0.75
+REMEDIATION_RULE = (
+    f"Pre-registered before the retrain, applied at most once, from this manifest's dev metrics only (never from "
+    f"benchmark or smoke outcomes): if best.dev_action_exact < {REMEDIATION_THRESHOLD:.2f} and the selection metric "
+    f"was still improving when the run ended (stop_reason max_steps and best_step >= steps - 2 x eval_every), train "
+    f"once more from scratch with the same data, seed and settings and max_steps doubled (capped at about 60 minutes "
+    f"of training); otherwise no retry, and a value below the threshold at convergence is recorded as a finding. "
+    f"The threshold sits above the 0.626 that the earlier checkpoint, selected on the wrong metric, scored on this "
+    f"dev split (benign 0.752, dh 0.643, ds 0.477), and benign lines alone already reach 0.75, so it is reachable.")
+
+
+def remediation_needed(manifest: dict) -> tuple:
+    """(needed, reason): the REMEDIATION_RULE applied mechanically to a finished run's manifest."""
+    best, steps = manifest["best"], manifest["steps"]
+    every = manifest["config"]["train"]["eval_every"]
+    below = best["dev_action_exact"] < REMEDIATION_THRESHOLD
+    improving = manifest["stop_reason"] == "max_steps" and manifest["best_step"] >= steps - 2 * every
+    reason = (f"best.dev_action_exact {best['dev_action_exact']:.4f} "
+              f"{'<' if below else '>='} {REMEDIATION_THRESHOLD:.2f}; stop_reason {manifest['stop_reason']}, "
+              f"best_step {manifest['best_step']} {'>=' if improving else '<'} steps - 2 x eval_every = {steps - 2 * every}"
+              if manifest["stop_reason"] == "max_steps" else
+              f"best.dev_action_exact {best['dev_action_exact']:.4f} "
+              f"{'<' if below else '>='} {REMEDIATION_THRESHOLD:.2f}; stop_reason {manifest['stop_reason']} (converged)")
+    return below and improving, reason
 
 
 @torch.no_grad()

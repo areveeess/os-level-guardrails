@@ -29,8 +29,9 @@ from src.benchmark.injecagent import load_tool_specs
 from src.scratch_llm.format import compact_action, decode, encode
 from src.scratch_llm.inference import load_generator
 from src.scratch_llm.model import GPTConfig, ScratchGPT
-from src.scratch_llm.train import (EVAL_KEYS, MANIFEST_KEYS, RESPOND_HEAD, SELECTION_METRIC, NonFiniteLossError,
-                                   TrainConfig, collate, encode_episode, evaluate, lr_at, main, make_batches, train)
+from src.scratch_llm.train import (EVAL_KEYS, MANIFEST_KEYS, REMEDIATION_THRESHOLD, RESPOND_HEAD, SELECTION_METRIC,
+                                   NonFiniteLossError, TrainConfig, collate, encode_episode, evaluate, lr_at, main,
+                                   make_batches, remediation_needed, train)
 
 TINY = dict(n_layer=2, n_head=2, d_model=32, dropout=0.0)
 CLI_TINY = ["--n-layer", "2", "--n-head", "2", "--d-model", "32", "--dropout", "0.0", "--device", "cpu",
@@ -310,7 +311,8 @@ def test_manifest_has_the_fixed_fields_no_environment_values_and_the_checkpoint_
     assert "final" not in manifest
     assert set(manifest["best"]) == set(manifest["last_eval"]) == {"step", "train_loss", *EVAL_KEYS}
     assert manifest["selection"]["metric"] == SELECTION_METRIC == "dev_loss_action"
-    assert "dev_action_exact < 0.50" in manifest["selection"]["remediation_rule"]
+    assert f"best.dev_action_exact < {REMEDIATION_THRESHOLD:.2f}" in manifest["selection"]["remediation_rule"]
+    assert "never from benchmark or smoke outcomes" in manifest["selection"]["remediation_rule"]
     assert manifest["dataset"]["n_train"] == 64 and manifest["dataset"]["n_dev"] == 8
 
 
@@ -361,6 +363,24 @@ def test_a_leaking_training_file_stops_training_before_any_checkpoint(files, tmp
         train(bad, files[1], out, model_cfg=GPTConfig(**TINY), train_cfg=quick_config(), device="cpu", log=quiet)
     assert not os.path.exists(os.path.join(out, "scratch_gpt.pt"))
     assert not os.path.exists(os.path.join(out, "manifest.json"))
+
+
+def fake_manifest(action_exact, stop_reason, best_step, steps=7000, every=250):
+    return {"best": {"dev_action_exact": action_exact}, "stop_reason": stop_reason, "best_step": best_step,
+            "steps": steps, "config": {"train": {"eval_every": every}}}
+
+
+def test_the_remediation_rule_is_applied_mechanically_from_dev_metrics_only():
+    """CR-01: the pre-registered threshold must be reachable and gated on the dev action metric only."""
+    assert remediation_needed(fake_manifest(0.60, "max_steps", 6800))[0] is True              # weak and still improving
+    assert remediation_needed(fake_manifest(0.60, "max_steps", 6500))[0] is True              # exactly steps - 2 x every
+    assert remediation_needed(fake_manifest(0.60, "max_steps", 6400))[0] is False             # plateaued before the end
+    assert remediation_needed(fake_manifest(0.60, "early_stop", 6800))[0] is False            # converged: a finding, no retry
+    assert remediation_needed(fake_manifest(0.75, "max_steps", 7000))[0] is False             # threshold met
+    assert remediation_needed(fake_manifest(0.99, "max_steps", 7000))[0] is False
+    assert 0.626 < REMEDIATION_THRESHOLD < 1.0                                               # above the old model, below perfect
+    needed, reason = remediation_needed(fake_manifest(0.60, "max_steps", 6800))
+    assert "0.6000 < 0.75" in reason and "best_step 6800 >= steps - 2 x eval_every = 6500" in reason
 
 
 def poison_training_from(monkeypatch, first_bad_call):
