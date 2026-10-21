@@ -26,11 +26,11 @@ from src.scratch_llm import train as train_module
 from src.scratch_llm.dataset import (LeakageError, episode_tool, episode_to_messages, generate_episodes,
                                      write_episodes)
 from src.benchmark.injecagent import load_tool_specs
-from src.scratch_llm.format import compact_action, decode
+from src.scratch_llm.format import compact_action, decode, encode
 from src.scratch_llm.inference import load_generator
 from src.scratch_llm.model import GPTConfig, ScratchGPT
-from src.scratch_llm.train import (MANIFEST_KEYS, NonFiniteLossError, TrainConfig, collate, encode_episode, evaluate,
-                                   lr_at, main, make_batches, train)
+from src.scratch_llm.train import (EVAL_KEYS, MANIFEST_KEYS, RESPOND_HEAD, SELECTION_METRIC, NonFiniteLossError,
+                                   TrainConfig, collate, encode_episode, evaluate, lr_at, main, make_batches, train)
 
 TINY = dict(n_layer=2, n_head=2, d_model=32, dropout=0.0)
 CLI_TINY = ["--n-layer", "2", "--n-head", "2", "--d-model", "32", "--dropout", "0.0", "--device", "cpu",
@@ -197,6 +197,68 @@ def test_evaluate_reports_loss_and_line_exact_overall_per_class_and_for_the_firs
     assert result["dev_loss"] == pytest.approx(math.log(96), rel=0.25)    # an untrained model is near uniform
 
 
+class OracleExceptRespondText(torch.nn.Module):
+    """A stand-in model that predicts every supervised character perfectly except the message text of
+    respond lines, which it always gets wrong: the structure of the dev split in miniature."""
+
+    def __init__(self):
+        super().__init__()
+        self.unused = torch.nn.Parameter(torch.zeros(1))
+
+    def forward(self, x, targets=None, mask=None):
+        B, T = x.shape
+        target = torch.cat([x[:, 1:], torch.zeros(B, 1, dtype=x.dtype)], dim=1)     # the next character of the row
+        for row in range(B):
+            text = decode(x[row].tolist())
+            at = text.find(RESPOND_HEAD)
+            while at != -1:
+                end = text.find("\n", at)
+                end = T if end == -1 else end
+                first = at + len(RESPOND_HEAD) - 1                  # the target position of the first message character
+                target[row, first:end] = (target[row, first:end] + 1) % 96
+                at = text.find(RESPOND_HEAD, end)
+        logits = torch.full((B, T, 96), -10.0)
+        logits.scatter_(-1, target.unsqueeze(-1), 10.0)
+        return logits, None
+
+
+def test_evaluate_keeps_the_unpredictable_respond_text_out_of_the_action_metrics(dev_episodes):
+    """CR-01: held-back reply wording decided which checkpoint was kept. The action metrics must not see it."""
+    dev = [encode_episode(e) for e in dev_episodes]
+    result = evaluate(OracleExceptRespondText(), dev, 4096, "cpu")
+    assert set(result) == set(EVAL_KEYS)
+    assert result["dev_action_exact"] == 1.0 and result["dev_nonrespond_line_exact"] == 1.0
+    assert result["dev_respond_head_exact"] == 1.0
+    assert result["dev_loss_action"] < 1e-3
+    assert result["dev_respond_line_exact"] == 0.0 and 0.0 < result["dev_line_exact"] < 1.0
+    assert result["dev_loss_respond_text"] > 5.0 and result["dev_loss"] > 20 * result["dev_loss_action"]
+    assert set(result["dev_action_exact_by_cls"]) == {e["cls"] for e in dev_episodes}
+    assert all(v == 1.0 for v in result["dev_action_exact_by_cls"].values())
+    assert encode(RESPOND_HEAD) and RESPOND_HEAD.startswith('{"action":"respond"')
+
+
+def scripted_results(pairs):
+    """evaluate() replacements: (dev_loss, dev_loss_action) per evaluation, every other number fixed."""
+    base = {key: 0.5 for key in EVAL_KEYS}
+    base.update(dev_action_exact_by_cls={"benign": 0.5}, dev_line_exact_by_cls={"benign": 0.5})
+    queue = iter([dict(base, dev_loss=a, dev_loss_action=b) for a, b in pairs])
+    return lambda *args, **kwargs: next(queue)
+
+
+def test_the_kept_checkpoint_and_early_stopping_follow_the_action_loss_not_the_plain_dev_loss(files, tmp_path,
+                                                                                               monkeypatch):
+    # plain dev loss improves at every evaluation (the old criterion would run to the end and keep the last step);
+    # the action loss is best at the second evaluation and then worsens
+    monkeypatch.setattr(train_module, "evaluate",
+                        scripted_results([(2.0, 0.30), (1.9, 0.20), (1.8, 0.25), (1.7, 0.26), (1.6, 0.27), (1.5, 0.28)]))
+    out = str(tmp_path / "selection")
+    manifest = train(*files, out, model_cfg=GPTConfig(**TINY), device="cpu", log=quiet,
+                     train_cfg=quick_config(max_steps=12, eval_every=2, log_every=2, patience=2))
+    assert manifest["best_step"] == 4 and manifest["steps"] == 8 and manifest["stop_reason"] == "early_stop"
+    meta = torch.load(os.path.join(out, "scratch_gpt.pt"), map_location="cpu", weights_only=True)["train_meta"]
+    assert meta["step"] == 4 and meta["dev_loss_action"] == 0.20 and meta["dev_loss"] == 1.9
+
+
 # ── manifest ──
 
 def test_manifest_has_the_fixed_fields_no_environment_values_and_the_checkpoint_hash(files, tmp_path, monkeypatch):
@@ -212,8 +274,9 @@ def test_manifest_has_the_fixed_fields_no_environment_values_and_the_checkpoint_
     with open(os.path.join(out, "scratch_gpt.pt"), "rb") as f:
         assert manifest["checkpoint_sha256"] == hashlib.sha256(f.read()).hexdigest()
     assert manifest["run_notes"] == [] and manifest["stop_reason"] == "max_steps"
-    assert set(manifest["final"]) == {"train_loss", "dev_loss", "dev_line_exact", "dev_line_exact_by_cls",
-                                      "dev_first_line_exact"}
+    assert set(manifest["final"]) == {"train_loss", *EVAL_KEYS}
+    assert manifest["selection"]["metric"] == SELECTION_METRIC == "dev_loss_action"
+    assert "dev_action_exact < 0.50" in manifest["selection"]["remediation_rule"]
     assert manifest["dataset"]["n_train"] == 64 and manifest["dataset"]["n_dev"] == 8
 
 

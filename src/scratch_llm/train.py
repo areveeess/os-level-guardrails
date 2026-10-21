@@ -15,8 +15,11 @@ itself is supplied by the prompt at inference, so it is not supervised either.
     precision   bf16 autocast on the GPU (weights stay fp32), plain fp32 on the CPU
     batches     sequences of similar length are grouped under a token budget, right-padded;
                 padding plus the causal mask means a real position never attends to padding
-    selection   the checkpoint with the lowest loss on the dev split is kept; the benchmark
-                is never read here (the leakage gate runs over train and dev before step 0)
+    selection   the checkpoint with the lowest dev_loss_action is kept, and early stopping watches the
+                same number. It leaves out the message text of respond lines: the dev split uses
+                held-back reply wording that no model can predict, and that text alone is 94 % of the
+                plain dev loss (review CR-01). The benchmark is never read here (the leakage gate
+                runs over train and dev before step 0)
     safety      a non-finite loss stops the run at once (exit code 3, no final manifest), so a
                 diverged run can never be mistaken for a finished one
 
@@ -26,8 +29,9 @@ torch.load(weights_only=True)), manifest.json, train_log.jsonl and loss_curve.pn
 Progress lines on stdout (a background run is polled for these):
     device <cpu|cuda> params <n>
     step <s>/<max> loss <x> lr <y> tok/s <z> elapsed <t>s
-    eval step <s> dev_loss <x> dev_line_exact <y> best <z>
-    DONE best_step <s> best_dev_loss <x> wall <t>s stop <max_steps|early_stop|target_loss>
+    eval step <s> dev_loss <x> dev_loss_action <a> dev_action_exact <e> dev_line_exact <y> best <z>
+                                                  (best = lowest dev_loss_action so far)
+    DONE best_step <s> best_dev_loss_action <x> wall <t>s stop <max_steps|early_stop|target_loss>
     FAILED non_finite_loss step <s>          (exit code 3)
 
     python -m src.scratch_llm.train [--train FILE] [--dev FILE] [--out-dir DIR] ...
@@ -60,10 +64,15 @@ MAX_NOTE_CHARS = 200
 
 MANIFEST_KEYS = ("schema", "created_at", "code_commit", "code_dirty", "python", "torch", "cuda", "device", "seed",
                  "dataset", "held_out_sha256", "format_version", "vocab_sha256", "render_fingerprint",
-                 "context_chars", "gen_reserve", "config", "params", "steps", "best_step", "tokens_seen", "final",
+                 "context_chars", "gen_reserve", "config", "params", "steps", "best_step", "tokens_seen", "selection",
+                 "final",
                  "checkpoint_sha256", "wall_seconds", "stop_reason", "run_notes")
-MANIFEST_SCHEMA = 1
+MANIFEST_SCHEMA = 2
 CLASSES = ("benign", "dh", "ds")
+# every metric evaluate() returns, in the order the manifest lists them
+EVAL_KEYS = ("dev_loss", "dev_loss_action", "dev_loss_respond_text", "dev_action_exact", "dev_action_exact_by_cls",
+             "dev_nonrespond_line_exact", "dev_respond_head_exact", "dev_respond_line_exact", "dev_line_exact",
+             "dev_line_exact_by_cls", "dev_first_line_exact")
 
 
 class NonFiniteLossError(RuntimeError):
@@ -148,56 +157,124 @@ def _autocast(device):
 
 # ── evaluation ──
 
+RESPOND_HEAD = '{"action":"respond","message":"'      # the part of a respond line the model can predict
+RESPOND_TAG = '{"action":"respond"'                   # enough characters to tell a respond line from any other action
+SELECTION_METRIC = "dev_loss_action"
+REMEDIATION_RULE = ("Applied once, after the first run, from this manifest's dev metrics only (never the benchmark "
+                    "or smoke outcomes): if best.dev_action_exact < 0.50 and the selection metric was still improving "
+                    "at the end (stop_reason max_steps and best_step >= steps - 2 x eval_every), retrain once from "
+                    "scratch with max_steps doubled (capped at about 60 minutes of training); otherwise no retry and "
+                    "a sub-threshold value is recorded as a finding.")
+
+
 @torch.no_grad()
 def evaluate(model, dev_encoded: list, batch_tokens: int, device) -> dict:
-    """Dev loss and teacher-forced line exact match.
+    """Dev loss and teacher-forced line exact match, with the unpredictable reply text kept apart.
 
-    dev_loss is the mask-weighted mean cross-entropy over every supervised dev character. A line is
-    one maximal run of supervised characters (one A: payload plus its newline); it is exact when the
-    argmax equals the gold character at every position of the run given the gold prefix, which is
-    exactly what greedy decoding would produce. Reported overall, per episode class and for the first
-    action of each episode.
+    A line is one maximal run of supervised characters (one A: payload plus its newline); it is exact
+    when the argmax equals the gold character at every position of the run given the gold prefix, which
+    is what greedy decoding would produce. The dev split deliberately uses held-back reply wording
+    (D-04), so the message text of a respond line is something no model can predict. Counting it would
+    let that text decide which checkpoint is kept. The metrics therefore come in two groups.
+
+    Selection and the headline (action level):
+      dev_loss_action        mean cross-entropy over every supervised character EXCEPT the message text
+                             of respond lines (the choice to respond, and the form of the line, still count)
+      dev_action_exact       share of lines whose action part is exact: the whole line for every action
+                             but respond, the head '{"action":"respond","message":"' for a respond line
+      dev_action_exact_by_cls, dev_nonrespond_line_exact (whole lines, respond excluded)
+
+    Diagnostics (kept for continuity, never used to select):
+      dev_loss                  over every supervised character, as before
+      dev_loss_respond_text     over the respond message text only
+      dev_line_exact            every line must match entirely (respond lines practically never do)
+      dev_respond_head_exact, dev_respond_line_exact, dev_line_exact_by_cls, dev_first_line_exact
     """
+    import torch.nn.functional as F
     was_training = model.training
     model.eval()
-    loss_sum, loss_count = 0.0, 0
-    lines = {"all": [0, 0], "first": [0, 0], **{c: [0, 0] for c in CLASSES}}      # [exact, total]
+    sums = {"all": [0.0, 0], "action": [0.0, 0], "text": [0.0, 0]}              # [loss sum, characters]
+    lines = {key: [0, 0] for key in ("all", "first", "action", "nonrespond", "respond_full", "respond_head",
+                                     *(f"cls:{c}" for c in CLASSES), *(f"act:{c}" for c in CLASSES))}   # [exact, total]
+    tag = torch.tensor(encode(RESPOND_TAG), dtype=torch.long, device=device)
+    head_len = len(RESPOND_HEAD)
     lengths = [len(e[0]) for e in dev_encoded]
     for idxs in make_batches(lengths, batch_tokens, 0, 0):
         x, y, m = collate(dev_encoded, idxs, device)
         with _autocast(device):
-            logits, loss = model(x, y, m)
-        count = int(m.sum().item())
-        loss_sum, loss_count = loss_sum + float(loss.item()) * count, loss_count + count
+            logits, _ = model(x)
+        logits = logits.float()
+        B, T = x.shape
+        ce = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1), reduction="none")
+        y_flat, sup = y.reshape(-1), m.bool().reshape(-1)
+        wrong = (logits.argmax(dim=-1).reshape(-1) != y_flat) & sup
 
-        supervised = m.bool()
-        wrong = ((logits.argmax(dim=-1) != y) & supervised).flatten()
-        starts = (supervised & ~torch.nn.functional.pad(supervised, (1, 0))[:, :-1]).flatten()
+        row_sup = m.bool()
+        starts = (row_sup & ~F.pad(row_sup, (1, 0))[:, :-1]).reshape(-1)
         run_id = torch.cumsum(starts.long(), dim=0)                           # 1-based, valid where supervised
-        runs = int(starts.sum().item())
-        bad = torch.zeros(runs + 1, dtype=torch.long, device=wrong.device)
-        bad.scatter_add_(0, run_id[supervised.flatten()], wrong[supervised.flatten()].long())
-        exact = (bad[1:] == 0).tolist()
-        row_of_run = (torch.nonzero(starts).flatten() // x.shape[1]).tolist()
+        start_pos = torch.nonzero(starts).flatten()
+        runs = int(start_pos.numel())
+        if runs == 0:
+            continue
+        # which runs are respond lines: their first characters spell RESPOND_TAG
+        ids = torch.arange(1, runs + 1, device=device)
+        is_respond = torch.ones(runs, dtype=torch.bool, device=device)
+        for k in range(tag.numel()):
+            pos = (start_pos + k).clamp(max=y_flat.numel() - 1)
+            is_respond &= (y_flat[pos] == tag[k]) & sup[pos] & (run_id[pos] == ids)
+        # per position: offset inside its run, and whether it belongs to a respond line
+        owner = (run_id - 1).clamp(min=0)
+        offset = torch.arange(y_flat.numel(), device=device) - start_pos[owner]
+        in_respond = is_respond[owner] & sup
+        text = in_respond & (offset >= head_len)
+        action = sup & ~text
+        for key, sel in (("all", sup), ("action", action), ("text", text)):
+            sums[key][0] += float(ce[sel].sum().item())
+            sums[key][1] += int(sel.sum().item())
+
+        bad_all = torch.zeros(runs + 1, dtype=torch.long, device=device)
+        bad_head = torch.zeros(runs + 1, dtype=torch.long, device=device)
+        bad_all.scatter_add_(0, run_id[sup], wrong[sup].long())
+        head = sup & (offset < head_len)
+        bad_head.scatter_add_(0, run_id[head], wrong[head].long())
+        full_ok = (bad_all[1:] == 0).tolist()
+        head_ok = (bad_head[1:] == 0).tolist()
+        respond = is_respond.tolist()
+        row_of_run = (start_pos // T).tolist()
         seen_rows = set()
-        for ok, row in zip(exact, row_of_run):
+        for ok, h_ok, resp, row in zip(full_ok, head_ok, respond, row_of_run):
             cls = dev_encoded[idxs[row]][3]
-            for key in ("all", cls):
-                lines[key][0] += ok
-                lines[key][1] += 1
+            act_ok = h_ok if resp else ok
+            tallies = [("all", ok), (f"cls:{cls}", ok), ("action", act_ok), (f"act:{cls}", act_ok)]
+            tallies.append(("respond_full", ok) if resp else ("nonrespond", ok))
+            if resp:
+                tallies.append(("respond_head", h_ok))
             if row not in seen_rows:
                 seen_rows.add(row)
-                lines["first"][0] += ok
-                lines["first"][1] += 1
+                tallies.append(("first", ok))
+            for key, value in tallies:
+                lines[key][0] += value
+                lines[key][1] += 1
     model.train(was_training)
 
     def share(key):
         exact, total = lines[key]
         return exact / total if total else 0.0
 
-    return {"dev_loss": loss_sum / max(1, loss_count),
+    def mean(key):
+        total, count = sums[key]
+        return total / max(1, count)
+
+    return {"dev_loss": mean("all"),
+            "dev_loss_action": mean("action"),
+            "dev_loss_respond_text": mean("text"),
+            "dev_action_exact": share("action"),
+            "dev_action_exact_by_cls": {c: share(f"act:{c}") for c in CLASSES if lines[f"act:{c}"][1]},
+            "dev_nonrespond_line_exact": share("nonrespond"),
+            "dev_respond_head_exact": share("respond_head"),
+            "dev_respond_line_exact": share("respond_full"),
             "dev_line_exact": share("all"),
-            "dev_line_exact_by_cls": {c: share(c) for c in CLASSES if lines[c][1]},
+            "dev_line_exact_by_cls": {c: share(f"cls:{c}") for c in CLASSES if lines[f"cls:{c}"][1]},
             "dev_first_line_exact": share("first")}
 
 
@@ -232,7 +309,10 @@ def _write_curve(path: str, history: list, params: int, best_step: int) -> None:
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.plot([h["step"] for h in history], [h["train_loss"] for h in history], label="train loss")
-    ax.plot([h["step"] for h in history], [h["dev_loss"] for h in history], label="dev loss")
+    ax.plot([h["step"] for h in history], [h["dev_loss"] for h in history], label="dev loss (all characters)",
+            linestyle="--", alpha=0.6)
+    ax.plot([h["step"] for h in history], [h[SELECTION_METRIC] for h in history], label="dev loss, action (selection)")
+    ax.axvline(best_step, color="grey", linewidth=0.8, linestyle=":")
     ax.set_xlabel("step")
     ax.set_ylabel("loss on A: characters (nats)")
     ax.set_title(f"ScratchGPT {params / 1e6:.2f}M parameters, best step {best_step}")
@@ -288,7 +368,7 @@ def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = N
             os.remove(stale)          # a rerun into the same directory must not leave an old manifest behind
     log(f"device {'cuda' if on_cuda else 'cpu'} params {params}")
 
-    history, best = [], {"dev_loss": float("inf"), "step": 0}
+    history, best = [], {SELECTION_METRIC: float("inf"), "step": 0}
     tokens_seen, step, epoch, stale_evals = 0, 0, 0, 0
     since_eval, since_log, mark = [], [], (time.time(), 0)
     stop_reason = None
@@ -333,15 +413,18 @@ def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = N
                 since_eval = []
                 history.append(record)
                 _append_jsonl(log_path, record)
-                if result["dev_loss"] < best["dev_loss"]:
-                    best, stale_evals = {"dev_loss": result["dev_loss"], "step": step}, 0
+                if result[SELECTION_METRIC] < best[SELECTION_METRIC]:       # never the respond-text loss (CR-01)
+                    best, stale_evals = {SELECTION_METRIC: result[SELECTION_METRIC], "step": step}, 0
                     _save_checkpoint(ckpt_path, model, model_cfg,
                                      {"seed": train_cfg.seed, "step": step, "dev_loss": result["dev_loss"],
-                                      "dev_line_exact": result["dev_line_exact"], "tokens_seen": tokens_seen})
+                                      "dev_loss_action": result["dev_loss_action"],
+                                      "dev_line_exact": result["dev_line_exact"],
+                                      "dev_action_exact": result["dev_action_exact"], "tokens_seen": tokens_seen})
                 else:
                     stale_evals += 1
-                log(f"eval step {step} dev_loss {result['dev_loss']:.4f} dev_line_exact "
-                    f"{result['dev_line_exact']:.4f} best {best['dev_loss']:.4f}")
+                log(f"eval step {step} dev_loss {result['dev_loss']:.4f} dev_loss_action "
+                    f"{result['dev_loss_action']:.4f} dev_action_exact {result['dev_action_exact']:.4f} dev_line_exact "
+                    f"{result['dev_line_exact']:.4f} best {best[SELECTION_METRIC]:.4f}")
                 if stop_reason is None and stale_evals >= train_cfg.patience:
                     stop_reason = "early_stop"
             if step >= train_cfg.max_steps or stop_reason:
@@ -367,9 +450,12 @@ def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = N
         **current_stamps(),
         "config": {"model": model_cfg.to_dict(), "train": train_cfg.to_dict()},
         "params": params, "steps": step, "best_step": best["step"], "tokens_seen": tokens_seen,
-        "final": {"train_loss": last["train_loss"], "dev_loss": last["dev_loss"],
-                  "dev_line_exact": last["dev_line_exact"], "dev_line_exact_by_cls": last["dev_line_exact_by_cls"],
-                  "dev_first_line_exact": last["dev_first_line_exact"]},
+        "selection": {"metric": SELECTION_METRIC, "direction": "min",
+                      "description": "mean cross-entropy over supervised dev characters except the message text of "
+                                     "respond lines (which is held-back wording nobody can predict); used for the "
+                                     "kept checkpoint and for early stopping",
+                      "remediation_rule": REMEDIATION_RULE},
+        "final": {"train_loss": last["train_loss"], **{k: last[k] for k in EVAL_KEYS}},
         "checkpoint_sha256": file_sha256(ckpt_path),
         "wall_seconds": wall,
         "stop_reason": stop_reason,
@@ -377,7 +463,8 @@ def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = N
     }
     assert tuple(manifest) == MANIFEST_KEYS, "manifest fields drifted from MANIFEST_KEYS"
     write_json_atomic(os.path.join(out_dir, "manifest.json"), manifest)
-    log(f"DONE best_step {best['step']} best_dev_loss {best['dev_loss']:.4f} wall {wall:.0f}s stop {stop_reason}")
+    log(f"DONE best_step {best['step']} best_{SELECTION_METRIC} {best[SELECTION_METRIC]:.4f} wall {wall:.0f}s "
+        f"stop {stop_reason}")
     return manifest
 
 
