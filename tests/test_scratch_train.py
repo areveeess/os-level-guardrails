@@ -383,6 +383,84 @@ def test_the_remediation_rule_is_applied_mechanically_from_dev_metrics_only():
     assert "0.6000 < 0.75" in reason and "best_step 6800 >= steps - 2 x eval_every = 6500" in reason
 
 
+def interrupt_at_evaluation(monkeypatch, number):
+    """The `number`-th call of evaluate() raises KeyboardInterrupt: a process killed in the middle of a run."""
+    real, calls = train_module.evaluate, {"n": 0}
+
+    def maybe_interrupted(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == number:
+            raise KeyboardInterrupt
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(train_module, "evaluate", maybe_interrupted)
+    return real
+
+
+def test_a_killed_run_resumes_at_the_right_step_and_matches_an_uninterrupted_run(files, tmp_path, monkeypatch):
+    """Restart-proof training: the WSL VM was restarted from outside several times in the middle of a run."""
+    config = quick_config(max_steps=20, eval_every=5, log_every=5)
+    reference = train(*files, str(tmp_path / "reference"), model_cfg=GPTConfig(**TINY), train_cfg=config,
+                      device="cpu", log=quiet)
+
+    out = str(tmp_path / "killed")
+    real = interrupt_at_evaluation(monkeypatch, 3)                       # killed at step 15, after the step-10 evaluation
+    with pytest.raises(KeyboardInterrupt):
+        train(*files, out, model_cfg=GPTConfig(**TINY), train_cfg=config, device="cpu", log=quiet)
+    assert os.path.exists(os.path.join(out, "scratch_gpt.resume.tmp"))
+    assert os.path.exists(os.path.join(out, "scratch_gpt.best.tmp"))
+    assert not os.path.exists(os.path.join(out, "scratch_gpt.pt")) and not os.path.exists(os.path.join(out, "manifest.json"))
+    monkeypatch.setattr(train_module, "evaluate", real)
+
+    lines = []
+    manifest = train(*files, out, model_cfg=GPTConfig(**TINY), train_cfg=config, device="cpu", log=lines.append,
+                     run_notes=["relaunch"], resume=True)
+    assert "RESUMED from step 10 (resume number 1)" in lines
+    assert manifest["resumed_from_steps"] == [10] and manifest["steps"] == 20
+    assert manifest["run_notes"] == ["relaunch", "resumed from step 10"]
+    assert [r["step"] for r in read_log(out)] == [5, 10, 15, 20]          # each evaluation exactly once
+    assert not os.path.exists(os.path.join(out, "scratch_gpt.resume.tmp"))
+    meta = torch.load(os.path.join(out, "scratch_gpt.pt"), map_location="cpu", weights_only=True)["train_meta"]
+    assert meta["resumed_from"] == [10]
+    # the continued run follows the uninterrupted one (CPU, same seed, same batch order, restored optimizer state)
+    assert manifest["best_step"] == reference["best_step"]
+    for key in ("dev_loss", "dev_loss_action", "train_loss"):
+        assert manifest["last_eval"][key] == pytest.approx(reference["last_eval"][key], rel=1e-4)
+    assert manifest["tokens_seen"] == reference["tokens_seen"]
+    assert reference["resumed_from_steps"] == []
+
+
+def test_resume_refuses_a_different_run_or_a_missing_resume_file(files, tmp_path, monkeypatch):
+    config = quick_config(max_steps=20, eval_every=5, log_every=5)
+    out = str(tmp_path / "refuse")
+    with pytest.raises(ValueError, match="nothing to resume"):
+        train(*files, out, model_cfg=GPTConfig(**TINY), train_cfg=config, device="cpu", log=quiet, resume=True)
+    interrupt_at_evaluation(monkeypatch, 2)
+    with pytest.raises(KeyboardInterrupt):
+        train(*files, out, model_cfg=GPTConfig(**TINY), train_cfg=config, device="cpu", log=quiet)
+    before = sorted(os.listdir(out))
+    with pytest.raises(ValueError, match="different run: train"):
+        train(*files, out, model_cfg=GPTConfig(**TINY), train_cfg=quick_config(max_steps=20, eval_every=5, lr=2e-3),
+              device="cpu", log=quiet, resume=True)
+    other_dev = str(tmp_path / "other_dev.jsonl")
+    write_episodes(other_dev, generate_episodes(8, 5, "dev_tools"))
+    with pytest.raises(ValueError, match="different run: dev_sha256"):
+        train(files[0], other_dev, out, model_cfg=GPTConfig(**TINY), train_cfg=config, device="cpu", log=quiet,
+              resume=True)
+    assert sorted(os.listdir(out)) == before                              # a refusal deletes nothing
+
+
+def test_a_fresh_run_discards_an_old_resume_file_and_the_progress_line_reports_memory(files, tmp_path):
+    out = tmp_path / "fresh"
+    out.mkdir()
+    (out / "scratch_gpt.resume.tmp").write_bytes(b"stale")
+    lines = []
+    train(*files, str(out), model_cfg=GPTConfig(**TINY), train_cfg=quick_config(), device="cpu", log=lines.append)
+    assert not (out / "scratch_gpt.resume.tmp").exists()
+    step_lines = [line for line in lines if line.startswith("step ")]
+    assert step_lines and all(" rss " in line and line.endswith("MB") for line in step_lines)
+
+
 def poison_training_from(monkeypatch, first_bad_call):
     """From the `first_bad_call`-th training forward pass on, the loss is NaN."""
     original = ScratchGPT.forward

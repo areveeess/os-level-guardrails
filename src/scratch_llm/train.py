@@ -39,6 +39,7 @@ Progress lines on stdout (a background run is polled for these):
 
 import argparse
 import contextlib
+import gc
 import json
 import math
 import os
@@ -63,13 +64,14 @@ ALLOWED_ROOT = PROJECT_ROOT      # --train, --dev and --out-dir must stay inside
 EXIT_NON_FINITE = 3
 MAX_NOTE_CHARS = 200
 IN_RUN_CHECKPOINT = "scratch_gpt.best.tmp"     # best weights of a run in progress; only a finished run renames it to scratch_gpt.pt
+RESUME_FILE = "scratch_gpt.resume.tmp"         # everything needed to continue a killed run, rewritten after every evaluation
 
 MANIFEST_KEYS = ("schema", "created_at", "code_commit", "code_dirty", "python", "torch", "cuda", "device", "seed",
                  "dataset", "held_out_sha256", "format_version", "vocab_sha256", "render_fingerprint",
                  "context_chars", "gen_reserve", "config", "params", "steps", "best_step", "tokens_seen", "selection",
                  "best", "last_eval",
-                 "checkpoint_sha256", "wall_seconds", "stop_reason", "run_notes")
-MANIFEST_SCHEMA = 3
+                 "checkpoint_sha256", "wall_seconds", "stop_reason", "resumed_from_steps", "run_notes")
+MANIFEST_SCHEMA = 4
 CLASSES = ("benign", "dh", "ds")
 # every metric evaluate() returns, in the order the manifest lists them
 EVAL_KEYS = ("dev_loss", "dev_loss_action", "dev_loss_respond_text", "dev_action_exact", "dev_action_exact_by_cls",
@@ -336,6 +338,25 @@ def _remove(*paths: str) -> None:
             os.remove(path)
 
 
+def _rss_mb() -> int:
+    """Resident memory of this process in MB (Linux /proc; 0 elsewhere), for the progress line."""
+    try:
+        with open("/proc/self/status", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def _save_resume(path: str, state: dict) -> None:
+    """Written next to the final name and moved into place, so a kill never leaves half a resume file."""
+    tmp = path + ".tmp"
+    torch.save(state, tmp)
+    os.replace(tmp, path)
+
+
 def _append_jsonl(path: str, record: dict) -> None:
     with open(path, "a", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps(record) + "\n")
@@ -363,15 +384,20 @@ def _write_curve(path: str, history: list, params: int, best_step: int) -> None:
 # ── training ──
 
 def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = None, train_cfg: TrainConfig = None,
-          device: str = "auto", log=print, run_notes: list = None) -> dict:
+          device: str = "auto", log=print, run_notes: list = None, resume: bool = False) -> dict:
     """Train ScratchGPT on the episodes in `train_path`, select on `dev_path`, write the artifacts, return the manifest.
 
     Raises LeakageError before the first step if either file contains benchmark content, and
     NonFiniteLossError (after a FAILED line and a non_finite_loss or non_finite_dev_loss log event, with no
     final manifest) if the training or the dev loss ever stops being finite. Stale files of an earlier run in
     `out_dir` are removed first, the best weights live under a temporary name until the run has finished, and a
-    run that fails or is interrupted leaves no scratch_gpt.pt behind, so a checkpoint next to no manifest never
-    exists.
+    run that fails leaves no scratch_gpt.pt behind, so a checkpoint next to no manifest never exists.
+
+    Restart-proof: after every evaluation the run writes RESUME_FILE (model, optimizer, RNG states, step, epoch and
+    position in the epoch's batch order, best-so-far, history). A process that is killed (the WSL VM restarted,
+    SIGTERM, Ctrl-C) leaves it and the best weights in place; `resume=True` continues from it and refuses when the
+    data hashes, the configuration or the format stamps differ. The manifest and the checkpoint record the steps a
+    run was resumed from. A run that fails (non-finite loss) deletes everything, as before.
     """
     model_cfg = model_cfg or GPTConfig()
     train_cfg = train_cfg or TrainConfig()
@@ -392,6 +418,13 @@ def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = N
     train_enc = [encode_episode(e) for e in train_eps]
     dev_enc = [encode_episode(e) for e in dev_eps]
     train_lengths = [len(e[0]) for e in train_enc]
+    # Only the numbers the manifest needs are kept; the episodes (dicts and strings of the whole corpus) are freed
+    # so the process does not carry them through the run (host memory is shared with other jobs).
+    n_train, n_dev = len(train_eps), len(dev_eps)
+    class_counts = {c: sum(e["cls"] == c for e in train_eps) for c in CLASSES}
+    synthetic_fraction = round(sum(bool(e["meta"]["synthetic"]) for e in train_eps) / n_train, 6)
+    del train_eps, dev_eps
+    gc.collect()
 
     torch.manual_seed(train_cfg.seed)
     model = ScratchGPT(model_cfg).to(device)
@@ -407,20 +440,51 @@ def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = N
     best_path = os.path.join(out_dir, IN_RUN_CHECKPOINT)       # the best weights so far; renamed to ckpt_path on success only
     log_path = os.path.join(out_dir, "train_log.jsonl")
     manifest_path = os.path.join(out_dir, "manifest.json")
-    leftovers = (ckpt_path, ckpt_path + ".tmp", best_path, best_path + ".tmp")
-    # A rerun into the same directory must not leave anything of the earlier run behind: a stale checkpoint next to
-    # no manifest would load fine and be benchmarked as if it were this run's (review WR-05).
-    _remove(*leftovers, log_path, manifest_path, os.path.join(out_dir, "loss_curve.png"))
+    resume_path = os.path.join(out_dir, RESUME_FILE)
+    leftovers = (ckpt_path, ckpt_path + ".tmp", best_path, best_path + ".tmp", resume_path, resume_path + ".tmp")
+    identity = {"train_sha256": file_sha256(train_path), "dev_sha256": file_sha256(dev_path),
+                "model": model_cfg.to_dict(), "train": train_cfg.to_dict(), **current_stamps()}
+    state = None
+    if resume:
+        if not (os.path.exists(resume_path) and os.path.exists(best_path)):
+            raise ValueError(f"nothing to resume in {out_dir}: {RESUME_FILE} and {IN_RUN_CHECKPOINT} must both exist")
+        state = torch.load(resume_path, map_location="cpu", weights_only=True)
+        differs = [k for k in identity if state["identity"].get(k) != identity[k]]
+        if differs:
+            raise ValueError(f"the resume file is from a different run: {', '.join(differs)} differ")
+        _remove(ckpt_path, ckpt_path + ".tmp", manifest_path, os.path.join(out_dir, "loss_curve.png"))
+    else:
+        # A rerun into the same directory must not leave anything of the earlier run behind: a stale checkpoint next
+        # to no manifest would load fine and be benchmarked as if it were this run's (review WR-05).
+        _remove(*leftovers, log_path, manifest_path, os.path.join(out_dir, "loss_curve.png"))
     log(f"device {'cuda' if on_cuda else 'cpu'} params {params}")
 
     try:
         history, best = [], {SELECTION_METRIC: float("inf"), "step": 0}
-        tokens_seen, step, epoch, stale_evals = 0, 0, 0, 0
-        since_eval, since_log, mark = [], [], (time.time(), 0)
+        tokens_seen, step, epoch, stale_evals, skip = 0, 0, 0, 0, 0
+        resumed_from = []
+        if state:
+            model.load_state_dict(state["state_dict"])
+            optimizer.load_state_dict(state["optimizer"])
+            torch.set_rng_state(state["rng"])
+            if on_cuda and state.get("cuda_rng") is not None:
+                torch.cuda.set_rng_state(state["cuda_rng"])
+            history, best = state["history"], state["best"]
+            step, epoch, skip, tokens_seen = state["step"], state["epoch"], state["batch_pos"], state["tokens_seen"]
+            stale_evals, resumed_from = state["stale_evals"], state["resumed_from"] + [state["step"]]
+            started = time.time() - state["elapsed_s"]
+            _remove(log_path)                      # rewritten from the saved history: no duplicate or stray lines
+            for record in history:
+                _append_jsonl(log_path, record)
+            log(f"RESUMED from step {step} (resume number {len(resumed_from)})")
+        since_eval, since_log, mark = [], [], (time.time(), tokens_seen)
         stop_reason = None
         model.train()
         while step < train_cfg.max_steps and stop_reason is None:
-            for idxs in make_batches(train_lengths, train_cfg.batch_tokens, train_cfg.seed, epoch, BATCH_JITTER):
+            for pos, idxs in enumerate(make_batches(train_lengths, train_cfg.batch_tokens, train_cfg.seed, epoch,
+                                                    BATCH_JITTER)):
+                if pos < skip:
+                    continue                       # batches of this epoch that the resumed run already trained on
                 lr = lr_at(step, train_cfg.max_steps, train_cfg.lr, train_cfg.min_lr, train_cfg.warmup)
                 for group in optimizer.param_groups:
                     group["lr"] = lr
@@ -448,7 +512,7 @@ def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = N
                     interval = sum(since_log) / len(since_log)
                     since_log = []
                     log(f"step {step}/{train_cfg.max_steps} loss {interval:.4f} lr {lr:.2e} tok/s {rate:.0f} "
-                        f"elapsed {now - started:.0f}s")
+                        f"elapsed {now - started:.0f}s rss {_rss_mb()}MB")
                     if train_cfg.target_loss > 0 and interval < train_cfg.target_loss:
                         stop_reason = "target_loss"
 
@@ -470,7 +534,8 @@ def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = N
                                          {"seed": train_cfg.seed, "step": step, "dev_loss": result["dev_loss"],
                                           "dev_loss_action": result["dev_loss_action"],
                                           "dev_line_exact": result["dev_line_exact"],
-                                          "dev_action_exact": result["dev_action_exact"], "tokens_seen": tokens_seen})
+                                          "dev_action_exact": result["dev_action_exact"], "tokens_seen": tokens_seen,
+                                          "resumed_from": resumed_from})
                     else:
                         stale_evals += 1
                     log(f"eval step {step} dev_loss {result['dev_loss']:.4f} dev_loss_action "
@@ -478,13 +543,26 @@ def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = N
                         f"{result['dev_line_exact']:.4f} best {best[SELECTION_METRIC]:.4f}")
                     if stop_reason is None and stale_evals >= train_cfg.patience:
                         stop_reason = "early_stop"
+                    if stop_reason is None and step < train_cfg.max_steps:
+                        _save_resume(resume_path, {
+                            "identity": identity, "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+                            "optimizer": optimizer.state_dict(), "rng": torch.get_rng_state(),
+                            "cuda_rng": torch.cuda.get_rng_state() if on_cuda else None, "history": history,
+                            "best": best, "step": step, "epoch": epoch, "batch_pos": pos + 1, "tokens_seen": tokens_seen,
+                            "stale_evals": stale_evals, "resumed_from": resumed_from,
+                            "elapsed_s": time.time() - started})
                 if step >= train_cfg.max_steps or stop_reason:
                     break
             epoch += 1
+            skip = 0
         stop_reason = stop_reason or "max_steps"
 
         if not os.path.exists(best_path):
             raise RuntimeError("the run ended without saving a checkpoint")
+        kept_ckpt = torch.load(best_path, map_location="cpu", weights_only=True)
+        kept_ckpt["train_meta"]["resumed_from"] = resumed_from        # the checkpoint says whether, and where, it was resumed
+        _save_resume(best_path, kept_ckpt)
+        _remove(resume_path, resume_path + ".tmp")
         os.replace(best_path, ckpt_path)         # the run finished: now, and only now, the weights get their final name
         try:
             _write_curve(os.path.join(out_dir, "loss_curve.png"), history, params, best["step"])
@@ -501,9 +579,8 @@ def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = N
             "device": "cuda" if on_cuda else "cpu", "seed": train_cfg.seed,
             "dataset": {"train_path": _rel(train_path), "train_sha256": file_sha256(train_path),
                         "dev_path": _rel(dev_path), "dev_sha256": file_sha256(dev_path),
-                        "n_train": len(train_eps), "n_dev": len(dev_eps),
-                        "class_counts": {c: sum(e["cls"] == c for e in train_eps) for c in CLASSES},
-                        "synthetic_fraction": round(sum(bool(e["meta"]["synthetic"]) for e in train_eps) / len(train_eps), 6)},
+                        "n_train": n_train, "n_dev": n_dev, "class_counts": class_counts,
+                        "synthetic_fraction": synthetic_fraction},
             "held_out_sha256": held_out_sha256(),
             **current_stamps(),
             "config": {"model": model_cfg.to_dict(), "train": train_cfg.to_dict()},
@@ -520,15 +597,18 @@ def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = N
             "checkpoint_sha256": file_sha256(ckpt_path),
             "wall_seconds": wall,
             "stop_reason": stop_reason,
-            "run_notes": list(run_notes or []),
+            "resumed_from_steps": resumed_from,
+            "run_notes": list(run_notes or []) + [f"resumed from step {s}" for s in resumed_from],
         }
         assert tuple(manifest) == MANIFEST_KEYS, "manifest fields drifted from MANIFEST_KEYS"
         write_json_atomic(manifest_path, manifest)
         log(f"DONE best_step {best['step']} best_{SELECTION_METRIC} {best[SELECTION_METRIC]:.4f} wall {wall:.0f}s "
             f"stop {stop_reason}")
         return manifest
+    except KeyboardInterrupt:
+        raise                         # Ctrl-C leaves the resume file and the best weights: --resume continues
     except BaseException:
-        _remove(*leftovers)           # a failed or interrupted run leaves no loadable checkpoint (review WR-05)
+        _remove(*leftovers)           # a failed run leaves no loadable checkpoint (review WR-05)
         raise
 
 
@@ -564,6 +644,8 @@ def main(argv=None) -> int:
     parser.add_argument("--n-head", type=int, default=GPTConfig.n_head)
     parser.add_argument("--d-model", type=int, default=GPTConfig.d_model)
     parser.add_argument("--dropout", type=float, default=GPTConfig.dropout)
+    parser.add_argument("--resume", action="store_true",
+                        help=f"continue a killed run from {RESUME_FILE} in --out-dir (refused if data, config or stamps differ)")
     parser.add_argument("--run-note", action="append", type=_note, default=[], metavar="TEXT",
                         help="why this run was started or relaunched; repeatable, stored in the manifest in order")
     args = parser.parse_args(argv)
@@ -591,7 +673,7 @@ def main(argv=None) -> int:
     os.makedirs(paths["out_dir"], exist_ok=True)
     try:
         train(paths["train"], paths["dev"], paths["out_dir"], model_cfg, train_cfg, args.device, _flush_print,
-              run_notes=args.run_note)
+              run_notes=args.run_note, resume=args.resume)
     except NonFiniteLossError:
         return EXIT_NON_FINITE        # the FAILED line was already printed by train()
     return 0
