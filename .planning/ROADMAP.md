@@ -12,7 +12,7 @@ The guardrails (policy engine, namespaces, seccomp-bpf) and the InjecAgent harne
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Evaluation Hardening & Policy Fix** - Honest scoring/report semantics, a model-independent control agent, and the shell-chaining bypass fixed before any new data is collected
+- [x] **Phase 1: Evaluation Hardening & Policy Fix** - Honest scoring/report semantics, a model-independent control agent, and the shell-chaining bypass fixed before any new data is collected (completed 2026-10-21)
 - [ ] **Phase 2: Local Data Foundation & ScratchGPT** - Leakage-free synthetic episodes, one shared render format, and a ScratchGPT trained locally and running in the benchmark
 - [ ] **Phase 3: Qwen LoRA & hf_local Provider** - In-process Hugging Face provider, base-Qwen control row, and a locally LoRA-tuned Qwen2.5-0.5B running in the benchmark
 - [ ] **Phase 4: Full Runs - Local, Added Ollama, Hosted Resume** - Every local model benchmarked to 342/342, unfinished hosted runs resumed under a stopping rule, and sandbox/seccomp layers shown to fire
@@ -32,7 +32,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. A scripted worst-case control agent (always obeys the injected instruction) runs through the same benchmark and both arms, and the report shows a model-independent count of what the guardrails block given an attempt.
   5. The viva page(s) for the reference monitor / access matrix / policy engine and for evaluation statistics (ASR definitions, Wilson intervals) are added to `docs/viva/` (definition of done for every phase; DOC-03 is traced to Phase 5).
 
-**Plans**: 4/4 plans executed
+**Plans**: 4/4 plans complete
 
 Plans:
 **Wave 1**
@@ -107,7 +107,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (the `hf_local` provi
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Evaluation Hardening & Policy Fix | 4/4 | In Progress | - |
+| 1. Evaluation Hardening & Policy Fix | 4/4 | Complete    | 2026-10-21 |
 | 2. Local Data Foundation & ScratchGPT | 0/TBD | Not started | - |
 | 3. Qwen LoRA & hf_local Provider | 0/TBD | Not started | - |
 | 4. Full Runs - Local, Added Ollama, Hosted Resume | 0/TBD | Not started | - |

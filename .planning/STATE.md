@@ -1,43 +1,43 @@
 ---
 gsd_state_version: "1.0"
-current_phase: 1
-current_phase_name: Evaluation Hardening & Policy Fix
-status: verifying
-stopped_at: Completed 01-04-PLAN.md
-last_updated: "2026-10-20T18:57:23.989Z"
-last_activity: 2026-10-20
-last_activity_desc: Phase 1 execution started
-state_head: 230224e931307d642576f19d9df8ef6a5ce8dce6
+current_phase: 2
+current_phase_name: Local Data Foundation & ScratchGPT
+status: planning
+stopped_at: Phase 1 complete, ready to plan Phase 2
+last_updated: "2026-10-21T02:42:47.733Z"
+last_activity: 2026-10-21
+last_activity_desc: Phase 1 complete, transitioned to Phase 2
+state_head: 03cb45e6798aed9dda8bd6ac457f0e4d04773f79
 progress:
   total_phases: 5
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 4
   completed_plans: 4
-  percent: 0
+  percent: 20
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-10-20)
+See: .planning/PROJECT.md (updated 2026-10-21)
 
 **Core value:** The guardrails must be shown to hold independently of which LLM drives the agent, including a weak, unaligned, locally made model, backed by a fair, reproducible comparison table the student can defend in a viva.
-**Current focus:** Phase 1 — Evaluation Hardening & Policy Fix
+**Current focus:** Phase 2 — Local Data Foundation & ScratchGPT
 
 ## Current Position
 
-Phase: 1 (Evaluation Hardening & Policy Fix) — EXECUTING
-Plan: 4 of 4
-Status: Phase complete — ready for verification
-Last activity: 2026-10-20 — Phase 1 execution started
+Phase: 2 — Local Data Foundation & ScratchGPT
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-10-21 — Phase 1 complete, transitioned to Phase 2
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [██░░░░░░░░] 20% (Phase 1 of 5 complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 0
+- Total plans completed: 4
 - Average duration: - min
 - Total execution time: 0.0 hours
 
@@ -45,7 +45,7 @@ Progress: [░░░░░░░░░░] 0%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 1 | 4 | - | - |
 
 **Recent Trend:**
 - Last 5 plans: -
@@ -72,7 +72,7 @@ Recent decisions affecting current work:
 - [Roadmap]: EVAL-08 (layer-targeted attack suite) placed in Phase 4 as CPU-side work alongside background GPU runs; EVAL-07 control agent stays in Phase 1
 - [Roadmap]: DOC-03 (viva notes) traced to Phase 5, but every phase's success criteria require its viva page (definition of done)
 - [Roadmap]: Policy fix (SEC-01) precedes all final protected-arm runs; policy-file hash is stamped on every result record
-- [Phase 01]: [01-01] episodes_done counts finished episodes (outcome != llm_error) before pair dropping; provider content-filter refusals are outcome 'refused' and stay in denominators; blocked_given_attempt = attempted protected episodes with non-empty blocked_by
+- [Phase 01]: [01-01] episodes_done counts finished episodes (outcome != llm_error) before pair dropping; provider content-filter refusals are outcome 'refused' and stay in denominators; blocked_given_attempt superseded by review fix WR-04: the attack action itself was blocked and the attack did not succeed
 - [Phase 01]: Own shell lexer instead of shlex.split in policy_engine/shell_split.py; unparseable input, dynamic command/redirect names, heredocs and ANSI-C quoting fail closed
 - [Phase 01]: Dashboard defaults to 127.0.0.1:5000 with debug off; DASHBOARD_HOST/PORT/DEBUG env vars opt in
 - [Phase 01]: 01-03: report completeness denominator precedence is explicit expected, then source manifest.json, then 342; merged dirs use the largest manifest value per model
@@ -91,6 +91,9 @@ None yet.
 - [Phase 4] Existing llama3.2:3b and gemma-4-31b rows may be affected by context truncation or API timeouts; re-score from `raw.jsonl`
 - [Phase 4] GPU is serial: stop Ollama during training; scratch training, then LoRA training, then benchmark runs
 - [Docs] REQUIREMENTS.md originally stated 26 v1 requirements; the actual count is 27 (corrected at roadmap creation)
+- [Phase 1→5] results/phase1-control was produced before the review fixes (policy hash 9dcdaaf1…); re-run it before the Phase 5 data freeze so stamps match the final engine (numbers expected unchanged)
+- [Phase 1→4] Stricter policy may over-block benign dynamic operands (e.g. head -n $N file); watch benign utility / FP rate in Phase 4
+- [Phase 1] Review Info items IN-01 ("429" substring rate-limit match), IN-02 (non-string final_message), IN-04 (retried errors invisible in report) remain open, low severity
 
 ## Deferred Items
 
@@ -102,6 +105,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-20T18:57:23.902Z
-Stopped at: Completed 01-04-PLAN.md
+Last session: 2026-10-21T02:43:22Z
+Stopped at: Phase 1 complete, ready to plan Phase 2
 Resume file: None

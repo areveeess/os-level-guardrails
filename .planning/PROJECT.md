@@ -22,6 +22,10 @@ The guardrails must be shown to hold **independently of which LLM drives the age
 - ✓ InjecAgent benchmark: tool broker, unprotected vs protected arms, scoring, merged per-model reports + charts — existing (Phase 3 commit)
 - ✓ Real-time Flask dashboard over `logs/guardrails.jsonl` — existing
 - ✓ IEEE 1016 SDD (v2.0) with PDF/DOCX export — existing
+- ✓ Honest benchmark report: outcome taxonomy, k/n + Wilson CIs, completeness gating, paired infra-error handling, case-level view — Phase 1
+- ✓ Provenance stamps on every result record + run manifest + paired run-major queue — Phase 1
+- ✓ Scripted worst-case control agent (control-always-comply): 120/120 attacks succeed unprotected, 0/120 protected — Phase 1
+- ✓ Shell-chaining policy bypass fixed with test-first evidence; quote-aware fail-closed shell parser; dashboard on 127.0.0.1 with debug off — Phase 1
 
 ### Active
 
@@ -30,8 +34,8 @@ The guardrails must be shown to hold **independently of which LLM drives the age
 - [ ] More local open models (qwen2.5:3b, phi3.5:3.8b, gemma3:1b via Ollama) are benchmarked alongside llama3.2:3b
 - [ ] Unfinished hosted (non-Gemini) runs are resumed so the comparison includes data-stealing episodes
 - [ ] A cross-model comparison report (tables, charts, analysis) with Gemini as just one row among many
-- [ ] Policy-engine shell-chaining bypass (`ls; curl …`) is reproduced by a test and fixed
-- [ ] Viva study notes covering the theory foundations of every component, updated as each phase lands
+- [ ] Viva study notes covering the theory foundations of every component, updated as each phase lands (Phase 1 page done: docs/viva/01-reference-monitor-and-evaluation.md)
+- [ ] Layer-targeted suite uses the residual policy bypasses from 01-REVIEW-FIX.md to show namespaces + seccomp containing what the denylist misses (emerged in Phase 1 code review)
 - [ ] README, SDD, and a Review-3 slide deck reflect the multi-LLM + local-model results
 
 ### Out of Scope
@@ -65,7 +69,10 @@ The guardrails must be shown to hold **independently of which LLM drives the age
 | "Locally made LLM" = both from-scratch ScratchGPT and a locally LoRA-fine-tuned Qwen2.5-0.5B | Gives a spectrum for the viva: scratch → fine-tuned → pretrained local → hosted | — Pending |
 | Compare against non-Gemini models: Groq (gpt-oss-120b/20b, qwen3.8-27b) + local Ollama (llama3.2:3b, qwen2.5:3b, phi3.5:3.8b, gemma3:1b) | Reviewer asked for "other LLMs other than Gemini"; local models avoid quota limits | — Pending |
 | Keep InjecAgent + existing scoring | Results stay comparable with the committed final-20261011 run | — Pending |
-| Fix the shell-chaining policy bypass with a test first | Real security gap found by the codebase map; strong viva point on defense-in-depth | — Pending |
+| Fix the shell-chaining policy bypass with a test first | Real security gap found by the codebase map; strong viva point on defense-in-depth | ✓ Good — red commit 72e737f then fix; code review found 4 more bypasses, fixed/partial |
+| Keep policy `default_action: FLAG` (denylist) after code review; residual bypasses become Phase 4 test inputs | An allow-list default would inflate false positives; the residuals demonstrate why OS layers exist | — Pending (validated in Phase 4) |
+| Run GSD executors sequentially on the main checkout (`workflow.use_worktrees: false`) | WSL venv lives in the repo; worktrees could not run tests | ✓ Good |
+| "Blocked given attempt" = the attack action itself was blocked and the attack did not succeed | Code review WR-04: counting any block over-credited guardrails | ✓ Good |
 | Viva notes live in `docs/viva/` and grow every phase | Student asked for theory foundations to refer to during the viva | — Pending |
 
 ## Evolution
@@ -86,4 +93,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-20 after initialization*
+*Last updated: 2026-10-21 after Phase 1*
