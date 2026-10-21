@@ -346,6 +346,89 @@ def test_a_leaking_training_file_stops_training_before_any_checkpoint(files, tmp
     assert not os.path.exists(os.path.join(out, "manifest.json"))
 
 
+def poison_training_from(monkeypatch, first_bad_call):
+    """From the `first_bad_call`-th training forward pass on, the loss is NaN."""
+    original = ScratchGPT.forward
+    calls = {"n": 0}
+
+    def poisoned(self, idx, targets=None, mask=None):
+        logits, loss = original(self, idx, targets, mask)
+        if self.training and loss is not None:
+            calls["n"] += 1
+            if calls["n"] >= first_bad_call:
+                loss = loss * float("nan")
+        return logits, loss
+
+    monkeypatch.setattr(ScratchGPT, "forward", poisoned)
+
+
+def test_a_rerun_into_a_used_directory_starts_clean_and_a_failed_run_leaves_no_loadable_checkpoint(files, tmp_path,
+                                                                                                  monkeypatch):
+    """WR-05: a stale scratch_gpt.pt next to no manifest would be benchmarked as if it were valid."""
+    out = tmp_path / "used"
+    out.mkdir()
+    for name in ("scratch_gpt.pt", "scratch_gpt.pt.tmp", "scratch_gpt.best.tmp", "train_log.jsonl", "loss_curve.png"):
+        (out / name).write_bytes(b"stale")
+    poison_training_from(monkeypatch, 3)                       # diverges before the first evaluation
+    with pytest.raises(NonFiniteLossError):
+        train(*files, str(out), model_cfg=GPTConfig(**TINY), train_cfg=quick_config(), device="cpu", log=quiet)
+    assert sorted(os.listdir(out)) == ["train_log.jsonl"]
+    assert read_log(str(out)) == [{"step": 3, "event": "non_finite_loss"}]
+
+
+def test_a_run_that_diverges_after_saving_a_best_checkpoint_removes_it(files, tmp_path, monkeypatch):
+    out = tmp_path / "late_nan"
+    poison_training_from(monkeypatch, 12)                      # evaluations at steps 5 and 10 saved a best checkpoint
+    with pytest.raises(NonFiniteLossError):
+        train(*files, str(out), model_cfg=GPTConfig(**TINY), device="cpu", log=quiet,
+              train_cfg=quick_config(max_steps=20, eval_every=5, log_every=5))
+    assert [r["step"] for r in read_log(str(out)) if "event" not in r] == [5, 10]
+    assert not any(name.startswith("scratch_gpt") for name in os.listdir(out))
+    assert not os.path.exists(out / "manifest.json")
+
+
+def test_nothing_loadable_exists_until_the_run_has_finished(files, tmp_path, monkeypatch):
+    out = tmp_path / "in_flight"
+    real_evaluate, seen = train_module.evaluate, []
+
+    def watching(*args, **kwargs):
+        seen.append(os.path.exists(out / "scratch_gpt.pt"))
+        return real_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(train_module, "evaluate", watching)
+    train(*files, str(out), model_cfg=GPTConfig(**TINY), device="cpu", log=quiet,
+          train_cfg=quick_config(max_steps=20, eval_every=5, log_every=5))
+    assert seen == [False] * 4 and os.path.exists(out / "scratch_gpt.pt")
+    assert not os.path.exists(out / "scratch_gpt.best.tmp")
+
+
+def test_a_nan_dev_loss_fails_the_run_instead_of_silently_saving_nothing(files, tmp_path, monkeypatch):
+    lines = []
+    monkeypatch.setattr(train_module, "evaluate", scripted_results([(float("nan"), float("nan"))]))
+    out = str(tmp_path / "nan_dev")
+    with pytest.raises(NonFiniteLossError):
+        train(*files, out, model_cfg=GPTConfig(**TINY), train_cfg=quick_config(max_steps=6, eval_every=2, log_every=2),
+              device="cpu", log=lines.append)
+    assert "FAILED non_finite_dev_loss step 2" in lines
+    assert read_log(out) == [{"step": 2, "event": "non_finite_dev_loss"}]
+    assert not any(name.startswith("scratch_gpt") or name == "manifest.json" for name in os.listdir(out))
+
+
+def test_a_plotting_failure_does_not_cost_a_finished_run_its_manifest(files, tmp_path, monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("no display")
+
+    monkeypatch.setattr(train_module, "_write_curve", broken)
+    lines = []
+    out = str(tmp_path / "no_plot")
+    manifest = train(*files, out, model_cfg=GPTConfig(**TINY), train_cfg=quick_config(), device="cpu",
+                     log=lines.append)
+    assert os.path.exists(os.path.join(out, "manifest.json")) and os.path.exists(os.path.join(out, "scratch_gpt.pt"))
+    assert not os.path.exists(os.path.join(out, "loss_curve.png"))
+    assert any(line.startswith("WARNING loss curve not written: RuntimeError") for line in lines)
+    assert manifest["stop_reason"] == "max_steps"
+
+
 def test_the_command_line_refuses_paths_outside_the_repository_and_missing_inputs(files, tmp_path, monkeypatch):
     monkeypatch.setattr(train_module, "ALLOWED_ROOT", str(tmp_path))
     with pytest.raises(SystemExit) as outside:

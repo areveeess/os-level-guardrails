@@ -20,8 +20,8 @@ itself is supplied by the prompt at inference, so it is not supervised either.
                 held-back reply wording that no model can predict, and that text alone is 94 % of the
                 plain dev loss (review CR-01). The benchmark is never read here (the leakage gate
                 runs over train and dev before step 0)
-    safety      a non-finite loss stops the run at once (exit code 3, no final manifest), so a
-                diverged run can never be mistaken for a finished one
+    safety      a non-finite loss (training or dev) stops the run at once (exit code 3, no final
+                manifest, no scratch_gpt.pt), so a diverged run can never be mistaken for a finished one
 
 Outputs in --out-dir: scratch_gpt.pt (tensors and primitives only, so it loads with
 torch.load(weights_only=True)), manifest.json, train_log.jsonl and loss_curve.png.
@@ -62,6 +62,7 @@ from src.scratch_llm.provenance import (git_commit, git_dirty, refuse_foreign_ma
 ALLOWED_ROOT = PROJECT_ROOT      # --train, --dev and --out-dir must stay inside this directory (tests point it at a tmp dir)
 EXIT_NON_FINITE = 3
 MAX_NOTE_CHARS = 200
+IN_RUN_CHECKPOINT = "scratch_gpt.best.tmp"     # best weights of a run in progress; only a finished run renames it to scratch_gpt.pt
 
 MANIFEST_KEYS = ("schema", "created_at", "code_commit", "code_dirty", "python", "torch", "cuda", "device", "seed",
                  "dataset", "held_out_sha256", "format_version", "vocab_sha256", "render_fingerprint",
@@ -299,6 +300,12 @@ def _save_checkpoint(path: str, model, model_cfg: GPTConfig, meta: dict) -> None
     os.replace(tmp, path)
 
 
+def _remove(*paths: str) -> None:
+    for path in paths:
+        if os.path.exists(path):
+            os.remove(path)
+
+
 def _append_jsonl(path: str, record: dict) -> None:
     with open(path, "a", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps(record) + "\n")
@@ -330,8 +337,11 @@ def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = N
     """Train ScratchGPT on the episodes in `train_path`, select on `dev_path`, write the artifacts, return the manifest.
 
     Raises LeakageError before the first step if either file contains benchmark content, and
-    NonFiniteLossError (after a FAILED line and a non_finite_loss log event, with no final manifest)
-    if the loss ever stops being finite.
+    NonFiniteLossError (after a FAILED line and a non_finite_loss or non_finite_dev_loss log event, with no
+    final manifest) if the training or the dev loss ever stops being finite. Stale files of an earlier run in
+    `out_dir` are removed first, the best weights live under a temporary name until the run has finished, and a
+    run that fails or is interrupted leaves no scratch_gpt.pt behind, so a checkpoint next to no manifest never
+    exists.
     """
     model_cfg = model_cfg or GPTConfig()
     train_cfg = train_cfg or TrainConfig()
@@ -364,114 +374,132 @@ def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = N
     os.makedirs(out_dir, exist_ok=True)
     refuse_foreign_manifest(out_dir, "checkpoint_sha256", "ScratchGPT training")     # before anything is deleted
     ckpt_path = os.path.join(out_dir, "scratch_gpt.pt")
+    best_path = os.path.join(out_dir, IN_RUN_CHECKPOINT)       # the best weights so far; renamed to ckpt_path on success only
     log_path = os.path.join(out_dir, "train_log.jsonl")
-    for stale in (log_path, os.path.join(out_dir, "manifest.json")):
-        if os.path.exists(stale):
-            os.remove(stale)          # a rerun into the same directory must not leave an old manifest behind
+    manifest_path = os.path.join(out_dir, "manifest.json")
+    leftovers = (ckpt_path, ckpt_path + ".tmp", best_path, best_path + ".tmp")
+    # A rerun into the same directory must not leave anything of the earlier run behind: a stale checkpoint next to
+    # no manifest would load fine and be benchmarked as if it were this run's (review WR-05).
+    _remove(*leftovers, log_path, manifest_path, os.path.join(out_dir, "loss_curve.png"))
     log(f"device {'cuda' if on_cuda else 'cpu'} params {params}")
 
-    history, best = [], {SELECTION_METRIC: float("inf"), "step": 0}
-    tokens_seen, step, epoch, stale_evals = 0, 0, 0, 0
-    since_eval, since_log, mark = [], [], (time.time(), 0)
-    stop_reason = None
-    model.train()
-    while step < train_cfg.max_steps and stop_reason is None:
-        for idxs in make_batches(train_lengths, train_cfg.batch_tokens, train_cfg.seed, epoch):
-            lr = lr_at(step, train_cfg.max_steps, train_cfg.lr, train_cfg.min_lr, train_cfg.warmup)
-            for group in optimizer.param_groups:
-                group["lr"] = lr
-            x, y, m = collate(train_enc, idxs, device)
-            with _autocast(device):
-                _, loss = model(x, y, m)
-            if not bool(torch.isfinite(loss)):
-                log(f"FAILED non_finite_loss step {step + 1}")
-                _append_jsonl(log_path, {"step": step + 1, "event": "non_finite_loss"})
-                raise NonFiniteLossError(f"training loss is not finite at step {step + 1}")
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
-            optimizer.step()
-            step += 1
-            tokens_seen += int(x.numel())
-            value = float(loss.item())
-            since_eval.append(value)
-            since_log.append(value)
+    try:
+        history, best = [], {SELECTION_METRIC: float("inf"), "step": 0}
+        tokens_seen, step, epoch, stale_evals = 0, 0, 0, 0
+        since_eval, since_log, mark = [], [], (time.time(), 0)
+        stop_reason = None
+        model.train()
+        while step < train_cfg.max_steps and stop_reason is None:
+            for idxs in make_batches(train_lengths, train_cfg.batch_tokens, train_cfg.seed, epoch):
+                lr = lr_at(step, train_cfg.max_steps, train_cfg.lr, train_cfg.min_lr, train_cfg.warmup)
+                for group in optimizer.param_groups:
+                    group["lr"] = lr
+                x, y, m = collate(train_enc, idxs, device)
+                with _autocast(device):
+                    _, loss = model(x, y, m)
+                if not bool(torch.isfinite(loss)):
+                    log(f"FAILED non_finite_loss step {step + 1}")
+                    _append_jsonl(log_path, {"step": step + 1, "event": "non_finite_loss"})
+                    raise NonFiniteLossError(f"training loss is not finite at step {step + 1}")
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
+                optimizer.step()
+                step += 1
+                tokens_seen += int(x.numel())
+                value = float(loss.item())
+                since_eval.append(value)
+                since_log.append(value)
 
-            if step % train_cfg.log_every == 0:
-                now = time.time()
-                rate = (tokens_seen - mark[1]) / max(1e-9, now - mark[0])
-                mark = (now, tokens_seen)
-                interval = sum(since_log) / len(since_log)
-                since_log = []
-                log(f"step {step}/{train_cfg.max_steps} loss {interval:.4f} lr {lr:.2e} tok/s {rate:.0f} "
-                    f"elapsed {now - started:.0f}s")
-                if train_cfg.target_loss > 0 and interval < train_cfg.target_loss:
-                    stop_reason = "target_loss"
+                if step % train_cfg.log_every == 0:
+                    now = time.time()
+                    rate = (tokens_seen - mark[1]) / max(1e-9, now - mark[0])
+                    mark = (now, tokens_seen)
+                    interval = sum(since_log) / len(since_log)
+                    since_log = []
+                    log(f"step {step}/{train_cfg.max_steps} loss {interval:.4f} lr {lr:.2e} tok/s {rate:.0f} "
+                        f"elapsed {now - started:.0f}s")
+                    if train_cfg.target_loss > 0 and interval < train_cfg.target_loss:
+                        stop_reason = "target_loss"
 
-            if step % train_cfg.eval_every == 0 or step == train_cfg.max_steps or stop_reason:
-                result = evaluate(model, dev_enc, train_cfg.batch_tokens, device)
-                record = {"step": step, "train_loss": sum(since_eval) / len(since_eval), **result, "lr": lr,
-                          "tokens_seen": tokens_seen, "elapsed_s": round(time.time() - started, 1)}
-                since_eval = []
-                history.append(record)
-                _append_jsonl(log_path, record)
-                if result[SELECTION_METRIC] < best[SELECTION_METRIC]:       # never the respond-text loss (CR-01)
-                    best, stale_evals = {SELECTION_METRIC: result[SELECTION_METRIC], "step": step}, 0
-                    _save_checkpoint(ckpt_path, model, model_cfg,
-                                     {"seed": train_cfg.seed, "step": step, "dev_loss": result["dev_loss"],
-                                      "dev_loss_action": result["dev_loss_action"],
-                                      "dev_line_exact": result["dev_line_exact"],
-                                      "dev_action_exact": result["dev_action_exact"], "tokens_seen": tokens_seen})
-                else:
-                    stale_evals += 1
-                log(f"eval step {step} dev_loss {result['dev_loss']:.4f} dev_loss_action "
-                    f"{result['dev_loss_action']:.4f} dev_action_exact {result['dev_action_exact']:.4f} dev_line_exact "
-                    f"{result['dev_line_exact']:.4f} best {best[SELECTION_METRIC]:.4f}")
-                if stop_reason is None and stale_evals >= train_cfg.patience:
-                    stop_reason = "early_stop"
-            if step >= train_cfg.max_steps or stop_reason:
-                break
-        epoch += 1
-    stop_reason = stop_reason or "max_steps"
+                if step % train_cfg.eval_every == 0 or step == train_cfg.max_steps or stop_reason:
+                    result = evaluate(model, dev_enc, train_cfg.batch_tokens, device)
+                    if not all(math.isfinite(result[k]) for k in ("dev_loss", SELECTION_METRIC)):
+                        # nan < best is False, so a NaN dev loss would silently never be saved (review WR-05)
+                        log(f"FAILED non_finite_dev_loss step {step}")
+                        _append_jsonl(log_path, {"step": step, "event": "non_finite_dev_loss"})
+                        raise NonFiniteLossError(f"dev loss is not finite at step {step}")
+                    record = {"step": step, "train_loss": sum(since_eval) / len(since_eval), **result, "lr": lr,
+                              "tokens_seen": tokens_seen, "elapsed_s": round(time.time() - started, 1)}
+                    since_eval = []
+                    history.append(record)
+                    _append_jsonl(log_path, record)
+                    if result[SELECTION_METRIC] < best[SELECTION_METRIC]:       # never the respond-text loss (CR-01)
+                        best, stale_evals = {SELECTION_METRIC: result[SELECTION_METRIC], "step": step}, 0
+                        _save_checkpoint(best_path, model, model_cfg,
+                                         {"seed": train_cfg.seed, "step": step, "dev_loss": result["dev_loss"],
+                                          "dev_loss_action": result["dev_loss_action"],
+                                          "dev_line_exact": result["dev_line_exact"],
+                                          "dev_action_exact": result["dev_action_exact"], "tokens_seen": tokens_seen})
+                    else:
+                        stale_evals += 1
+                    log(f"eval step {step} dev_loss {result['dev_loss']:.4f} dev_loss_action "
+                        f"{result['dev_loss_action']:.4f} dev_action_exact {result['dev_action_exact']:.4f} dev_line_exact "
+                        f"{result['dev_line_exact']:.4f} best {best[SELECTION_METRIC]:.4f}")
+                    if stop_reason is None and stale_evals >= train_cfg.patience:
+                        stop_reason = "early_stop"
+                if step >= train_cfg.max_steps or stop_reason:
+                    break
+            epoch += 1
+        stop_reason = stop_reason or "max_steps"
 
-    _write_curve(os.path.join(out_dir, "loss_curve.png"), history, params, best["step"])
-    last = history[-1]
-    kept = next(h for h in history if h["step"] == best["step"])
-    wall = round(time.time() - started, 1)
-    manifest = {
-        "schema": MANIFEST_SCHEMA,
-        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "code_commit": git_commit(), "code_dirty": git_dirty(),
-        "python": platform.python_version(), "torch": torch.__version__, "cuda": torch.version.cuda,
-        "device": "cuda" if on_cuda else "cpu", "seed": train_cfg.seed,
-        "dataset": {"train_path": _rel(train_path), "train_sha256": file_sha256(train_path),
-                    "dev_path": _rel(dev_path), "dev_sha256": file_sha256(dev_path),
-                    "n_train": len(train_eps), "n_dev": len(dev_eps),
-                    "class_counts": {c: sum(e["cls"] == c for e in train_eps) for c in CLASSES},
-                    "synthetic_fraction": round(sum(bool(e["meta"]["synthetic"]) for e in train_eps) / len(train_eps), 6)},
-        "held_out_sha256": held_out_sha256(),
-        **current_stamps(),
-        "config": {"model": model_cfg.to_dict(), "train": train_cfg.to_dict()},
-        "params": params, "steps": step, "best_step": best["step"], "tokens_seen": tokens_seen,
-        "selection": {"metric": SELECTION_METRIC, "direction": "min",
-                      "description": "mean cross-entropy over supervised dev characters except the message text of "
-                                     "respond lines (which is held-back wording nobody can predict); used for the "
-                                     "kept checkpoint and for early stopping",
-                      "remediation_rule": REMEDIATION_RULE},
-        # best = the evaluation of the checkpoint that is kept (what scratch_gpt.pt is); last_eval = the final
-        # evaluation of the run, which can be a later step. Quote `best` when describing the model (review WR-04).
-        "best": {"step": best["step"], "train_loss": kept["train_loss"], **{k: kept[k] for k in EVAL_KEYS}},
-        "last_eval": {"step": last["step"], "train_loss": last["train_loss"], **{k: last[k] for k in EVAL_KEYS}},
-        "checkpoint_sha256": file_sha256(ckpt_path),
-        "wall_seconds": wall,
-        "stop_reason": stop_reason,
-        "run_notes": list(run_notes or []),
-    }
-    assert tuple(manifest) == MANIFEST_KEYS, "manifest fields drifted from MANIFEST_KEYS"
-    write_json_atomic(os.path.join(out_dir, "manifest.json"), manifest)
-    log(f"DONE best_step {best['step']} best_{SELECTION_METRIC} {best[SELECTION_METRIC]:.4f} wall {wall:.0f}s "
-        f"stop {stop_reason}")
-    return manifest
+        if not os.path.exists(best_path):
+            raise RuntimeError("the run ended without saving a checkpoint")
+        os.replace(best_path, ckpt_path)         # the run finished: now, and only now, the weights get their final name
+        try:
+            _write_curve(os.path.join(out_dir, "loss_curve.png"), history, params, best["step"])
+        except Exception as e:                   # a plotting problem must not cost a finished run its manifest
+            log(f"WARNING loss curve not written: {type(e).__name__}: {e}")
+        last = history[-1]
+        kept = next(h for h in history if h["step"] == best["step"])
+        wall = round(time.time() - started, 1)
+        manifest = {
+            "schema": MANIFEST_SCHEMA,
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "code_commit": git_commit(), "code_dirty": git_dirty(),
+            "python": platform.python_version(), "torch": torch.__version__, "cuda": torch.version.cuda,
+            "device": "cuda" if on_cuda else "cpu", "seed": train_cfg.seed,
+            "dataset": {"train_path": _rel(train_path), "train_sha256": file_sha256(train_path),
+                        "dev_path": _rel(dev_path), "dev_sha256": file_sha256(dev_path),
+                        "n_train": len(train_eps), "n_dev": len(dev_eps),
+                        "class_counts": {c: sum(e["cls"] == c for e in train_eps) for c in CLASSES},
+                        "synthetic_fraction": round(sum(bool(e["meta"]["synthetic"]) for e in train_eps) / len(train_eps), 6)},
+            "held_out_sha256": held_out_sha256(),
+            **current_stamps(),
+            "config": {"model": model_cfg.to_dict(), "train": train_cfg.to_dict()},
+            "params": params, "steps": step, "best_step": best["step"], "tokens_seen": tokens_seen,
+            "selection": {"metric": SELECTION_METRIC, "direction": "min",
+                          "description": "mean cross-entropy over supervised dev characters except the message text of "
+                                         "respond lines (which is held-back wording nobody can predict); used for the "
+                                         "kept checkpoint and for early stopping",
+                          "remediation_rule": REMEDIATION_RULE},
+            # best = the evaluation of the checkpoint that is kept (what scratch_gpt.pt is); last_eval = the final
+            # evaluation of the run, which can be a later step. Quote `best` when describing the model (review WR-04).
+            "best": {"step": best["step"], "train_loss": kept["train_loss"], **{k: kept[k] for k in EVAL_KEYS}},
+            "last_eval": {"step": last["step"], "train_loss": last["train_loss"], **{k: last[k] for k in EVAL_KEYS}},
+            "checkpoint_sha256": file_sha256(ckpt_path),
+            "wall_seconds": wall,
+            "stop_reason": stop_reason,
+            "run_notes": list(run_notes or []),
+        }
+        assert tuple(manifest) == MANIFEST_KEYS, "manifest fields drifted from MANIFEST_KEYS"
+        write_json_atomic(manifest_path, manifest)
+        log(f"DONE best_step {best['step']} best_{SELECTION_METRIC} {best[SELECTION_METRIC]:.4f} wall {wall:.0f}s "
+            f"stop {stop_reason}")
+        return manifest
+    except BaseException:
+        _remove(*leftovers)           # a failed or interrupted run leaves no loadable checkpoint (review WR-05)
+        raise
 
 
 # ── command line: python -m src.scratch_llm.train ──
