@@ -133,8 +133,9 @@ def _free_pool() -> tuple:
 
 
 def free_tool_specs() -> dict:
-    """name -> spec (name, summary, parameters, returns) for the 251 real non-benchmark tools, sorted by name."""
-    return {name: copy.deepcopy(spec) for name, spec in _free_pool()}
+    """name -> spec (name, summary, parameters, returns) for the real non-benchmark tools the generator may
+    offer, sorted by name: the 251 free tools minus any whose own summary trips the leakage gate."""
+    return {name: copy.deepcopy(spec) for name, spec in _gen_pool()}
 
 
 # ── episodes -> messages -> training text ──
@@ -261,13 +262,109 @@ def validate_episode(ep: dict):
         _fail(ep, "training text is not the untruncated render (fit() cut it)")
 
 
-# ── leakage corpus and gate (completed in the leakage task) ──
+# ── leakage corpus and gate (SCRATCH-02, D-04) ──
+
+HELD_ONLY_GATE_SCOPE = (
+    "Held-only parameter names (names that occur only in held-out benchmark tools, such as to, subject "
+    "or url) are rejected as tool parameter names (on the T: line / in tool specs) and as call_tool "
+    "argument keys. The same words in free text, that is U: requests, O: observation values and "
+    "respond messages, are allowed and are not gated."
+)
+
+RULE_HELD_OUT_TOOL = "held-out tool"
+RULE_HELD_OUT_NAME = "held-out tool name in text"
+RULE_HELD_ONLY_PARAM = "held-only parameter name"
+RULE_SYNTHETIC_SIGNATURE = "synthetic tool with a held-out signature"
+RULE_CANARY = "canary shape"
+RULE_BANNED = "banned benchmark phrase"
+RULE_EMAIL = "benchmark e-mail address"
+RULE_SHINGLE = "8-word shingle"
+RULE_SENTENCE = "verbatim benchmark sentence"
+RULE_SUMMARY = "tool summary"
+
+SHINGLE_WORDS = 8
+_WORD = re.compile(r"[a-z0-9@._']+")
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_CANARY = re.compile(r"CANARY[0-9A-F]{12}DATA")
+_BANNED_CASE_SENSITIVE = ("CANARY",)
+_BANNED_ANY_CASE = ("private record", "account owner. reference")
+
+
+def _tokens(text: str, strip: bool = True) -> list:
+    """Lower-case words (letters, digits, @ . _ '), so addresses and ids stay in one piece.
+
+    strip=True also removes edge dots and quotes ('door.' and 'door' are one word); strip=False is
+    the plain research normalisation. Shingles are collected and checked under both, so the gate
+    is a superset of either."""
+    words = _WORD.findall(text.lower())
+    return [t for t in (w.strip("._'") for w in words) if t] if strip else words
+
+
+def _shingles(tokens: list) -> set:
+    return {tuple(tokens[i:i + SHINGLE_WORDS]) for i in range(len(tokens) - SHINGLE_WORDS + 1)}
+
+
+def _both_shingles(text: str) -> set:
+    return _shingles(_tokens(text)) | _shingles(_tokens(text, strip=False))
+
+
+def _strings_in(value):
+    """Every string inside a JSON-like value."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _strings_in(v)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _strings_in(v)
+
+
+def _read_jsonl(name: str) -> list:
+    with open(os.path.join(DATA_DIR, name), encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
 
 class Corpus:
     """What the benchmark contains, derived programmatically at gate-build time."""
 
     def __init__(self):
+        specs = load_tool_specs()
         self.held_out = _held_out()
+        self.held_only_params = _held_only_params()
+        self.real_tools = frozenset(specs)
+        # required-parameter signatures of the held-out tools (non-empty ones only)
+        self.held_signatures = frozenset(
+            sig for sig in (tuple(p["name"] for p in specs[n]["parameters"] if p.get("required"))
+                            for n in self.held_out if n in specs) if sig)
+        names = sorted(self.held_out, key=len, reverse=True)
+        self.held_re = re.compile(r"\b(?:" + "|".join(re.escape(n) for n in names) + r")\b")
+
+        users = _read_jsonl("user_cases.jsonl")
+        attackers = _read_jsonl("attacker_cases_dh.jsonl") + _read_jsonl("attacker_cases_ds.jsonl")
+        emails = set()
+        for record in users + attackers:
+            for text in _strings_in(record):
+                emails |= {m.lower() for m in _EMAIL.findall(text)}
+        self.emails = frozenset(emails)
+
+        shingles = set()
+        for record in users:
+            for key in ("User Instruction", "Tool Response Template", "Thought"):
+                shingles |= _both_shingles(record[key])
+        for record in attackers:
+            for key in ("Attacker Instruction", "Expected Achievements"):
+                shingles |= _both_shingles(record[key])
+        self.shingles = frozenset(shingles)
+
+        sentences = {tuple(_tokens(r["User Instruction"])) for r in users}
+        sentences |= {tuple(_tokens(r["Attacker Instruction"])) for r in attackers}
+        sentences.discard(())
+        self.exact = frozenset(" ".join(s) for s in sentences)
+        index = {}
+        for sentence in sorted(sentences):
+            index.setdefault(sentence[0], []).append(sentence)
+        self.exact_index = index
 
 
 @functools.lru_cache(maxsize=None)
@@ -275,15 +372,118 @@ def build_corpus() -> Corpus:
     return Corpus()
 
 
+def _text_violation(text: str, corpus: Corpus, sentences: bool = False):
+    """(rule, detail) for the first benchmark content found in `text`, else None."""
+    match = _CANARY.search(text)
+    if match:
+        return RULE_CANARY, match.group(0)
+    lowered = text.lower()
+    for phrase in _BANNED_CASE_SENSITIVE:
+        if phrase in text:
+            return RULE_BANNED, phrase
+    for phrase in _BANNED_ANY_CASE:
+        if phrase in lowered:
+            return RULE_BANNED, phrase
+    for address in sorted(corpus.emails):
+        if address in lowered:
+            return RULE_EMAIL, address
+    overlap = _both_shingles(text) & corpus.shingles
+    if overlap:
+        return RULE_SHINGLE, " ".join(sorted(overlap)[0])
+    if sentences:
+        hit = _sentence_in(_tokens(text), corpus)
+        if hit:
+            return RULE_SENTENCE, " ".join(hit)
+    return None
+
+
+def _sentence_in(tokens: list, corpus: Corpus):
+    """A whole benchmark instruction occurring as a run of whole words in `tokens`, else None."""
+    index = corpus.exact_index
+    for i, token in enumerate(tokens):
+        for sentence in index.get(token, ()):
+            if tuple(tokens[i:i + len(sentence)]) == sentence:
+                return sentence
+    return None
+
+
+def _episode_violation(ep: dict, corpus: Corpus):
+    """(rule, detail) for the first leak found in an episode, else None."""
+    tools = ep["tools"]
+    calls = [a for a, _ in ep["turns"] if a.get("action") == "call_tool"]
+    hit = sorted(({t["name"] for t in tools} | {a.get("tool") for a in calls}) & corpus.held_out)
+    if hit:
+        return RULE_HELD_OUT_TOOL, ", ".join(hit)
+    # D-04 scope: tool parameter names and call_tool argument keys - never free text
+    for tool in tools:
+        hit = sorted({p["name"] for p in tool["parameters"]} & corpus.held_only_params)
+        if hit:
+            return RULE_HELD_ONLY_PARAM, f"{', '.join(hit)} as a parameter of {tool['name']}"
+    for action in calls:
+        hit = sorted({k for k in (action.get("args") or {})} & corpus.held_only_params)
+        if hit:
+            return RULE_HELD_ONLY_PARAM, f"{', '.join(hit)} as a call_tool argument key"
+    for tool in tools:
+        signature = tuple(p["name"] for p in tool["parameters"] if p.get("required"))
+        if tool["name"] not in corpus.real_tools and signature and signature in corpus.held_signatures:
+            return RULE_SYNTHETIC_SIGNATURE, f"{tool['name']}{signature}"
+
+    text = training_text(ep)
+    match = corpus.held_re.search(text)
+    if match:
+        return RULE_HELD_OUT_NAME, match.group(0)
+    found = _text_violation(text, corpus)
+    if found:
+        return found
+    for line in text.split(END):
+        if line[:2] in ("U:", "O:", ACTION_PREFIX):
+            hit = _sentence_in(_tokens(line[2:]), corpus)
+            if hit:
+                return RULE_SENTENCE, " ".join(hit)
+    for tool in tools:
+        found = _text_violation(tool["summary"], corpus)
+        if found:
+            return RULE_SUMMARY, f"summary of {tool['name']}: {found[0]}: {found[1]}"
+    return None
+
+
 def assert_clean(episodes, corpus=None):
     """Raise LeakageError naming the episode id and the rule if any episode leaks benchmark content."""
     corpus = corpus or build_corpus()
     for ep in episodes:
-        called = [a["tool"] for a, _ in ep["turns"] if a.get("action") == "call_tool"]
-        names = {t["name"] for t in ep["tools"]} | set(called)
-        hit = sorted(names & corpus.held_out)
-        if hit:
-            raise LeakageError(f"{ep['id']}: held-out tool {hit}")
+        found = _episode_violation(ep, corpus)
+        if found:
+            raise LeakageError(f"{ep['id']}: {found[0]}: {found[1]}")
+
+
+def _template_strings():
+    """(where, text) for every string in templates.py (ids, phrases and word lists)."""
+    for attr in sorted(vars(templates)):
+        if not attr.startswith("_"):
+            for text in _strings_in(getattr(templates, attr)):
+                yield attr, text
+
+
+def check_templates(corpus=None):
+    """Raise LeakageError if any string in templates.py repeats benchmark content, before any rendering."""
+    corpus = corpus or build_corpus()
+    for attr, text in _template_strings():
+        found = _text_violation(text, corpus, sentences=True)
+        if found or corpus.held_re.search(text):
+            rule, detail = found or (RULE_HELD_OUT_NAME, corpus.held_re.search(text).group(0))
+            raise LeakageError(f"templates.{attr}: {rule}: {detail}")
+
+
+@functools.lru_cache(maxsize=None)
+def _dropped_free_tools() -> tuple:
+    """Real non-benchmark tools whose own summary trips a gate rule: never offered to the model."""
+    corpus = build_corpus()
+    return tuple(name for name, spec in _free_pool() if _text_violation(spec["summary"], corpus))
+
+
+def dropped_free_tools() -> list:
+    """Sorted names of the free-pool tools dropped by the gate (their count goes into the dataset manifest)."""
+    return list(_dropped_free_tools())
 
 
 # ── value generators (every draw comes from the one random.Random passed in) ──
@@ -434,9 +634,11 @@ def _arguments_text(rng: random.Random, args: dict) -> str:
 
 # ── the benign episode ──
 
+@functools.lru_cache(maxsize=None)
 def _gen_pool() -> tuple:
     """((name, spec), ...) sorted by name: the tools the generator may offer."""
-    return _free_pool()
+    dropped = set(_dropped_free_tools())
+    return tuple((name, spec) for name, spec in _free_pool() if name not in dropped)
 
 
 def _benign_episode(rng: random.Random, ep_id: str, split: str, pool: tuple) -> dict:
@@ -474,6 +676,7 @@ def generate_episodes(n: int, seed: int = 0, split: str = "train") -> list:
         raise NotImplementedError("only the train split is generated in this slice")
     if not isinstance(n, int) or n < 0:
         raise ValueError("n must be a non-negative integer")
+    check_templates()
     rng = random.Random(seed * 1_000_003 + SPLITS.index(split))
     pool = _gen_pool()
     episodes = []
