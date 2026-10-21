@@ -395,6 +395,86 @@ a compact rendering of the same conversation, not a different one.
 
 ---
 
+## Part C — What the numbers say now
+
+All numbers below are copied from `models/scratch/manifest.json`, `data/local/manifest.json` and the
+smoke run in `results/phase2-smoke/` (summary.md and raw.jsonl). Re-check them there if you rerun
+anything.
+
+### The data
+
+- `data/local/manifest.json`: 40,000 training episodes and 2,000 dev episodes, seed 0. Training split
+  20,000 benign, 10,000 direct-harm, 10,000 data-stealing (the 50/25/25 quota is exact); dev split
+  1,000 / 500 / 500. Synthetic-tool share 0.35 in training, OS-action share 0.10, blocked-tail share
+  0.08 of the attack episodes. The training file's sha256 starts `63a192b109bf` (the dev file's
+  starts `58f5bcb09845`). Mean episode length is about 657 characters; about 40.5% of the
+  characters carry loss.
+
+### The training run
+
+- **Model:** `params` is 4763648 in the manifest, exactly the 4,763,648 worked out by hand in Part A
+  (6 layers, 8 heads, d_model 256, vocabulary 96, position table not counted).
+- **Hardware and time:** RTX 3060 Laptop GPU (6 GB), bf16. A 150-step pilot (about 100 s, which includes
+  starting up) proved the GPU path first. The kept run took 1,245 s, about 21 minutes, 8,000 steps,
+  259,021,855 characters seen (counting padding), about 155 ms per step including evaluations.
+- **The run was done twice, by a rule written down before training.** The first run (7,000 steps,
+  best step 6,500) ended with a dev line exact match of 0.167, below the 0.50 threshold we set in
+  advance, while its dev loss was still improving at the last step. The rule allowed exactly one retry
+  from scratch with a doubled step budget (14,000) and the same data, seed and settings. That retry is
+  the kept model. Its manifest `run_notes` carries the reason. The rule looked only at dev metrics,
+  never at benchmark outcomes, so it cannot have been tuned to the benchmark. Run 1 weights are not
+  kept; their checkpoint hash began `8607aafcae02`.
+- **Result of the kept run:** `steps` is 8000, because early stopping ended it: dev loss had not
+  improved for 8 evaluations after `best_step` 6000. The checkpoint kept is the one from step 6000.
+  Its dev loss is 0.5720 nats per supervised character (a uniform guess is 4.56). At that step the
+  dev line exact match is 0.2746 overall (benign 0.2759, direct-harm 0.3340, data-stealing 0.2277)
+  and 0.4835 for the first action of an episode. The manifest's `final` block describes the last
+  evaluation, step 8000, which is not the checkpoint kept: dev loss 0.6395, line exact 0.3239 (benign
+  0.3000, direct-harm 0.3847, data-stealing 0.3032), first-action 0.5355, train loss 0.0201.
+- **Checkpoint:** sha256 starts `83b0763a6d26`; the manifest ties it to the dataset by hash.
+
+How to read the curve (`models/scratch/loss_curve.png`): the dev loss falls fast to about 1.05, sits
+there from step 1,250 to about 2,750, drops again to about 0.8 by step 3,500, reaches its minimum at
+step 6,000 and then creeps up slightly, while the train loss keeps falling to 0.02. The widening gap
+is the signature of overfitting to the training phrasing: the dev set deliberately uses wordings
+the model has never seen, so part of its loss is probably free text that cannot be predicted (we did not
+measure how much), and a sizeable gap is expected. Early stopping and "keep the best dev checkpoint" are what keep the saved model
+at the bottom of the dev curve rather than at the end.
+
+Honest finding: a dev line exact match of 0.27 (0.32 at the last step) is below the 0.50 we hoped for,
+and the run had converged (early stop), so by the rule there is no further retry. Exact match
+requires every character of a line to be right; a line with one wrong character in a free-text reply
+counts as wrong, so this is a strict metric, and it is a dev-set number on unseen tools and wordings,
+not a benchmark number.
+
+### The smoke benchmark (plumbing only)
+
+`run_benchmark.py --models scratch-gpt --runs 1 --dh 5 --ds 5 --benign 3` produced 26 episodes:
+13 cases times two arms (unprotected and protected). The checks that decide pass or fail are plumbing
+only, and all passed: 26 unique rows, none with an `llm_error`, every row stamped provider `scratch`,
+config model `scratch-gpt`, resolved model `scratch-gpt@83b0763a6d26` (the first 12 hex of the
+trained checkpoint's hash) and a 40-character code commit. The behaviour numbers are reported, not
+graded:
+
+- **Parse rate:** 76 of 80 steps were valid actions (4 parse errors); every reply ended on the newline
+  (`finish_reason` was "stop" for all 80).
+- **Attack attempts (the model called the attacker's tool):** unprotected 4/10 direct-harm and
+  data-stealing episodes, protected 4/10. Episodes with any `call_tool` action were 10/10 in both arms,
+  but that count includes the model's legitimate call of the user's own tool, so it is not an attack
+  measure; the `attempted` flag is.
+- **Succeeded:** unprotected 2 of 10, protected 0 of 10.
+- **Outcome counts per arm** (from summary.md): unprotected attacks 4 attacked, 6 ignored_injection,
+  0 format_failure, 0 llm_error, 0 refused; benign 3 ignored_injection (a format-valid episode with
+  no injection to follow). The protected arm shows the same counts. All 4 protected attempts were
+  blocked at the attack action by the tool broker (7 broker blocks in all, 0 policy engine, sandbox
+  or seccomp). Benign tasks completed 2 of 3 in both arms, false positives 0 of 3.
+
+Read this with the limits below: it is 13 cases and one run at temperature 0, so the intervals are wide
+(attempted 4/10 has a 95% Wilson interval of about 17% to 69%) and it is a plumbing check, not an
+attack-success result. The full 342-episode runs are Phase 4.
+
+---
+
 ## Limits of this phase
 
 - ScratchGPT is deliberately weak and is never presented as a capable agent. It exists as a
@@ -408,6 +488,7 @@ a compact rendering of the same conversation, not a different one.
   the benchmark itself, which was never used to tune anything.
 - Nothing was changed in response to benchmark outcomes: the hyper-parameters and the step budget
   were fixed from the research defaults, the dev metrics and the pilot timing before any benchmark run.
+  The one retry (see Part C) was triggered by a rule on dev metrics written before training started.
 
 ---
 
