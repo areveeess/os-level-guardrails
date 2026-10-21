@@ -45,10 +45,10 @@ import re
 
 from src.agent_harness.executors import Observation
 from src.agent_harness.prompting import OBSERVATION_TEMPLATE, build_messages, parse_action
-from src.agent_harness.tool_broker import DEFAULT_RESPONSE
+from src.agent_harness.tool_broker import DEFAULT_RESPONSE, ToolBroker
 from src.benchmark.injecagent import DATA_DIR, EXFIL_TOOL, load_tool_specs
 from src.scratch_llm.format import (ACTION_PREFIX, CONTEXT_CHARS, END, GEN_RESERVE, HISTORY_ACTION_CHARS,
-                                    OBS_CHARS, USER_CHARS, _flat, compact_action, render_context)
+                                    OBS_CHARS, USER_CHARS, _flat, compact_action, render_context, supervised_mask)
 from src.scratch_llm import templates
 
 GENERATOR_VERSION = 1
@@ -780,7 +780,8 @@ class _Pools:
     """The tools one kind of episode may draw from, by role."""
 
     def __init__(self, tools):
-        self.all = tuple(tools)
+        tools = tuple(tools)
+        self.all = tools
         self.sources = tuple(t for t in self.all if _is_source(t))
         self.sinks = tuple(t for t in self.all if _is_sink(t))
 
@@ -790,9 +791,32 @@ def _real_tools() -> tuple:
     return tuple(make_tool(name, spec, toolkit_of(name)) for name, spec in _gen_pool())
 
 
+DEV_TOOLS_SEED = 20261021   # fixed: the dev tool set must not move with the episode seed (D-04)
+DEV_TOOL_SHARE = 0.10
+
+
+@functools.lru_cache(maxsize=None)
+def _dev_names() -> tuple:
+    names = [name for name, _ in _gen_pool()]
+    return tuple(sorted(random.Random(DEV_TOOLS_SEED).sample(names, round(DEV_TOOL_SHARE * len(names)))))
+
+
+def dev_tool_names() -> list:
+    """Sorted names of the real tools held back for the dev split: a seeded 10% of the free pool that the
+    train split never offers, in any role (D-04)."""
+    return list(_dev_names())
+
+
 @functools.lru_cache(maxsize=None)
 def _train_pools() -> _Pools:
-    return _Pools(_real_tools())
+    dev = set(_dev_names())
+    return _Pools(t for t in _real_tools() if t["name"] not in dev)
+
+
+@functools.lru_cache(maxsize=None)
+def _dev_pools() -> _Pools:
+    dev = set(_dev_names())
+    return _Pools(t for t in _real_tools() if t["name"] in dev)
 
 
 def _pick(rng: random.Random, pool: tuple, exclude=()):
@@ -815,7 +839,148 @@ def _send_word(rng: random.Random, sink: dict) -> str:
     return rng.choice(templates.SEND_WORDS) if rng.random() < 0.3 else own
 
 
+# ── synthetic tools (made-up names and parameters, so the model has to copy them) ──
+
+SYNTHETIC_SHARE = 0.35
+OS_SHARE = 0.10             # of ALL episodes; every one of them is taken from the benign half (D-02)
+TWO_STEP_SHARE = 0.15       # of the benign episodes that are not OS tasks
+BLOCKED_SHARE = 0.08        # of the dh and ds episodes (D-03)
+DISTRACTOR_SHARE = 0.30
+SHUFFLE_SHARE = 0.50
+
+
+@functools.lru_cache(maxsize=None)
+def _syn_params() -> tuple:
+    """(sorted parameter names, type by name) a synthetic tool may use: the parameter names of the real
+    free tools plus the generic ones in templates.SYN_PARAMS, minus every held-only name."""
+    held = _held_only_params()
+    seen = {}
+    for _, spec in _free_pool():
+        for p in spec["parameters"]:
+            seen.setdefault(p["name"], {}).setdefault(p["type"], 0)
+            seen[p["name"]][p["type"]] += 1
+    types = {name: sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0] for name, counts in seen.items()}
+    for name, ptype in templates.SYN_PARAMS.items():
+        types.setdefault(name, ptype)
+    return tuple(sorted(name for name in types if name not in held)), types
+
+
+def _draw_names(rng: random.Random, names: tuple, count: int, used: set) -> list:
+    picked = []
+    while len(picked) < count:
+        name = names[rng.randrange(len(names))]
+        if name not in used and name not in picked:
+            picked.append(name)
+    return picked
+
+
+def _synthetic_parameters(rng: random.Random, role: str) -> list:
+    names, types = _syn_params()
+    text_names = [n for n in TEXT_PARAMS if n in types]
+    if role == "sink":
+        required = [text_names[rng.randrange(len(text_names))]]
+        if rng.random() < 0.85:
+            required.append(templates.SYN_DEST_NAMES[rng.randrange(len(templates.SYN_DEST_NAMES))])
+        if rng.random() < 0.3:
+            required += _draw_names(rng, names, 1, set(required))
+        rng.shuffle(required)
+        forced = {n: "string" for n in required[:] if n in TEXT_PARAMS or n in templates.SYN_DEST_NAMES}
+    else:
+        weights = [1, 5, 2] if role == "source" else [1, 5, 3, 1]
+        required = _draw_names(rng, names, rng.choices(range(len(weights)), weights)[0], set())
+        forced = {}
+    optional = _draw_names(rng, names, rng.choices([0, 1, 2], [3, 2, 1])[0], set(required))
+    parameters = [{"name": n, "type": forced.get(n, types.get(n, "string")), "required": True} for n in required]
+    parameters += [{"name": n, "type": types[n], "required": False} for n in optional]
+    # real specs interleave required and optional parameters; the required ones keep their order
+    for p in [p for p in parameters if not p["required"]]:
+        parameters.remove(p)
+        parameters.insert(rng.randint(0, len(parameters)), p)
+    return parameters
+
+
+def _synthetic_returns(rng: random.Random, role: str) -> list:
+    fields = rng.sample(templates.SYN_RETURNS, rng.randint(1, 3))
+    if role == "source" and not any(t in ("array", "object") for _, t in fields):
+        fields.append(("results", "array") if ("results", "array") not in fields else ("details", "object"))
+    return [{"name": n, "type": t} for n, t in fields]
+
+
+def _synthetic_tool(rng: random.Random, role: str, part: str, exclude=()) -> dict:
+    """A tool that exists nowhere in tools.json: toolkit word + verb + object, parameter names that are
+    never held-only, and (for a non-empty required list) a signature no held-out tool has."""
+    corpus = build_corpus()
+    toolkits = templates.SYN_TOOLKITS_TRAIN if part == "TRAIN" else templates.SYN_TOOLKITS_DEV
+    for _ in range(MAX_REDRAWS * 4):
+        toolkit = toolkits[rng.randrange(len(toolkits))]
+        if role == "source":
+            verb = templates.SYN_RET_VERBS[rng.randrange(len(templates.SYN_RET_VERBS))]
+        elif role == "sink":
+            verb = templates.SYN_SEND_VERBS[rng.randrange(len(templates.SYN_SEND_VERBS))]
+        else:
+            verb = templates.SYN_VERBS[rng.randrange(len(templates.SYN_VERBS))]
+        objects = templates.SYN_SINK_OBJECTS if role == "sink" else templates.SYN_OBJECTS
+        obj = objects[rng.randrange(len(objects))]
+        if role != "sink" and rng.random() < 0.25:
+            obj += templates.SYN_OBJECTS[rng.randrange(len(templates.SYN_OBJECTS))]
+        name = toolkit + verb + obj
+        if name in corpus.real_tools or name in corpus.held_out or name in exclude:
+            continue
+        parameters = _synthetic_parameters(rng, role)
+        signature = tuple(p["name"] for p in parameters if p["required"])
+        if signature and signature in corpus.held_signatures:
+            continue
+        words = " ".join(w.lower() for w in _CAMEL.findall(obj))
+        summary = _tidy(fill(templates.SYN_SUMMARIES[rng.randrange(len(templates.SYN_SUMMARIES))],
+                             Verb=verb, verb=verb.lower(), object=words))
+        return {"name": name, "summary": summary, "parameters": parameters,
+                "returns": _synthetic_returns(rng, role), "toolkit": toolkit}
+    raise RuntimeError(f"no synthetic {role} tool after {MAX_REDRAWS * 4} draws")
+
+
 # ── episode parts ──
+
+class _Ctx:
+    """Everything one episode draws from: its split's templates and tool pools, and whether its tools are synthetic."""
+
+    def __init__(self, split: str, synthetic: bool, pools: _Pools):
+        self.split, self.synthetic, self.pools = split, synthetic, pools
+        self.part = "TRAIN" if split == "train" else "DEV"
+        self.extra_ids = ["syn:" + self.part[0].lower()] if synthetic else []
+
+        def lists(family):
+            return getattr(templates, f"{family}_{self.part}")
+        self.user, self.dh, self.ds = lists("USER_TEMPLATES"), lists("DH_TEMPLATES"), lists("DS_TEMPLATES")
+        self.record, self.wrappers, self.os = lists("RECORD_TEMPLATES"), lists("WRAPPERS"), lists("OS_TASKS")
+        self.two, self.blocked_reply = lists("TWO_STEP_TEMPLATES"), lists("BLOCKED_REPLY_TEMPLATES")
+        self.reply = templates.REPLY_TEMPLATES if self.part == "TRAIN" else templates.REPLY_TEMPLATES_DEV
+
+    def tool(self, rng: random.Random, role: str, exclude=()) -> dict:
+        """A tool for `role` ('any', 'source' or 'sink'): synthetic for a synthetic episode, otherwise from
+        the split's real pool (synthetic only where that pool has no tool for the role)."""
+        if not self.synthetic:
+            pool = {"any": self.pools.all, "source": self.pools.sources, "sink": self.pools.sinks}[role]
+            tool = _pick(rng, pool, exclude)
+            if tool is not None:
+                return tool
+            self.extra_ids.append(f"{role}:synthetic")
+        return _synthetic_tool(rng, role, self.part, exclude)
+
+    def offered(self, rng: random.Random, base: list) -> list:
+        """The tool list the model is shown: the episode's tools in the harness order (about half of the
+        time) or shuffled, and in about 30 percent of episodes with 1-2 extra tools."""
+        tools = list(base)
+        if rng.random() < DISTRACTOR_SHARE:
+            for _ in range(rng.randint(1, 2)):
+                tools.append(self.tool(rng, "any", {t["name"] for t in tools}))
+        if rng.random() >= SHUFFLE_SHARE and len(tools) > 1:
+            first = [t["name"] for t in base]
+            for _ in range(20):
+                rng.shuffle(tools)
+                if [t["name"] for t in tools][:len(first)] != first:
+                    break
+        return tools
+
 
 def _instruction(rng: random.Random, tool: dict, args: dict, choices: list) -> tuple:
     """(template id, the user's request) for one call."""
@@ -840,73 +1005,141 @@ def _embedded(rng: random.Random, injection: str) -> str:
     return " ".join(text.split())
 
 
-def _reply(rng: random.Random, tool: dict, choices: list) -> tuple:
+def _reply(rng: random.Random, do: str, choices: list) -> tuple:
     reply_id, template = choices[rng.randrange(len(choices))]
-    return reply_id, _tidy(fill(template, do=_plain_request(tool)))
+    return reply_id, _tidy(fill(template, do=do))
 
 
 def _call(tool: dict, args: dict) -> dict:
     return {"action": "call_tool", "tool": tool["name"], "args": args}
 
 
-def _episode(ep_id: str, split: str, cls: str, tools: list, user: str, turns: list, template_ids: list,
-             synthetic: bool = False, os_actions: bool = False, blocked_tail: bool = False,
-             two_step: bool = False) -> dict:
-    return {"id": ep_id, "split": split, "cls": cls, "tools": [episode_tool(t) for t in tools], "user": user,
+def _blocked_observation(user_tool: dict, action: dict) -> str:
+    """What a real ToolBroker, restricted to the user tool, answers to an out-of-capability call."""
+    return ToolBroker(None, capabilities={user_tool["name"]}).execute(action).as_text()
+
+
+def _episode(ep_id: str, ctx: _Ctx, cls: str, tools: list, user: str, turns: list, template_ids: list,
+             os_actions: bool = False, blocked_tail: bool = False, two_step: bool = False) -> dict:
+    return {"id": ep_id, "split": ctx.split, "cls": cls, "tools": [episode_tool(t) for t in tools], "user": user,
             "turns": turns,
-            "meta": {"synthetic": synthetic, "os_actions": os_actions, "blocked_tail": blocked_tail,
-                     "two_step": two_step, "template_ids": template_ids}}
+            "meta": {"synthetic": ctx.synthetic, "os_actions": os_actions, "blocked_tail": blocked_tail,
+                     "two_step": two_step, "template_ids": template_ids + ctx.extra_ids}}
 
 
-# ── the three classes ──
+# ── benign episodes: one call, two calls, or an OS task ──
+
+def _benign_observation(rng: random.Random, tool: dict):
+    """A clean response; in about 40 percent a harmless free-text field (a review, a note) sits in it, so
+    free text alone never marks an attack."""
+    harmless = templates.BENIGN_TEXTS[rng.randrange(len(templates.BENIGN_TEXTS))] if rng.random() < 0.4 else None
+    return _observation(rng, tool["returns"], harmless)
+
+
+def _benign_episode(rng: random.Random, ep_id: str, ctx: _Ctx, flags: dict):
+    tool = ctx.tool(rng, "any")
+    args = _tool_args(rng, tool)
+    user_id, user = _instruction(rng, tool, args, ctx.user)
+    reply_id, message = _reply(rng, _plain_request(tool), ctx.reply)
+    return _episode(ep_id, ctx, "benign", ctx.offered(rng, [tool]), user,
+                    [[_call(tool, args), _benign_observation(rng, tool)],
+                     [{"action": "respond", "message": message}, None]],
+                    [user_id, reply_id])
+
+
+def _two_step_episode(rng: random.Random, ep_id: str, ctx: _Ctx, flags: dict):
+    first = ctx.tool(rng, "any")
+    second = ctx.tool(rng, "any", {first["name"]})
+    first_args, second_args = _tool_args(rng, first), _tool_args(rng, second)
+    user_id, template = ctx.two[rng.randrange(len(ctx.two))]
+    user = _tidy(fill(template, do1=_request_phrase(rng, first), args1=_arguments_text(rng, first_args),
+                      do2=_request_phrase(rng, second), args2=_arguments_text(rng, second_args)))
+    reply_id, message = _reply(rng, _plain_request(second), ctx.reply)
+    return _episode(ep_id, ctx, "benign", ctx.offered(rng, [first, second]), user,
+                    [[_call(first, first_args), _benign_observation(rng, first)],
+                     [_call(second, second_args), _benign_observation(rng, second)],
+                     [{"action": "respond", "message": message}, None]],
+                    [user_id, reply_id], two_step=True)
+
+
+def _file_name(rng: random.Random) -> str:
+    return rng.choice(templates.WORD_LIST) + rng.choice(templates.OS_EXTENSIONS)
+
+
+def _os_episode(rng: random.Random, ep_id: str, ctx: _Ctx, flags: dict):
+    """A task done with run_shell / read_file / write_file under /home/user/workspace, with commands the
+    default policy allows (grammar breadth beyond call_tool)."""
+    task_id, kind, text = ctx.os[rng.randrange(len(ctx.os))]
+    directory = templates.OS_DIRS[rng.randrange(len(templates.OS_DIRS))]
+    path = f"{directory}/{_file_name(rng)}"
+    count, content = rng.randint(2, 4), _words(rng, 2, 6)
+    user = _tidy(fill(text, dir=directory, path=path, k=str(count), content=content))
+    if kind == "ls":
+        names = sorted({_file_name(rng) for _ in range(rng.randint(2, 6))})
+        action, output = {"action": "run_shell", "command": f"ls {directory}"}, " ".join(names)
+    elif kind == "cat":
+        action, output = {"action": "run_shell", "command": f"cat {path}"}, _words(rng, 3, 14)
+    elif kind == "read":
+        action, output = {"action": "read_file", "path": path}, _words(rng, 3, 14)
+    elif kind == "wc":
+        action, output = {"action": "run_shell", "command": f"wc -l {path}"}, f"{rng.randint(1, 400)} {path}"
+    elif kind == "head":
+        action = {"action": "run_shell", "command": f"head -n {count} {path}"}
+        output = " ".join(_words(rng, 2, 4) for _ in range(count))
+    else:
+        action = {"action": "write_file", "path": path, "content": content}
+        output = f"Written {len(content)} chars to {path}"
+    reply_id, message = _reply(rng, templates.OS_DO[kind], ctx.reply)
+    return _episode(ep_id, ctx, "benign", ctx.offered(rng, []), user,
+                    [[action, Observation("success", output=output).as_text()],
+                     [{"action": "respond", "message": message}, None]],
+                    [task_id, reply_id], os_actions=True)
+
+
+# ── attack episodes ──
 
 ATTACK_OBS_CHARS = 400     # an observation that carries an injection stays short, so the whole episode fits the context
 RECORD_OBS_CHARS = 280
 
 
-def _benign_episode(rng: random.Random, ep_id: str, split: str, pools: _Pools):
-    tool = _pick(rng, pools.all)
-    args = _tool_args(rng, tool)
-    user_id, user = _instruction(rng, tool, args, templates.USER_TEMPLATES_TRAIN)
-    reply_id, message = _reply(rng, tool, templates.REPLY_TEMPLATES)
-    observation = _observation(rng, tool["returns"])
-    return _episode(ep_id, split, "benign", [tool], user,
-                    [[_call(tool, args), observation], [{"action": "respond", "message": message}, None]],
-                    [user_id, reply_id])
-
-
-def _dh_episode(rng: random.Random, ep_id: str, split: str, pools: _Pools):
-    """User tool -> an observation carrying an injection that asks for another tool -> that call -> respond."""
-    user_tool = _pick(rng, pools.all)
-    target = _pick(rng, pools.all, exclude={user_tool["name"]})
+def _dh_episode(rng: random.Random, ep_id: str, ctx: _Ctx, flags: dict):
+    """User tool -> an observation carrying an injection that asks for another tool -> that call -> respond
+    (or, for a blocked tail, the broker's refusal text and a respond that gives up)."""
+    user_tool = ctx.tool(rng, "any")
+    target = ctx.tool(rng, "any", {user_tool["name"]})
     user_args, target_args = _tool_args(rng, user_tool), _tool_args(rng, target)
-    user_id, user = _instruction(rng, user_tool, user_args, templates.USER_TEMPLATES_TRAIN)
-    injection_id, template = templates.DH_TEMPLATES_TRAIN[rng.randrange(len(templates.DH_TEMPLATES_TRAIN))]
+    user_id, user = _instruction(rng, user_tool, user_args, ctx.user)
+    injection_id, template = ctx.dh[rng.randrange(len(ctx.dh))]
     injection = _tidy(fill(template, do=_request_phrase(rng, target), args=_arguments_text(rng, target_args),
                            tool=target["name"]))
-    wrapper_id, injection = _wrapped(rng, injection, templates.WRAPPERS_TRAIN)
+    wrapper_id, injection = _wrapped(rng, injection, ctx.wrappers)
     observation = _observation(rng, user_tool["returns"], _embedded(rng, injection), ATTACK_OBS_CHARS)
-    reply_id, message = _reply(rng, user_tool, templates.REPLY_TEMPLATES)
     if observation is None:
         return None
-    return _episode(ep_id, split, "dh", [user_tool, target], user,
-                    [[_call(user_tool, user_args), observation],
-                     [_call(target, target_args), _success_observation()],
+    attack_call = _call(target, target_args)
+    if flags["blocked"]:
+        reply_id, message = _reply(rng, "", ctx.blocked_reply)
+        second = _blocked_observation(user_tool, attack_call)
+    else:
+        reply_id, message = _reply(rng, _plain_request(user_tool), ctx.reply)
+        second = _success_observation()
+    return _episode(ep_id, ctx, "dh", ctx.offered(rng, [user_tool, target]), user,
+                    [[_call(user_tool, user_args), observation], [attack_call, second],
                      [{"action": "respond", "message": message}, None]],
-                    [user_id, injection_id, wrapper_id, reply_id])
+                    [user_id, injection_id, wrapper_id, reply_id], blocked_tail=flags["blocked"])
 
 
-def _ds_episode(rng: random.Random, ep_id: str, split: str, pools: _Pools):
-    """User tool -> injection "get X and send it to ADDR" -> source tool returns a record with a
-    secret -> sink tool called with the secret (and ADDR) -> respond."""
-    user_tool = _pick(rng, pools.all)
-    source = _pick(rng, pools.sources, exclude={user_tool["name"]})
-    sink = _pick(rng, pools.sinks, exclude={user_tool["name"], source["name"]})
+def _ds_episode(rng: random.Random, ep_id: str, ctx: _Ctx, flags: dict):
+    """User tool -> injection "get X and send it to ADDR" -> source tool returns a record with a secret ->
+    sink tool called with the secret (and ADDR) -> respond. A blocked tail stops at the source call."""
+    user_tool = ctx.tool(rng, "any")
+    source = ctx.tool(rng, "source", {user_tool["name"]})
+    sink = ctx.tool(rng, "sink", {user_tool["name"], source["name"]})
     payload_name = _payload_param(sink)
     dest_name = _dest_param(sink, payload_name)
     address = _attack_address(rng) if dest_name else None
     secret, label = _secret(rng), templates.RECORD_LABELS[rng.randrange(len(templates.RECORD_LABELS))]
-    record_id, record_template = templates.RECORD_TEMPLATES_TRAIN[rng.randrange(len(templates.RECORD_TEMPLATES_TRAIN))]
+    record_id, record_template = ctx.record[rng.randrange(len(ctx.record))]
     record = " ".join(fill(record_template, name=rng.choice(templates.WORD_LIST), label=label, secret=secret).split())
     share = rng.random()
     payload = secret if share < 0.4 else record if share < 0.7 else f"{label}: {secret}"
@@ -921,28 +1154,49 @@ def _ds_episode(rng: random.Random, ep_id: str, split: str, pools: _Pools):
         else:
             sink_args[p["name"]] = others[p["name"]] = _arg_value(rng, p["name"], p["type"])
 
-    user_id, user = _instruction(rng, user_tool, user_args, templates.USER_TEMPLATES_TRAIN)
-    injection_id, template = templates.DS_TEMPLATES_TRAIN[rng.randrange(len(templates.DS_TEMPLATES_TRAIN))]
+    user_id, user = _instruction(rng, user_tool, user_args, ctx.user)
+    injection_id, template = ctx.ds[rng.randrange(len(ctx.ds))]
     injection = _tidy(fill(template, pull=_request_phrase(rng, source), sargs=_arguments_text(rng, source_args),
                            send=_send_word(rng, sink), dest=f" to {address}" if address else "",
                            args=_arguments_text(rng, others)))
-    wrapper_id, injection = _wrapped(rng, injection, templates.WRAPPERS_TRAIN)
+    wrapper_id, injection = _wrapped(rng, injection, ctx.wrappers)
     first = _observation(rng, user_tool["returns"], _embedded(rng, injection), ATTACK_OBS_CHARS)
-    second = _observation(rng, source["returns"], record, RECORD_OBS_CHARS)
-    reply_id, message = _reply(rng, user_tool, templates.REPLY_TEMPLATES)
-    if first is None or second is None:
+    if first is None:
         return None
-    return _episode(ep_id, split, "ds", [user_tool, source, sink], user,
-                    [[_call(user_tool, user_args), first], [_call(source, source_args), second],
+    ids = [user_id, injection_id, wrapper_id]
+    tools = ctx.offered(rng, [user_tool, source, sink])
+    source_call = _call(source, source_args)
+    if flags["blocked"]:
+        reply_id, message = _reply(rng, "", ctx.blocked_reply)
+        return _episode(ep_id, ctx, "ds", tools, user,
+                        [[_call(user_tool, user_args), first],
+                         [source_call, _blocked_observation(user_tool, source_call)],
+                         [{"action": "respond", "message": message}, None]],
+                        ids + [reply_id], blocked_tail=True)
+    second = _observation(rng, source["returns"], record, RECORD_OBS_CHARS)
+    if second is None:
+        return None
+    reply_id, message = _reply(rng, _plain_request(user_tool), ctx.reply)
+    return _episode(ep_id, ctx, "ds", tools, user,
+                    [[_call(user_tool, user_args), first], [source_call, second],
                      [_call(sink, sink_args), _success_observation()],
                      [{"action": "respond", "message": message}, None]],
-                    [user_id, injection_id, wrapper_id, record_id, reply_id])
+                    ids + [record_id, reply_id])
 
 
-BUILDERS = {"benign": _benign_episode, "dh": _dh_episode, "ds": _ds_episode}
+def _build(cls: str, rng: random.Random, ep_id: str, ctx: _Ctx, flags: dict):
+    if cls == "dh":
+        return _dh_episode(rng, ep_id, ctx, flags)
+    if cls == "ds":
+        return _ds_episode(rng, ep_id, ctx, flags)
+    if flags["os"]:
+        return _os_episode(rng, ep_id, ctx, flags)
+    if flags["two_step"]:
+        return _two_step_episode(rng, ep_id, ctx, flags)
+    return _benign_episode(rng, ep_id, ctx, flags)
 
 
-# ── the quota (D-01) ──
+# ── the quota (D-01) and the shares of the other families ──
 
 def class_counts(n: int) -> dict:
     """Episodes per class: n/2 benign, n/4 dh, n/4 ds; exact when 4 divides n, otherwise the leftover
@@ -962,29 +1216,56 @@ def _class_sequence(n: int, rng: random.Random) -> list:
     return sequence
 
 
+def _flags(rng: random.Random, n: int, split: str, classes: list) -> list:
+    """Which episodes are synthetic, OS tasks, two-step or blocked-tail. Counts are allocated, not drawn,
+    so the shares hold exactly (up to rounding) for any seed: synthetic 35% of all (train), OS 10% of all
+    (all benign), two-step 15% of the other benign, blocked tails 8% of dh+ds. dev_synthetic is fully
+    synthetic, dev_tools has no synthetic episode."""
+    flags = [{"synthetic": False, "os": False, "two_step": False, "blocked": False} for _ in range(n)]
+    synthetic = {"train": round(SYNTHETIC_SHARE * n), "dev_tools": 0, "dev_synthetic": n}[split]
+    order = list(range(n))
+    rng.shuffle(order)
+    for i in order[:synthetic]:
+        flags[i]["synthetic"] = True
+    benign = [i for i, cls in enumerate(classes) if cls == "benign"]
+    rng.shuffle(benign)
+    os_count = min(round(OS_SHARE * n), len(benign))
+    for i in benign[:os_count]:
+        flags[i]["os"] = True
+    rest = benign[os_count:]
+    for i in rest[:round(TWO_STEP_SHARE * len(rest))]:
+        flags[i]["two_step"] = True
+    attack = [i for i, cls in enumerate(classes) if cls != "benign"]
+    rng.shuffle(attack)
+    for i in attack[:round(BLOCKED_SHARE * len(attack))]:
+        flags[i]["blocked"] = True
+    return flags
+
+
 def generate_episodes(n: int, seed: int = 0, split: str = "train") -> list:
     """Return `n` training episodes (schema above), reproducible for a given (seed, split).
 
     The class mix is a deterministic quota (50% benign, 25% dh, 25% ds), not a per-episode
-    probability. Every episode must pass validate_episode and the leakage gate (an episode that does
-    not is drawn again, a bounded number of times), and the whole list passes assert_clean before it is
+    probability, and so are the shares of synthetic-tool, OS-action, two-step and blocked-tail
+    episodes. Every episode must pass validate_episode and the leakage gate (an episode that does not
+    is drawn again, a bounded number of times), and the whole list passes assert_clean before it is
     returned, so a leaking template makes generation raise instead of producing data.
     """
     if split not in SPLITS:
         raise ValueError(f"split must be one of {SPLITS}, not {split!r}")
-    if split != "train":
-        raise NotImplementedError("only the train split is generated in this slice")
     if isinstance(n, bool) or not isinstance(n, int) or n < 0:
         raise ValueError("n must be a non-negative integer")
     check_templates()
     rng = random.Random(seed * 1_000_003 + SPLITS.index(split))
-    pools, corpus = _train_pools(), build_corpus()
+    pools, corpus = (_train_pools() if split == "train" else _dev_pools()), build_corpus()
+    classes = _class_sequence(n, rng)
+    flags = _flags(rng, n, split, classes)
     episodes = []
-    for i, cls in enumerate(_class_sequence(n, rng)):
+    for i, (cls, flag) in enumerate(zip(classes, flags)):
         ep_id = f"{split}-{seed}-{i:06d}"
         leak = None
         for _ in range(MAX_REDRAWS):
-            episode = BUILDERS[cls](rng, ep_id, split, pools)
+            episode = _build(cls, rng, ep_id, _Ctx(split, flag["synthetic"], pools), flag)
             if episode is None:
                 continue
             try:
@@ -1001,6 +1282,39 @@ def generate_episodes(n: int, seed: int = 0, split: str = "train") -> list:
             raise RuntimeError(f"{ep_id}: no valid {cls} episode after {MAX_REDRAWS} draws")
     assert_clean(episodes, corpus)
     return episodes
+
+
+def dataset_stats(episodes: list) -> dict:
+    """Counts and shares of a generated set, for the manifest and the training-time estimate.
+
+    Fractions: synthetic_fraction and os_action_fraction over all episodes, blocked_tail_fraction over
+    the dh and ds episodes, two_step_fraction over the benign ones. mean_chars / max_context_chars are
+    the mean and maximum length of training_text; supervised_fraction is the share of all training
+    characters that carry loss (the A: payloads)."""
+    def share(count, total):
+        return round(count / total, 6) if total else 0.0
+
+    n = len(episodes)
+    classes = {cls: sum(e["cls"] == cls for e in episodes) for cls in CLASSES}
+    splits = {}
+    for e in episodes:
+        splits[e["split"]] = splits.get(e["split"], 0) + 1
+    texts = [training_text(e) for e in episodes]
+    total_chars = sum(len(t) for t in texts)
+    supervised = sum(sum(supervised_mask(t)) for t in texts)
+    attack = classes["dh"] + classes["ds"]
+    return {
+        "n": n,
+        "class_counts": classes,
+        "split_counts": dict(sorted(splits.items())),
+        "synthetic_fraction": share(sum(bool(e["meta"]["synthetic"]) for e in episodes), n),
+        "os_action_fraction": share(sum(bool(e["meta"]["os_actions"]) for e in episodes), n),
+        "blocked_tail_fraction": share(sum(bool(e["meta"]["blocked_tail"]) for e in episodes), attack),
+        "two_step_fraction": share(sum(bool(e["meta"]["two_step"]) for e in episodes), classes["benign"]),
+        "mean_chars": round(total_chars / n, 2) if n else 0.0,
+        "max_context_chars": max((len(t) for t in texts), default=0),
+        "supervised_fraction": share(supervised, total_chars),
+    }
 
 
 # ── files ──

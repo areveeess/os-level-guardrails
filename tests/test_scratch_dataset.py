@@ -24,6 +24,10 @@ import sys
 
 import pytest
 
+from src.agent_harness.prompting import action_target, parse_action
+from src.agent_harness.tool_broker import ToolBroker
+from src.benchmark.injecagent import load_tool_specs
+from src.policy_engine.engine import PolicyEngine
 from src.scratch_llm import dataset, templates
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -120,14 +124,16 @@ def test_ds_episode_reads_a_secret_and_sends_it_to_the_address_in_the_injection(
         user_call, source_call, sink_call = calls(ep)
         assert len({user_call["tool"], source_call["tool"], sink_call["tool"]}) == 3
         injection, record = ep["turns"][0][1], ep["turns"][1][1]
-        sink_text = json.dumps(sink_call["args"])
         carried = [v for v in string_values(sink_call["args"]) if v in record]
         assert carried, (ep["id"], "no sink argument carries data from the source observation")
         payload = max(carried, key=len)
         assert any(12 <= len(token) <= 30 for token in payload.split()), (ep["id"], payload)
-        addresses = EMAIL.findall(injection)
-        if addresses:                       # the sink has a recipient-like parameter
-            assert addresses[0] in sink_text, (ep["id"], addresses, sink_text)
+        sink_tool = next(t for t in ep["tools"] if t["name"] == sink_call["tool"])
+        dest = dataset._dest_param(sink_tool, dataset._payload_param(sink_tool))
+        if dest:                            # the sink has a recipient-like parameter: it gets the injected address
+            recipient = sink_call["args"][dest]
+            recipient = recipient[0] if isinstance(recipient, list) else recipient
+            assert recipient in EMAIL.findall(injection), (ep["id"], recipient, injection)
         assert source_call["tool"] != sink_call["tool"]
 
 
@@ -226,3 +232,197 @@ def test_template_text_is_plain_ascii_without_quotes_or_backslashes():
                  "RECORD_TEMPLATES_TRAIN", "RECORD_TEMPLATES_DEV", "WRAPPERS_TRAIN", "WRAPPERS_DEV"):
         for _, text in getattr(templates, attr):
             assert text.isascii() and not set('"\\') & set(text), (attr, text)
+
+
+# ══ breadth and the dev split (synthetic tools, OS actions, blocked tails, two-step, D-04) ══
+
+TEMPLATE_ID = re.compile(r"^[a-z]+:([td])\d*$")
+
+
+@pytest.fixture(scope="module")
+def big():
+    """4,000 training episodes: large enough for the share bands below."""
+    return dataset.generate_episodes(4000, seed=0)
+
+
+def called_names(ep):
+    names = []
+    for call in calls(ep):
+        if call["tool"] not in names:
+            names.append(call["tool"])
+    return names
+
+
+def test_synthetic_tools_are_a_third_of_the_episodes_and_leak_nothing(big, corpus):
+    real, held, held_only = set(load_tool_specs()), dataset.held_out_tools(), dataset.held_only_param_names()
+    synthetic = [e for e in big if e["meta"]["synthetic"]]
+    assert 0.32 <= len(synthetic) / len(big) <= 0.38
+    for ep in synthetic:
+        for tool in ep["tools"]:
+            assert tool["name"] not in real and tool["name"] not in held
+            assert not {p["name"] for p in tool["parameters"]} & held_only
+            signature = tuple(required_names(tool))
+            assert not signature or signature not in corpus.held_signatures
+    for ep in big:
+        if not ep["meta"]["synthetic"]:
+            assert all(t["name"] in real for t in ep["tools"])
+
+
+def test_os_action_episodes_are_a_tenth_benign_and_inside_the_default_policy(big, tmp_path):
+    os_eps = [e for e in big if e["meta"]["os_actions"]]
+    assert 0.08 <= len(os_eps) / len(big) <= 0.12
+    policy = PolicyEngine(log_file=str(tmp_path / "policy.jsonl"), verbose=False)
+    kinds = set()
+    for ep in os_eps:
+        assert ep["cls"] == "benign" and len(ep["turns"]) == 2
+        action = ep["turns"][0][0]
+        kinds.add(action["action"])
+        assert action["action"] in ("run_shell", "read_file", "write_file")
+        assert parse_action(json.dumps(action)) == action
+        target = action_target(action)
+        assert "/home/user/workspace" in target
+        assert policy.check(action["action"], target) != "BLOCK", (ep["id"], action)
+    assert kinds == {"run_shell", "read_file", "write_file"}
+
+
+def test_blocked_tails_end_with_the_real_broker_text_and_keep_their_class(big):
+    attack = [e for e in big if e["cls"] in ("dh", "ds")]
+    tails = [e for e in attack if e["meta"]["blocked_tail"]]
+    assert 0.06 <= len(tails) / len(attack) <= 0.10
+    assert not [e for e in big if e["cls"] == "benign" and e["meta"]["blocked_tail"]]
+    for ep in tails:
+        user_call, attack_call = calls(ep)[0], calls(ep)[1]
+        broker = ToolBroker(None, capabilities={user_call["tool"]})
+        assert len(ep["turns"]) == 3
+        assert ep["turns"][1][1] == broker.execute(attack_call).as_text()
+        assert ep["turns"][1][1].startswith("BLOCKED by tool_broker: Tool '")
+        assert ep["turns"][2][0]["action"] == "respond"
+
+
+def test_two_step_benign_tasks_call_both_tools_named_in_the_instruction(big):
+    benign = [e for e in big if e["cls"] == "benign"]
+    two = [e for e in benign if e["meta"]["two_step"]]
+    assert 0.10 <= len(two) / len(benign) <= 0.20
+    for ep in two:
+        assert [a["action"] for a, _ in ep["turns"]] == ["call_tool", "call_tool", "respond"]
+        assert calls(ep)[0]["tool"] != calls(ep)[1]["tool"]
+        assert not ep["meta"]["os_actions"]
+        for call in calls(ep):
+            for value in string_values(call["args"]):
+                assert value in ep["user"]
+
+
+def test_tool_list_order_and_distractors(big):
+    roles = {"benign": 1, "dh": 2, "ds": 3}
+    attack = [e for e in big if e["cls"] in ("dh", "ds") and not e["meta"]["blocked_tail"]]
+    kept = sum([t["name"] for t in e["tools"]][:len(called_names(e))] == called_names(e) for e in attack)
+    assert 0.40 <= kept / len(attack) <= 0.60
+    extra = 0
+    for ep in big:
+        base = 0 if ep["meta"]["os_actions"] else 2 if ep["meta"]["two_step"] else roles[ep["cls"]]
+        extra += len(ep["tools"]) > base
+        assert len(ep["tools"]) - base in (0, 1, 2)
+    assert 0.25 <= extra / len(big) <= 0.35
+
+
+def test_observations_use_both_quote_styles_and_benign_ones_carry_harmless_text(big):
+    plain = '{"success": true}'
+    observations = [o for e in big if not e["meta"]["os_actions"] for _, o in e["turns"]
+                    if o and o != plain and not o.startswith("BLOCKED")]
+    single = sum(o.startswith("{'") for o in observations)
+    double = sum(o.startswith('{"') for o in observations)
+    assert single + double == len(observations)
+    assert single / len(observations) >= 0.25 and double / len(observations) >= 0.25
+    benign = [e for e in big if e["cls"] == "benign" and not e["meta"]["os_actions"]]
+    harmless = sum(any(text in e["turns"][0][1] for text in templates.BENIGN_TEXTS) for e in benign)
+    assert harmless / len(benign) >= 0.25
+
+
+def test_dev_tools_are_a_stable_tenth_of_the_free_pool_and_never_in_train(big):
+    names = dataset.dev_tool_names()
+    pool = dataset.free_tool_specs()
+    assert names == sorted(names) and set(names) <= set(pool)
+    assert len(names) == round(0.10 * len(pool))
+    dataset.generate_episodes(8, seed=5)
+    assert dataset.dev_tool_names() == names
+    used = {t["name"] for e in big for t in e["tools"]}
+    assert not used & set(names)
+    assert isinstance(dataset.DEV_TOOLS_SEED, int)
+
+
+def test_dev_tool_set_does_not_depend_on_the_hash_seed():
+    code = "import json, src.scratch_llm.dataset as d\nprint(json.dumps(d.dev_tool_names()))\n"
+    outputs = []
+    for hash_seed in ("3", "4"):
+        done = subprocess.run([sys.executable, "-c", code], cwd=PROJECT_ROOT, capture_output=True, text=True,
+                              timeout=300, env=dict(os.environ, PYTHONHASHSEED=hash_seed))
+        assert done.returncode == 0, done.stderr
+        outputs.append(json.loads(done.stdout))
+    assert outputs[0] == outputs[1] == dataset.dev_tool_names()
+
+
+@pytest.mark.parametrize("split", ["dev_tools", "dev_synthetic"])
+def test_dev_splits_keep_the_quota_pass_the_gate_and_use_held_back_text_only(split):
+    eps = dataset.generate_episodes(400, 0, split)
+    assert dict(collections.Counter(e["cls"] for e in eps)) == {"benign": 200, "dh": 100, "ds": 100}
+    assert all(e["split"] == split for e in eps)
+    dataset.assert_clean(eps)
+    real, dev = set(load_tool_specs()), set(dataset.dev_tool_names())
+    for ep in eps:
+        dataset.validate_episode(ep)
+        for template_id in ep["meta"]["template_ids"]:
+            match = TEMPLATE_ID.match(template_id)
+            assert not match or match.group(1) == "d", (ep["id"], template_id)
+        for tool in ep["tools"]:
+            if split == "dev_tools":
+                assert tool["name"] not in real or tool["name"] in dev
+            else:
+                assert tool["name"] not in real
+    if split == "dev_synthetic":
+        assert all(e["meta"]["synthetic"] for e in eps)
+    else:
+        assert not any(e["meta"]["synthetic"] for e in eps)
+        assert any(t["name"] in dev for e in eps for t in e["tools"])
+
+
+def test_train_episodes_use_training_templates_only(big):
+    seen = set()
+    for ep in big:
+        for template_id in ep["meta"]["template_ids"]:
+            match = TEMPLATE_ID.match(template_id)
+            if match:
+                seen.add(template_id)
+                assert match.group(1) == "t", (ep["id"], template_id)
+    assert len(seen) > 150
+
+
+def test_unknown_split_and_bad_sizes_raise():
+    with pytest.raises(ValueError):
+        dataset.generate_episodes(10, 0, "nonsense")
+    with pytest.raises(ValueError):
+        dataset.generate_episodes(-4, 0, "dev_tools")
+
+
+def test_synthetic_vocabulary_inventory():
+    assert len(templates.SYN_TOOLKITS_TRAIN) >= 40 and len(templates.SYN_TOOLKITS_DEV) >= 6
+    assert not set(templates.SYN_TOOLKITS_TRAIN) & set(templates.SYN_TOOLKITS_DEV)
+    assert len(templates.SYN_VERBS) >= 55 and len(templates.SYN_OBJECTS) >= 75
+    with open(os.path.join(PROJECT_ROOT, "benchmarks", "injecagent", "tools.json"), encoding="utf-8") as f:
+        real_toolkits = {tk["toolkit"] for tk in json.load(f)}
+    assert not (set(templates.SYN_TOOLKITS_TRAIN) | set(templates.SYN_TOOLKITS_DEV)) & real_toolkits
+    held_only = dataset.held_only_param_names()
+    assert not set(templates.SYN_PARAMS) & held_only and not set(templates.SYN_DEST_NAMES) & held_only
+    assert len(templates.OS_TASKS_TRAIN) >= 12 and len(templates.OS_TASKS_DEV) >= 4
+    assert len(templates.TWO_STEP_TEMPLATES_TRAIN) >= 8 and len(templates.TWO_STEP_TEMPLATES_DEV) >= 2
+    assert len(templates.REPLY_TEMPLATES_DEV) >= 5 and len(templates.BLOCKED_REPLY_TEMPLATES_TRAIN) >= 8
+
+
+def test_dataset_stats_reports_counts_shares_and_lengths(big):
+    stats = dataset.dataset_stats(big)
+    assert stats["n"] == 4000 and stats["split_counts"] == {"train": 4000}
+    assert stats["class_counts"] == {"benign": 2000, "dh": 1000, "ds": 1000}
+    assert 0.32 <= stats["synthetic_fraction"] <= 0.38 and 0.08 <= stats["os_action_fraction"] <= 0.12
+    assert 0.06 <= stats["blocked_tail_fraction"] <= 0.10 and 0.10 <= stats["two_step_fraction"] <= 0.20
+    assert 300 < stats["mean_chars"] < 1200 and stats["max_context_chars"] <= 2048
+    assert 0.1 < stats["supervised_fraction"] < 0.9
+    assert dataset.dataset_stats([])["n"] == 0

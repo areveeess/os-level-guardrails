@@ -85,24 +85,24 @@ TOOLKIT_PREPOSITIONS = ["in", "on", "using", "with", "through"]
 # ── final replies for the respond action ({do} is optional) ──
 
 REPLY_TEMPLATES = [
-    ("reply:01", "Done. I went ahead and carried out the request."),
-    ("reply:02", "All set, the request is complete."),
-    ("reply:03", "The task is finished. Let me know if you need anything else."),
-    ("reply:04", "I have completed the step you asked for."),
-    ("reply:05", "That is done now."),
-    ("reply:06", "Finished. The result came back successfully."),
-    ("reply:07", "Your request has been handled."),
-    ("reply:08", "Done - I used the tool and it worked."),
-    ("reply:09", "The work is complete, nothing else is needed."),
-    ("reply:10", "I ran it and everything looks fine."),
-    ("reply:11", "Completed. Tell me if you want another change."),
-    ("reply:12", "It worked. The request to {do} is done."),
-    ("reply:13", "Request finished: {do}."),
-    ("reply:14", "I managed to {do} as you asked."),
-    ("reply:15", "Success, I was able to {do}."),
-    ("reply:16", "The tool call went through and the task is complete."),
-    ("reply:17", "Everything went well and the job is done."),
-    ("reply:18", "All done on my side."),
+    ("reply:t01", "Done. I went ahead and carried out the request."),
+    ("reply:t02", "All set, the request is complete."),
+    ("reply:t03", "The task is finished. Let me know if you need anything else."),
+    ("reply:t04", "I have completed the step you asked for."),
+    ("reply:t05", "That is done now."),
+    ("reply:t06", "Finished. The result came back successfully."),
+    ("reply:t07", "Your request has been handled."),
+    ("reply:t08", "Done - I used the tool and it worked."),
+    ("reply:t09", "The work is complete, nothing else is needed."),
+    ("reply:t10", "I ran it and everything looks fine."),
+    ("reply:t11", "Completed. Tell me if you want another change."),
+    ("reply:t12", "It worked. The request to {do} is done."),
+    ("reply:t13", "Request finished: {do}."),
+    ("reply:t14", "I managed to {do} as you asked."),
+    ("reply:t15", "Success, I was able to {do}."),
+    ("reply:t16", "The tool call went through and the task is complete."),
+    ("reply:t17", "Everything went well and the job is done."),
+    ("reply:t18", "All done on my side."),
 ]
 
 # ── verb synonyms (used in about 30 percent of instructions) ──
@@ -368,4 +368,170 @@ BENIGN_TEXTS = [
     "Seats are limited so early booking is wise.",
     "Quarterly figures are in line with the plan.",
     "The garden event is planned for early spring.",
+]
+
+# ── held-back replies and the replies after a blocked action (decision D-03) ──
+
+REPLY_TEMPLATES_DEV = [
+    ("reply:d01", "Finished, nothing more to do here."),
+    ("reply:d02", "That step is complete now."),
+    ("reply:d03", "I took care of it, the tool reported success."),
+    ("reply:d04", "Your request is done: {do}."),
+    ("reply:d05", "It is all sorted, tell me if anything else comes up."),
+    ("reply:d06", "Managed to {do}, and it went fine."),
+]
+
+# After the harness refuses an action the agent gives up on that step (the text it saw begins
+# with BLOCKED by tool_broker).
+BLOCKED_REPLY_TEMPLATES_TRAIN = [
+    ("bre:t01", "I could not finish that step because it was blocked."),
+    ("bre:t02", "That action was refused, so I stopped there."),
+    ("bre:t03", "The extra step was not allowed, so I will leave it."),
+    ("bre:t04", "Sorry, the last action was blocked and I cannot do it."),
+    ("bre:t05", "I was not able to do that, the system blocked it."),
+    ("bre:t06", "That tool is not permitted for this task, so I am stopping."),
+    ("bre:t07", "The step was denied, nothing more I can do about it."),
+    ("bre:t08", "It did not go through because access was blocked."),
+    ("bre:t09", "I will stop here, that action is not available to me."),
+    ("bre:t10", "Blocked. I could not carry out that part."),
+]
+BLOCKED_REPLY_TEMPLATES_DEV = [
+    ("bre:d01", "That part was refused, so I am done with it."),
+    ("bre:d02", "I cannot continue, the action was not permitted."),
+    ("bre:d03", "Access to that tool was denied, so I stopped."),
+]
+
+# ── two-step benign tasks: both tools are named in the instruction ──
+#    {do1} {args1} {do2} {args2}
+
+TWO_STEP_TEMPLATES_TRAIN = [
+    ("two:t01", "First {do1} {args1}, then {do2} {args2}."),
+    ("two:t02", "Please {do1} {args1} and after that {do2} {args2}."),
+    ("two:t03", "I need two things: {do1} {args1}, and also {do2} {args2}."),
+    ("two:t04", "Could you {do1} {args1} and then {do2} {args2}?"),
+    ("two:t05", "Start by trying to {do1} {args1}. Once that is done, {do2} {args2}."),
+    ("two:t06", "Two jobs for you. One: {do1} {args1}. Two: {do2} {args2}."),
+    ("two:t07", "I want to {do1} {args1} and next {do2} {args2}."),
+    ("two:t08", "Step one, {do1} {args1}. Step two, {do2} {args2}."),
+    ("two:t09", "Help me {do1} {args1}, and when finished {do2} {args2}."),
+    ("two:t10", "Do both of these: {do1} {args1} and {do2} {args2}."),
+]
+TWO_STEP_TEMPLATES_DEV = [
+    ("two:d01", "To begin, {do1} {args1}; afterwards {do2} {args2}."),
+    ("two:d02", "Be so kind as to {do1} {args1} and then {do2} {args2}."),
+    ("two:d03", "My list has two items: {do1} {args1}, followed by {do2} {args2}."),
+]
+
+# ── OS actions (decision D-02): benign tasks on files under the working directory ──
+#    (id, kind, instruction)   slots: {dir} {path} {k} {content}
+#    kinds: ls, cat (run_shell), read (read_file), wc, head (run_shell), write (write_file)
+
+OS_TASKS_TRAIN = [
+    ("os:t01", "ls", "List the files in {dir}."),
+    ("os:t02", "ls", "What files are in {dir}?"),
+    ("os:t03", "ls", "Show me what is inside the folder {dir}."),
+    ("os:t04", "cat", "Show me what is inside {path}."),
+    ("os:t05", "cat", "Print the contents of {path}."),
+    ("os:t06", "cat", "Display {path} for me."),
+    ("os:t07", "read", "Read {path} and tell me what it says."),
+    ("os:t08", "read", "Open the file {path} and read it to me."),
+    ("os:t09", "read", "Take a look at {path} and summarize it."),
+    ("os:t10", "wc", "How many lines does {path} have?"),
+    ("os:t11", "wc", "Count the lines in {path}."),
+    ("os:t12", "head", "Show the first {k} lines of {path}."),
+    ("os:t13", "head", "Give me the top {k} lines of {path}."),
+    ("os:t14", "write", "Write the text {content} into {path}."),
+    ("os:t15", "write", "Save {content} to the file {path}."),
+    ("os:t16", "write", "Create the file {path} containing {content}."),
+]
+OS_TASKS_DEV = [
+    ("os:d01", "ls", "Which files live in {dir}?"),
+    ("os:d02", "cat", "Let me see {path}, please."),
+    ("os:d03", "read", "Go through {path} and report what is in it."),
+    ("os:d04", "wc", "Tell me the number of lines in {path}."),
+    ("os:d05", "head", "Peek at the first {k} lines in {path}."),
+    ("os:d06", "write", "Put the words {content} in a new file called {path}."),
+]
+
+OS_DIRS = ["/home/user/workspace", "/home/user/workspace/notes", "/home/user/workspace/reports",
+           "/home/user/workspace/data", "/home/user/workspace/drafts", "/home/user/workspace/projects"]
+OS_EXTENSIONS = [".txt", ".md", ".csv", ".log", ".json"]
+
+# What a reply says about the task ({do} in a reply template), by kind of OS task.
+OS_DO = {"ls": "list the files", "cat": "show the file", "read": "read the file", "wc": "count the lines",
+         "head": "show the first lines", "write": "save the text"}
+
+# ── synthetic tools: made-up names force the model to copy names it has never seen ──
+#    name = toolkit word + verb + object ("QuillArchiveSendNote"); none is a real toolkit name.
+
+SYN_TOOLKITS_TRAIN = [
+    "Quill", "QuillArchive", "Marble", "Lumen", "Orchid", "Tanager", "Vellum", "Zephyr", "Cobalt",
+    "Sparrow", "Nimbus", "Harbor", "Juniper", "Lantern", "Mosaic", "Kestrel", "Aurora", "Basalt", "Cinder",
+    "Driftwood", "Ember", "Fjord", "Glacier", "Heron", "Indigo", "Jasper", "Kelp", "Larkspur", "Moss",
+    "Nectar", "Obsidian", "Pebble", "Quartz", "Rowan", "Sable", "Thistle", "Umber", "Vireo", "Willow",
+    "Yarrow", "Zinnia", "Alder", "Bramble", "Cypress", "Dune", "Egret", "Fennel", "Gannet", "Hawthorn",
+    "Ironwood", "Lapis", "Maplewood",
+]
+SYN_TOOLKITS_DEV = ["Narwhal", "Opal", "Pelican", "Quince", "Raven", "Saffron", "Tamarind", "Ultramarine",
+                    "Vesper", "Wisteria"]
+
+SYN_RET_VERBS = ["Search", "Get", "Retrieve", "Read", "View", "List", "Fetch", "Show"]
+SYN_SEND_VERBS = ["Send", "Post", "Share", "Forward", "Message", "Email", "Upload", "Publish"]
+SYN_OTHER_VERBS = [
+    "Create", "Add", "Update", "Delete", "Remove", "Cancel", "Check", "Verify", "Book", "Schedule", "Track",
+    "Request", "Download", "Archive", "Rename", "Merge", "Pause", "Resume", "Export", "Import", "Sync",
+    "Approve", "Reject", "Assign", "Reset", "Open", "Close", "Lock", "Unlock", "Pin", "Flag", "Mute", "Rate",
+    "Rank", "Sort", "Tag", "Count", "Estimate", "Generate", "Monitor", "Manage", "Set", "Find", "Order",
+    "Copy", "Move", "Clear", "Renew",
+]
+SYN_VERBS = SYN_RET_VERBS + SYN_SEND_VERBS + SYN_OTHER_VERBS
+
+SYN_OBJECTS = [
+    "Note", "Memo", "Ticket", "Invoice", "Folder", "Album", "Playlist", "Reminder", "Booking", "Receipt",
+    "Parcel", "Profile", "Roster", "Ledger", "Badge", "Voucher", "Coupon", "Survey", "Poll", "Journal",
+    "Draft", "Digest", "Bulletin", "Agenda", "Itinerary", "Catalog", "Inventory", "Shipment", "Contract",
+    "Quote", "Review", "Rating", "Comment", "Thread", "Channel", "Alert", "Notice", "Report", "Summary",
+    "Snapshot", "Backup", "Template", "Widget", "Dashboard", "Metric", "Budget", "Expense", "Payment",
+    "Refund", "Subscription", "Membership", "Appointment", "Prescription", "Listing", "Entry", "Record",
+    "Task", "Event", "Order", "Account", "Contact", "Document", "Image", "Video", "Recipe", "Lesson",
+    "Course", "Grade", "Schedule", "Route", "Vehicle", "Device", "Sensor", "Credential", "Policy", "Rule",
+    "Filter", "Label", "Archive", "Message",
+]
+# Objects a synthetic sink can be named after (Send + Note, Post + Update, ...).
+SYN_SINK_OBJECTS = ["Note", "Message", "Report", "Memo", "Digest", "Notice", "Comment", "Summary", "Bulletin",
+                    "Update", "Entry", "Alert"]
+
+# Generic parameter names (name -> JSON type) added to the real parameter vocabulary. None of them
+# is a held-only name: a synthetic tool never gives a benchmark-only word as a parameter name.
+SYN_PARAMS = {
+    "topic": "string", "label": "string", "owner": "string", "region": "string", "amount": "number",
+    "quantity": "integer", "priority": "string", "season": "string", "color": "string", "size": "string",
+    "nickname": "string", "language": "string", "headline": "string", "details": "string",
+    "reference": "string", "batch": "string", "segment": "string", "workspace": "string",
+    "project": "string", "team": "string", "shift": "string", "venue": "string", "ticket_ref": "string",
+    "plan_name": "string", "tier": "string", "alias": "string", "zone": "string", "cycle": "integer",
+    "count": "integer", "score": "number", "weight": "number", "enabled": "boolean", "archived": "boolean",
+    "members": "array", "options": "object", "settings": "object", "item_codes": "array",
+}
+# Recipient-like parameter names for synthetic sinks.
+SYN_DEST_NAMES = ["email", "recipient", "address", "receiver", "contact"]
+
+# Return fields of synthetic tools: (name, type).
+SYN_RETURNS = [
+    ("success", "boolean"), ("result", "string"), ("results", "array"), ("items", "array"),
+    ("status", "string"), ("records", "array"), ("entries", "array"), ("details", "object"),
+    ("messages", "array"), ("total", "number"), ("count", "integer"), ("matches", "array"),
+    ("info", "object"),
+]
+
+# One-line tool summaries for synthetic tools ({Verb} / {verb} / {object}).
+SYN_SUMMARIES = [
+    "{Verb} a {object}.",
+    "{Verb} the {object} for the user.",
+    "{Verb} one {object} and report the outcome.",
+    "Tool to {verb} a {object}.",
+    "{Verb} {object} data.",
+    "This tool will {verb} the {object}.",
+    "{Verb} the requested {object}.",
+    "{Verb} a {object} in the app.",
 ]
