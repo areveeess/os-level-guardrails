@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "created_at": "2026-10-21T08:38:46+00:00",
+  "code_commit": "c722878473d4577591157a012543a178a037f98e",
+  "code_dirty": true,
+  "python": "3.14.4",
+  "torch": "2.11.0+cu128",
+  "cuda": "12.8",
+  "device": "cuda",
+  "seed": 0,
+  "dataset": {
+    "train_path": "data/local/train-seed0-n40000.jsonl",
+    "train_sha256": "63a192b109bf2c8d071f1c7a1ba833072a2cba113a833161f98e3b8faabdcc46",
+    "dev_path": "data/local/dev-seed0-n2000.jsonl",
+    "dev_sha256": "58f5bcb09845c5a096109d1381534d767d1fd5aa4d95e83a1c0d94c27e43ad2a",
+    "n_train": 40000,
+    "n_dev": 2000,
+    "class_counts": {
+      "benign": 20000,
+      "dh": 10000,
+      "ds": 10000
+    },
+    "synthetic_fraction": 0.35
+  },
+  "held_out_sha256": "13f3aae47fa271ff8e863137d0443023cb8973a203391a51aa72ed1a7423e676",
+  "format_version": 2,
+  "vocab_sha256": "a5444bb0573ce8bbe523ca78bfd0e064568459ac55615c59f1e5f1cbbc0aad4b",
+  "render_fingerprint": "650ca1c4193c2e07e9fdee4990c4fb37b2edd7964aa5026a64c53b9af8fadf04",
+  "context_chars": 2048,
+  "gen_reserve": 400,
+  "config": {
+    "model": {
+      "vocab_size": 96,
+      "context": 2048,
+      "n_layer": 6,
+      "n_head": 8,
+      "d_model": 256,
+      "dropout": 0.1
+    },
+    "train": {
+      "seed": 0,
+      "max_steps": 14000,
+      "eval_every": 250,
+      "log_every": 50,
+      "batch_tokens": 32768,
+      "lr": 0.001,
+      "min_lr": 0.0001,
+      "warmup": 200,
+      "weight_decay": 0.1,
+      "beta1": 0.9,
+      "beta2": 0.95,
+      "grad_clip": 1.0,
+      "patience": 8,
+      "target_loss": 0.0
+    }
+  },
+  "params": 4763648,
+  "steps": 8000,
+  "best_step": 6000,
+  "tokens_seen": 259021855,
+  "final": {
+    "train_loss": 0.020113962810486555,
+    "dev_loss": 0.6395047051958237,
+    "dev_line_exact": 0.3238931708191432,
+    "dev_line_exact_by_cls": {
+      "benign": 0.3,
+      "dh": 0.38466666666666666,
+      "ds": 0.30321592649310875
+    },
+    "dev_first_line_exact": 0.5355
+  },
+  "checkpoint_sha256": "83b0763a6d26513c541056c414930efeb6a720961d1cc2d8becf219bc2760187",
+  "wall_seconds": 1245.2,
+  "stop_reason": "early_stop",
+  "run_notes": [
+    "dev remediation: dev_line_exact 0.167 < 0.50 and dev loss still improving at max_steps; max_steps 7000 -> 14000"
+  ]
+}
