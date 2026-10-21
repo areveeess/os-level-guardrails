@@ -96,6 +96,23 @@ def test_batches_respect_the_token_budget_cover_every_sequence_once_and_follow_t
     assert make_batches(lengths, 4096, seed=4, epoch=0) != batches
 
 
+def test_batch_composition_changes_every_epoch_but_not_the_budget_or_the_seed_reproducibility():
+    """WR-09: only the order of identical batches was reshuffled, so every epoch saw the same batches."""
+    rng = random.Random(11)
+    lengths = [rng.randint(100, 1700) for _ in range(600)]
+    first = make_batches(lengths, 8192, seed=2, epoch=0, jitter=64)
+    second = make_batches(lengths, 8192, seed=2, epoch=1, jitter=64)
+    for batches in (first, second):
+        assert sorted(i for batch in batches for i in batch) == list(range(len(lengths)))
+        assert all(len(b) == 1 or len(b) * max(lengths[i] for i in b) <= 8192 for b in batches)
+    same = set(map(frozenset, first)) & set(map(frozenset, second))
+    assert len(same) < 0.2 * len(first)
+    assert make_batches(lengths, 8192, seed=2, epoch=1, jitter=64) == second          # deterministic per (seed, epoch)
+    assert make_batches(lengths, 8192, seed=3, epoch=1, jitter=64) != second
+    plain = make_batches(lengths, 8192, seed=2, epoch=0)
+    assert set(map(frozenset, plain)) == set(map(frozenset, make_batches(lengths, 8192, seed=2, epoch=1)))   # jitter 0: as before
+
+
 def test_collate_right_pads_ids_and_mask_with_zero(episodes):
     encoded = [encode_episode(e) for e in episodes[:4]]
     x, y, m = collate(encoded, [0, 1, 2, 3], "cpu")

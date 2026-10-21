@@ -121,20 +121,31 @@ def encode_episode(ep: dict) -> tuple:
             torch.tensor(mask[1:], dtype=torch.uint8), ep["cls"])
 
 
-def make_batches(lengths: list, batch_tokens: int, seed: int, epoch: int) -> list:
+BATCH_JITTER = 64      # characters of per-epoch noise added to a sequence length before sorting (training only)
+
+
+def make_batches(lengths: list, batch_tokens: int, seed: int, epoch: int, jitter: int = 0) -> list:
     """Lists of sequence indices. Sequences are sorted by length and chunked greedily so that
     count x longest length stays within `batch_tokens` (a sequence longer than the budget is a batch
-    of its own); the chunk order is then shuffled with a generator seeded from (seed, epoch)."""
-    order = sorted(range(len(lengths)), key=lambda i: (lengths[i], i))
-    chunks, current = [], []
+    of its own); the chunk order is then shuffled with a generator seeded from (seed, epoch).
+
+    With jitter > 0 every sequence gets 0..jitter characters of seeded noise added to its length for the
+    sort only, so neighbours in the sort order, and therefore the batches, differ from epoch to epoch while
+    batches still hold sequences of similar length (review WR-09: without it every epoch saw identical
+    batches, each all-short or all-long). The token budget is checked against the real lengths."""
+    rng = random.Random(seed * 1_000_003 + epoch)
+    noise = [rng.randint(0, jitter) for _ in lengths] if jitter else [0] * len(lengths)
+    order = sorted(range(len(lengths)), key=lambda i: (lengths[i] + noise[i], i))
+    chunks, current, longest = [], [], 0
     for i in order:
-        if current and (len(current) + 1) * lengths[i] > batch_tokens:
+        if current and (len(current) + 1) * max(longest, lengths[i]) > batch_tokens:
             chunks.append(current)
-            current = []
+            current, longest = [], 0
         current.append(i)
+        longest = max(longest, lengths[i])
     if current:
         chunks.append(current)
-    random.Random(seed * 1_000_003 + epoch).shuffle(chunks)
+    rng.shuffle(chunks)
     return chunks
 
 
@@ -390,7 +401,7 @@ def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = N
         stop_reason = None
         model.train()
         while step < train_cfg.max_steps and stop_reason is None:
-            for idxs in make_batches(train_lengths, train_cfg.batch_tokens, train_cfg.seed, epoch):
+            for idxs in make_batches(train_lengths, train_cfg.batch_tokens, train_cfg.seed, epoch, BATCH_JITTER):
                 lr = lr_at(step, train_cfg.max_steps, train_cfg.lr, train_cfg.min_lr, train_cfg.warmup)
                 for group in optimizer.param_groups:
                     group["lr"] = lr
