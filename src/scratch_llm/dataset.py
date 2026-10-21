@@ -35,23 +35,28 @@ as tool parameter names and as call_tool argument keys, never as ordinary words 
 HELD_ONLY_GATE_SCOPE).
 """
 
+import argparse
 import copy
 import functools
 import hashlib
 import json
 import os
+import platform
 import random
 import re
+import sys
+from datetime import datetime, timezone
 
 from src.agent_harness.executors import Observation
 from src.agent_harness.prompting import OBSERVATION_TEMPLATE, build_messages, parse_action
 from src.agent_harness.tool_broker import DEFAULT_RESPONSE, ToolBroker
-from src.benchmark.injecagent import DATA_DIR, EXFIL_TOOL, load_tool_specs
-from src.scratch_llm.format import (ACTION_PREFIX, CONTEXT_CHARS, END, GEN_RESERVE, HISTORY_ACTION_CHARS,
+from src.benchmark.injecagent import DATA_DIR, EXFIL_TOOL, PROJECT_ROOT, load_tool_specs
+from src.scratch_llm.format import (ACTION_PREFIX, CONTEXT_CHARS, END, FORMAT_VERSION, GEN_RESERVE, HISTORY_ACTION_CHARS,
                                     OBS_CHARS, USER_CHARS, _flat, compact_action, render_context, supervised_mask)
 from src.scratch_llm import templates
+from src.scratch_llm.provenance import git_commit, git_dirty, resolve_under_root, write_json_atomic
 
-GENERATOR_VERSION = 1
+GENERATOR_VERSION = 2   # 1 was the benign-only slice of plan 02-01; 2 is the full mix
 MAX_REDRAWS = 50   # attempts to draw one valid episode before generation gives up
 SPLITS = ("train", "dev_tools", "dev_synthetic")
 CLASSES = ("benign", "dh", "ds")
@@ -1351,3 +1356,89 @@ def read_episodes(path: str) -> list:
                 validate_episode(episode)
                 episodes.append(episode)
     return episodes
+
+
+# ── command line: python -m src.scratch_llm.dataset ──
+
+MAX_EPISODES = 200000
+ALLOWED_OUTPUT_ROOT = PROJECT_ROOT     # --out-dir must stay inside this directory (tests point it at a tmp dir)
+DEFAULT_OUT_DIR = "data/local"
+MANIFEST_SCHEMA = 1
+GATE_RULES = (RULE_HELD_OUT_TOOL, RULE_HELD_OUT_NAME, RULE_HELD_ONLY_PARAM, RULE_SYNTHETIC_SIGNATURE,
+              RULE_CANARY, RULE_BANNED, RULE_EMAIL, RULE_SHINGLE, RULE_SENTENCE, RULE_SUMMARY)
+CLASS_MIX = {"benign": 0.5, "dh": 0.25, "ds": 0.25}
+
+
+def _file_entry(path: str, root: str, episodes: list, digest: str) -> dict:
+    """The manifest entry of one episode file: repo-relative path, size, hash and the dataset_stats fields."""
+    stats = dataset_stats(episodes)
+    entry = {"path": os.path.relpath(path, root).replace(os.sep, "/"), "n": stats.pop("n"), "sha256": digest}
+    entry.update(stats)
+    return entry
+
+
+def main(argv=None) -> int:
+    """Generate the training and dev episode files and a manifest next to them.
+
+    Writes train-seed{seed}-n{n}.jsonl, dev-seed{seed}-n{dev}.jsonl (first half dev_tools, second half
+    dev_synthetic) and manifest.json into --out-dir. The episode files are git-ignored; the manifest (hashes,
+    counts, shares, the held-out list hash, the gate verdict and its scope) is the committed record, and it
+    holds no environment values and no absolute paths."""
+    parser = argparse.ArgumentParser(prog="python -m src.scratch_llm.dataset", description=main.__doc__.split("\n\n")[0])
+    parser.add_argument("--n", type=int, default=40000, help=f"training episodes (4..{MAX_EPISODES}, default 40000)")
+    parser.add_argument("--dev", type=int, default=2000, help=f"dev episodes, an even number (0..{MAX_EPISODES}, default 2000)")
+    parser.add_argument("--seed", type=int, default=0, help="generator seed (default 0)")
+    parser.add_argument("--out-dir", default=DEFAULT_OUT_DIR, help="output directory inside the repository (default data/local)")
+    args = parser.parse_args(argv)
+    if not 4 <= args.n <= MAX_EPISODES:
+        parser.error(f"--n must be between 4 and {MAX_EPISODES}")
+    if not 0 <= args.dev <= MAX_EPISODES or args.dev % 2:
+        parser.error(f"--dev must be an even number between 0 and {MAX_EPISODES}")
+    try:
+        out_dir = resolve_under_root(args.out_dir, ALLOWED_OUTPUT_ROOT)
+    except ValueError:
+        parser.error("--out-dir must stay inside the repository")
+    root = os.path.realpath(ALLOWED_OUTPUT_ROOT)
+
+    train = generate_episodes(args.n, args.seed, "train")
+    half = args.dev // 2
+    dev = generate_episodes(half, args.seed, "dev_tools") + generate_episodes(half, args.seed, "dev_synthetic")
+    os.makedirs(out_dir, exist_ok=True)
+    train_path = os.path.join(out_dir, f"train-seed{args.seed}-n{args.n}.jsonl")
+    dev_path = os.path.join(out_dir, f"dev-seed{args.seed}-n{args.dev}.jsonl")
+    train_sha, dev_sha = write_episodes(train_path, train), write_episodes(dev_path, dev)
+
+    dev_names = dev_tool_names()
+    manifest = {
+        "schema": MANIFEST_SCHEMA,
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "code_commit": git_commit(),
+        "code_dirty": git_dirty(),
+        "python": platform.python_version(),
+        "generator_version": GENERATOR_VERSION,
+        "format_version": FORMAT_VERSION,
+        "seed": args.seed,
+        "held_out_sha256": held_out_sha256(),
+        "held_out_count": len(held_out_tools()),
+        "held_only_param_count": len(held_only_param_names()),
+        "free_pool_count": len(free_tool_specs()),
+        "dropped_free_tools": dropped_free_tools(),
+        "dev_tool_count": len(dev_names),
+        "dev_tools_sha256": hashlib.sha256("\n".join(dev_names).encode("utf-8")).hexdigest(),
+        "mix": dict(CLASS_MIX),
+        "files": {"train": _file_entry(train_path, root, train, train_sha),
+                  "dev": _file_entry(dev_path, root, dev, dev_sha)},
+        "gate": {"passed": True, "rules": list(GATE_RULES), "held_only_param_scope": HELD_ONLY_GATE_SCOPE},
+    }
+    manifest_path = os.path.join(out_dir, "manifest.json")
+    write_json_atomic(manifest_path, manifest)
+    for kind in ("train", "dev"):
+        entry = manifest["files"][kind]
+        print(f"{entry['path']}  n={entry['n']}  sha256={entry['sha256']}")
+        print("  " + json.dumps({k: v for k, v in entry.items() if k not in ("path", "n", "sha256")}))
+    print(f"{os.path.relpath(manifest_path, root).replace(os.sep, '/')}  written")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

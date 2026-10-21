@@ -28,7 +28,7 @@ from src.agent_harness.prompting import action_target, parse_action
 from src.agent_harness.tool_broker import ToolBroker
 from src.benchmark.injecagent import load_tool_specs
 from src.policy_engine.engine import PolicyEngine
-from src.scratch_llm import dataset, templates
+from src.scratch_llm import dataset, provenance, templates
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -426,3 +426,141 @@ def test_dataset_stats_reports_counts_shares_and_lengths(big):
     assert 300 < stats["mean_chars"] < 1200 and stats["max_context_chars"] <= 2048
     assert 0.1 < stats["supervised_fraction"] < 0.9
     assert dataset.dataset_stats([])["n"] == 0
+
+
+# ══ the dataset command line, its manifest and the provenance helpers ══
+
+MANIFEST_KEYS = ["schema", "created_at", "code_commit", "code_dirty", "python", "generator_version",
+                 "format_version", "seed", "held_out_sha256", "held_out_count", "held_only_param_count",
+                 "free_pool_count", "dropped_free_tools", "dev_tool_count", "dev_tools_sha256", "mix", "files",
+                 "gate"]
+
+
+@pytest.fixture
+def out_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(dataset, "ALLOWED_OUTPUT_ROOT", str(tmp_path))
+    return tmp_path
+
+
+def run(out_root, *extra, n="40", dev="8", seed="3", out=None):
+    out = out or str(out_root)
+    assert dataset.main(["--n", n, "--dev", dev, "--seed", seed, "--out-dir", out, *extra]) in (0, None)
+    with open(os.path.join(str(out_root), out, "manifest.json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def test_main_writes_both_files_and_a_manifest_that_matches_them(out_root, capsys):
+    manifest = run(out_root)
+    train, dev = out_root / "train-seed3-n40.jsonl", out_root / "dev-seed3-n8.jsonl"
+    assert train.exists() and dev.exists()
+    assert manifest["files"]["train"]["sha256"] == dataset.file_sha256(str(train))
+    assert manifest["files"]["dev"]["sha256"] == dataset.file_sha256(str(dev))
+    assert manifest["files"]["train"]["path"] == "train-seed3-n40.jsonl"
+    assert manifest["files"]["train"]["n"] == 40 and manifest["files"]["dev"]["n"] == 8
+    assert manifest["files"]["train"]["class_counts"] == {"benign": 20, "dh": 10, "ds": 10}
+    splits = [e["split"] for e in dataset.read_episodes(str(dev))]
+    assert splits == ["dev_tools"] * 4 + ["dev_synthetic"] * 4
+    assert set(e["split"] for e in dataset.read_episodes(str(train))) == {"train"}
+    out = capsys.readouterr().out
+    assert manifest["files"]["train"]["sha256"] in out and manifest["files"]["dev"]["sha256"] in out
+
+
+def test_manifest_has_exactly_the_fixed_field_list_and_the_gate_scope(out_root):
+    manifest = run(out_root)
+    assert list(manifest) == MANIFEST_KEYS
+    assert manifest["schema"] == 1 and manifest["seed"] == 3
+    assert manifest["held_out_sha256"] == dataset.held_out_sha256() and manifest["held_out_count"] == 79
+    assert manifest["held_only_param_count"] == 50
+    assert manifest["free_pool_count"] == len(dataset.free_tool_specs())
+    assert manifest["dev_tool_count"] == len(dataset.dev_tool_names())
+    assert re.fullmatch(r"[0-9a-f]{64}", manifest["dev_tools_sha256"])
+    assert manifest["mix"] == {"benign": 0.5, "dh": 0.25, "ds": 0.25}
+    assert manifest["generator_version"] == dataset.GENERATOR_VERSION
+    assert list(manifest["gate"]) == ["passed", "rules", "held_only_param_scope"]
+    assert manifest["gate"]["passed"] is True
+    assert manifest["gate"]["held_only_param_scope"] == dataset.HELD_ONLY_GATE_SCOPE
+    assert "held-only parameter name" in manifest["gate"]["rules"]
+    assert re.fullmatch(r"[0-9a-f]{40}|unknown", manifest["code_commit"])
+    assert manifest["code_dirty"] in (True, False, None)
+
+
+def test_same_arguments_give_the_same_file_hashes(out_root):
+    first = run(out_root, out=str(out_root / "a"))
+    second = run(out_root, out=str(out_root / "b"))
+    for kind in ("train", "dev"):
+        assert first["files"][kind]["sha256"] == second["files"][kind]["sha256"]
+    other = run(out_root, seed="4", out=str(out_root / "c"))
+    assert other["files"]["train"]["sha256"] != first["files"]["train"]["sha256"]
+
+
+def test_the_manifest_carries_no_environment_values_or_local_paths(out_root, monkeypatch):
+    monkeypatch.setenv("FAKE_SCRATCH_SECRET", "sentinel-7f3a9c-do-not-leak")
+    run(out_root)
+    text = (out_root / "manifest.json").read_text(encoding="utf-8")
+    assert "sentinel-7f3a9c-do-not-leak" not in text
+    assert str(out_root) not in text and PROJECT_ROOT not in text
+    home = os.path.expanduser("~")
+    assert len(home) < 4 or home not in text
+    assert (out_root / "manifest.json").read_bytes().endswith(b"\n") and b"\r" not in (out_root / "manifest.json").read_bytes()
+
+
+@pytest.mark.parametrize("arguments", [["--n", "200001"], ["--n", "3"], ["--n", "40", "--dev", "7"],
+                                       ["--n", "40", "--dev", "200002"], ["--n", "40", "--dev", "-2"]])
+def test_bad_sizes_are_refused_before_anything_is_written(out_root, arguments):
+    with pytest.raises(SystemExit) as caught:
+        dataset.main([*arguments, "--out-dir", str(out_root)])
+    assert caught.value.code not in (0, None)
+    assert os.listdir(out_root) == []
+
+
+@pytest.mark.parametrize("out_dir", ["/etc", "../outside", "sub/../../outside"])
+def test_an_out_dir_outside_the_repository_is_refused(tmp_path, monkeypatch, out_dir):
+    inside = tmp_path / "repo"
+    inside.mkdir()
+    monkeypatch.setattr(dataset, "ALLOWED_OUTPUT_ROOT", str(inside))
+    with pytest.raises(SystemExit) as caught:
+        dataset.main(["--n", "8", "--dev", "4", "--out-dir", out_dir])
+    assert caught.value.code not in (0, None)
+    assert os.listdir(inside) == [] and not os.path.exists("/etc/manifest.json")
+    assert os.listdir(tmp_path) == ["repo"]
+
+
+def test_a_relative_out_dir_is_resolved_under_the_root(out_root):
+    manifest = run(out_root, out="nested/out")
+    assert manifest["files"]["train"]["path"] == "nested/out/train-seed3-n40.jsonl"
+    assert (out_root / "nested" / "out" / "train-seed3-n40.jsonl").exists()
+
+
+# ── provenance helpers ──
+
+def test_resolve_under_root_refuses_escapes_and_returns_absolute_paths(tmp_path):
+    with pytest.raises(ValueError):
+        provenance.resolve_under_root("../outside", str(tmp_path))
+    with pytest.raises(ValueError):
+        provenance.resolve_under_root("/etc", str(tmp_path))
+    inside = provenance.resolve_under_root("data/local", str(tmp_path))
+    assert os.path.isabs(inside) and inside.startswith(os.path.realpath(str(tmp_path)))
+    assert provenance.resolve_under_root(str(tmp_path), str(tmp_path)) == os.path.realpath(str(tmp_path))
+
+
+def test_git_helpers_fall_back_to_safe_values(monkeypatch):
+    assert re.fullmatch(r"[0-9a-f]{40}|unknown", provenance.git_commit())
+    assert provenance.git_dirty() in (True, False, None)
+
+    def boom(*args, **kwargs):
+        raise OSError("git is not installed")
+    monkeypatch.setattr(provenance.subprocess, "run", boom)
+    assert provenance.git_commit() == "unknown" and provenance.git_dirty() is None
+
+
+def test_write_json_atomic_leaves_no_temporary_file(tmp_path):
+    path = tmp_path / "x.json"
+    provenance.write_json_atomic(str(path), {"b": 1, "a": [1, 2]})
+    assert json.loads(path.read_text(encoding="utf-8")) == {"b": 1, "a": [1, 2]}
+    assert path.read_text(encoding="utf-8").index('"b"') < path.read_text(encoding="utf-8").index('"a"')
+    assert sorted(os.listdir(tmp_path)) == ["x.json"]
+
+
+def test_provenance_module_is_stdlib_only_and_never_uses_a_shell():
+    source = open(os.path.join(PROJECT_ROOT, "src", "scratch_llm", "provenance.py"), encoding="utf-8").read()
+    assert "shell=True" not in source and "torch" not in source
