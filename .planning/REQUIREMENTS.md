@@ -26,8 +26,8 @@
 - [x] **SCRATCH-01**: `generate_episodes(n, seed)` produces reproducible synthetic agent episodes (50% benign / 25% direct-harm-compliant / 25% data-stealing-compliant, self-written injections) using only tools that are not in the InjecAgent benchmark
 - [x] **SCRATCH-02**: An automated leakage test fails if any training episode uses a held-out benchmark tool (including `GmailSendEmail`), the benchmark attacker address, the canary format, or shares an 8-word shingle with benchmark text
 - [x] **SCRATCH-03**: Training and inference render conversations through the same function (compact format v2 with parameter names on the `T:` line), enforced by a parity test and a format-version/vocab-hash stamp in the checkpoint
-- [ ] **SCRATCH-04**: `python -m src.scratch_llm.train` trains ScratchGPT on the RTX 3060 and writes `models/scratch/scratch_gpt.pt`, a manifest (seed, dataset hash, config, git SHA), and a loss curve
-- [ ] **SCRATCH-05**: `scratch-gpt` runs end-to-end in the benchmark (provider loads the checkpoint via `inference.load_generator`) and produces valid actions on a smoke run
+- [x] **SCRATCH-04**: `python -m src.scratch_llm.train` trains ScratchGPT on the RTX 3060 and writes `models/scratch/scratch_gpt.pt`, a manifest (seed, dataset hash, config, git SHA), and a loss curve
+- [x] **SCRATCH-05**: `scratch-gpt` runs end-to-end in the benchmark (provider loads the checkpoint via `inference.load_generator`) and produces valid actions on a smoke run
 
 ### Local Fine-Tuned Model (LORA)
 
@@ -92,8 +92,8 @@
 | SCRATCH-01 | Phase 2 | Complete |
 | SCRATCH-02 | Phase 2 | Complete |
 | SCRATCH-03 | Phase 2 | Complete |
-| SCRATCH-04 | Phase 2 | Pending |
-| SCRATCH-05 | Phase 2 | Pending |
+| SCRATCH-04 | Phase 2 | Complete |
+| SCRATCH-05 | Phase 2 | Complete |
 | LORA-01 | Phase 3 | Pending |
 | LORA-02 | Phase 3 | Pending |
 | LORA-03 | Phase 3 | Pending |

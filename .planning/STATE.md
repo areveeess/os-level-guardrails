@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 current_phase: 2
 current_phase_name: Local Data Foundation & ScratchGPT
-status: executing
-stopped_at: Completed 02-03-PLAN.md
-last_updated: "2026-10-21T07:50:40.222Z"
+status: verifying
+stopped_at: Completed 02-04-PLAN.md
+last_updated: "2026-10-21T08:50:17.398Z"
 last_activity: 2026-10-21
 last_activity_desc: Phase 2 execution started
-state_head: 3dc735f616030326250116d6dace5b37b45a4083
+state_head: a3ea7389f4af6eaa786e856aa509690658fe3ced
 progress:
   total_phases: 5
   completed_phases: 1
   total_plans: 8
-  completed_plans: 7
+  completed_plans: 8
   percent: 20
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-10-21)
 
 Phase: 2 (Local Data Foundation & ScratchGPT) — EXECUTING
 Plan: 4 of 4
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-21 — Phase 2 execution started
 
 Progress: [██░░░░░░░░] 20% (Phase 1 of 5 complete)
@@ -63,6 +63,7 @@ Progress: [██░░░░░░░░] 20% (Phase 1 of 5 complete)
 | Phase 2 P01 | 20 min | 3 tasks | 8 files |
 | Phase 02 P02 | 26min | 3 tasks | 5 files |
 | Phase 02 P03 | 173 min | 3 tasks | 7 files |
+| Phase 02 P04 | 58 min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -87,6 +88,8 @@ Recent decisions affecting current work:
 - [Phase 02]: Dataset manifest committed after the CLI commit so code_commit names it; train sha256 63a192b1..., dev sha256 58f5bcb0... (seed 0, 40000+2000)
 - [Phase 02]: 02-03: non-finite loss is checked right after the forward pass (before the optimiser step); train exits 3 with no final manifest
 - [Phase 02]: 02-03: load_generator enforces the exact checkpoint key set and five stamps; mismatches (incl. cfg/weights misfit) raise RuntimeError so the runner skips the model
+- [Phase 02]: 02-04: the pre-registered dev-only rule triggered after run 1 (dev line exact 0.167 < 0.50, still improving); one retry at 14000 steps gave the kept model (best step 6000, dev loss 0.5720, checkpoint 83b0763a6d26)
+- [Phase 02]: 02-04: smoke run is plumbing only (26 rows stamped scratch-gpt@83b0763a6d26, parse rate 76/80, attack attempts 4/10 per arm); no setting changed after it
 
 ### Pending Todos
 
@@ -114,6 +117,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-21T07:50:40.071Z
-Stopped at: Completed 02-03-PLAN.md
+Last session: 2026-10-21T08:50:17.248Z
+Stopped at: Completed 02-04-PLAN.md
 Resume file: None
