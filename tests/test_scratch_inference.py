@@ -9,6 +9,7 @@ keeps its training run to 20 steps on 16 episodes.
 """
 
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -19,8 +20,13 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from src.agent_harness.prompting import build_messages
+from src.agent_harness.environment import build_environment
+from src.agent_harness.executors import MockExecutor
+from src.agent_harness.loop import AgentLoop
+from src.benchmark import runner as runner_module
 from src.benchmark.injecagent import PROJECT_ROOT, benign_cases, load_tool_specs
-from src.benchmark.runner import run_episode
+from src.benchmark.runner import run_benchmark, run_episode
+from src.llm import registry
 from src.llm.scratch import LocalScratchProvider
 from src.policy_engine.engine import PolicyEngine
 from src.scratch_llm.dataset import generate_episodes, write_episodes
@@ -133,3 +139,135 @@ def test_a_checkpoint_with_another_format_version_is_refused(tiny, tmp_path):
     torch.save(ckpt, stale)
     with pytest.raises(RuntimeError, match="format_version"):
         load_generator(stale, device="cpu")
+
+
+# ── every stamp is enforced, and the runner skips a refused model ──
+
+def tampered_copy(tiny, tmp_path, mutate):
+    ckpt = torch.load(tiny.path, map_location="cpu", weights_only=True)
+    mutate(ckpt)
+    path = str(tmp_path / "tampered.pt")
+    torch.save(ckpt, path)
+    return path
+
+
+@pytest.mark.parametrize("field, value", [("format_version", 1), ("vocab_sha256", "0" * 64),
+                                          ("render_fingerprint", "f" * 64), ("context_chars", 1536),
+                                          ("gen_reserve", 300)])
+def test_each_changed_stamp_is_refused_and_named(tiny, tmp_path, field, value):
+    path = tampered_copy(tiny, tmp_path, lambda c: c.__setitem__(field, value))
+    with pytest.raises(RuntimeError, match=field):
+        load_generator(path, device="cpu")
+
+
+def test_an_extra_or_a_missing_checkpoint_key_is_refused_by_name(tiny, tmp_path):
+    extra = tampered_copy(tiny, tmp_path, lambda c: c.__setitem__("pickled_extra", 1))
+    with pytest.raises(RuntimeError, match="pickled_extra"):
+        load_generator(extra, device="cpu")
+    missing = tampered_copy(tiny, tmp_path, lambda c: c.pop("train_meta"))
+    with pytest.raises(RuntimeError, match="train_meta"):
+        load_generator(missing, device="cpu")
+
+
+def test_a_missing_checkpoint_says_to_train_it_first(tmp_path):
+    with pytest.raises(RuntimeError, match="Train it first"):
+        LocalScratchProvider("scratch-gpt", str(tmp_path / "missing.pt"))
+
+
+def write_models_yaml(path, entries):
+    lines = ["default: scratch-tiny", "models:"]
+    for name, checkpoint in entries.items():
+        lines += [f"  {name}:", "    provider: scratch", f"    model: {name}", f"    checkpoint: {checkpoint}",
+                  "    family: test", "    benchmark: true"]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def point_runner_at(monkeypatch, config_path):
+    monkeypatch.setattr(runner_module, "get_provider", lambda name: registry.get_provider(name, path=str(config_path)))
+    monkeypatch.setattr(runner_module, "load_model_config", lambda: registry.load_model_config(str(config_path)))
+
+
+def test_the_runner_skips_a_refused_checkpoint_and_writes_no_row_for_it(tiny, tmp_path, monkeypatch):
+    stale = tampered_copy(tiny, tmp_path, lambda c: c.__setitem__("render_fingerprint", "f" * 64))
+    config = tmp_path / "models.yaml"
+    write_models_yaml(config, {"scratch-tampered": stale})
+    point_runner_at(monkeypatch, config)
+    lines = []
+    out = str(tmp_path / "run_tampered")
+    run_benchmark(["scratch-tampered"], benign_cases(load_tool_specs())[:1], out, runs=1, arms=("unprotected",),
+                  log=lines.append)
+    assert any(line.startswith("[skip] scratch-tampered:") for line in lines), lines
+    raw = os.path.join(out, "raw.jsonl")
+    assert not os.path.exists(raw) or os.path.getsize(raw) == 0
+
+
+def test_runner_rows_of_a_good_checkpoint_carry_the_scratch_stamps(tiny, tmp_path, monkeypatch):
+    config = tmp_path / "models.yaml"
+    write_models_yaml(config, {"scratch-tiny": tiny.path})
+    point_runner_at(monkeypatch, config)
+    out = str(tmp_path / "run_good")
+    run_benchmark(["scratch-tiny"], benign_cases(load_tool_specs())[:1], out, runs=1, arms=("unprotected",),
+                  max_steps=2, log=lambda *_: None)
+    with open(os.path.join(out, "raw.jsonl"), encoding="utf-8") as f:
+        rows = [json.loads(line) for line in f if line.strip()]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["provider"] == "scratch" and row["config_model"] == "scratch-tiny"
+    assert row["resolved_model"] == "scratch-tiny@" + sha256_of(tiny.path)[:12]
+    assert row["finish_reasons"] and all(r in ("stop", "length") for r in row["finish_reasons"])
+    assert all(isinstance(n, int) for n in row["prompt_tokens"] + row["completion_tokens"])
+
+
+# ── generation cap, errors and garbage as values ──
+
+def test_generation_is_capped_by_max_tokens_and_by_the_hard_limit(tiny):
+    gen = load_generator(tiny.path, device="cpu")
+    messages = messages_for_a_notes_request()
+    short = gen(messages, max_tokens=5)
+    assert len(short) <= 5 and gen.last_new_chars <= 5
+    if "\n" not in short and gen.last_new_chars == 5:
+        assert gen.last_finish_reason == "length"
+    long = gen(messages, max_tokens=10000)
+    assert len(long) <= MAX_NEW_CHARS and gen.last_new_chars <= MAX_NEW_CHARS
+    assert gen(messages, max_tokens=0) == "" and gen.last_finish_reason == "length"
+
+
+def test_a_generator_that_raises_becomes_an_error_response(tiny):
+    provider = LocalScratchProvider("scratch-gpt", tiny.path)
+
+    def broken(messages, temperature=0.0, max_tokens=512):
+        raise ValueError("boom")
+
+    provider._generate = broken
+    response = provider.generate(messages_for_a_notes_request())
+    assert not response.ok and response.error.startswith("ValueError") and response.text == ""
+    assert response.resolved_model is None
+
+
+class Replies:
+    """A stand-in generator that answers from a fixed list."""
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+
+    def __call__(self, messages, temperature=0.0, max_tokens=512):
+        return self.replies.pop(0)
+
+
+def test_empty_and_garbage_replies_become_parse_errors_the_loop_reports_back(tiny):
+    provider = LocalScratchProvider("scratch-gpt", tiny.path)
+    provider._generate = Replies(["", "not json at all", '{"action": "respond", "message": "done"}'])
+    episode = AgentLoop(provider, MockExecutor(build_environment()), max_steps=3).run("say hi")
+    assert [bool(s.parse_error) for s in episode.steps] == [True, True, False]
+    assert episode.stop_reason == "responded" and episode.llm_error is None
+
+
+def test_a_non_ascii_prompt_character_is_encoded_as_a_question_mark(tiny):
+    gen = load_generator(tiny.path, device="cpu")
+    messages = build_messages("list my notes — café ☃", benign_cases(load_tool_specs())[0].tools)
+    assert isinstance(gen(messages), str)
+    assert gen.last_prompt_chars == len(render_context(messages))
+
+
+def test_models_yaml_stamps_the_config_model_for_scratch_gpt():
+    assert registry.load_model_config()["models"]["scratch-gpt"]["model"] == "scratch-gpt"

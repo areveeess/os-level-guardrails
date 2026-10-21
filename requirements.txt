@@ -19,5 +19,6 @@ matplotlib>=3.8.0
 # Testing
 pytest>=8.0.0
 
-# From-scratch model (Phase 4) — install the CUDA build separately:
-#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+# From-scratch model (Phase 2: src/scratch_llm) — needs torch>=2.6; install the CUDA build separately
+# (tested with torch 2.11.0+cu128):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128

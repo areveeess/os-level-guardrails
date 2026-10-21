@@ -116,8 +116,11 @@ def load_generator(path: str, device: str = None) -> ScratchGenerator:
     if missing or unexpected:
         raise RuntimeError(f"checkpoint keys differ from the contract: missing {missing}, unexpected {unexpected}")
     check_stamps(ckpt)
-    model = ScratchGPT(GPTConfig(**ckpt["cfg"]))
-    model.load_state_dict(ckpt["state_dict"], strict=True)
+    try:
+        model = ScratchGPT(GPTConfig(**ckpt["cfg"]))
+        model.load_state_dict(ckpt["state_dict"], strict=True)
+    except (TypeError, AssertionError, RuntimeError) as e:     # unknown cfg field, or weights of another shape
+        raise RuntimeError(f"checkpoint cfg and weights do not fit the running model code: {e}") from e
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()      # fp32 weights, no autocast: greedy output does not depend on precision
     return ScratchGenerator(model, device, _sha256_file(path))

@@ -63,6 +63,8 @@ models:
 
   scratch-gpt:
     provider: scratch
+    model: scratch-gpt                       # stamped as config_model on every row
+    # Produced by `python -m src.scratch_llm.train`; the .pt file is git-ignored.
     checkpoint: models/scratch/scratch_gpt.pt
     family: from-scratch / unaligned baseline
     benchmark: true
