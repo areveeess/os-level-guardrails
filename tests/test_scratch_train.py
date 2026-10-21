@@ -307,6 +307,27 @@ def test_a_run_whose_dev_loss_stops_improving_ends_with_early_stop(files, tmp_pa
 
 # ── failure paths ──
 
+def test_training_refuses_an_out_dir_that_holds_another_tools_manifest(files, tmp_path, monkeypatch):
+    """WR-06: `--out-dir data/local` used to delete the committed dataset manifest."""
+    out = tmp_path / "shared"
+    out.mkdir()
+    foreign = out / "manifest.json"
+    monkeypatch.setattr(train_module, "ALLOWED_ROOT", str(tmp_path))
+    for content in ('{"schema": 1, "generator_version": 2, "files": {}}', "this is not json"):
+        foreign.write_text(content, encoding="utf-8")
+        before = foreign.read_bytes()
+        with pytest.raises(ValueError, match="not a ScratchGPT training manifest"):
+            train(*files, str(out), model_cfg=GPTConfig(**TINY), train_cfg=quick_config(), device="cpu", log=quiet)
+        with pytest.raises(SystemExit) as refused:
+            main(["--train", files[0], "--dev", files[1], "--out-dir", str(out)] + CLI_TINY)
+        assert refused.value.code == 2
+        assert foreign.read_bytes() == before
+        assert sorted(os.listdir(out)) == ["manifest.json"]
+    foreign.unlink()
+    train(*files, str(out), model_cfg=GPTConfig(**TINY), train_cfg=quick_config(), device="cpu", log=quiet)
+    train(*files, str(out), model_cfg=GPTConfig(**TINY), train_cfg=quick_config(), device="cpu", log=quiet)  # own manifest: replaced
+
+
 def test_a_leaking_training_file_stops_training_before_any_checkpoint(files, tmp_path, episodes):
     spec = load_tool_specs()["GmailSendEmail"]
     names = [p["name"] for p in spec["parameters"] if p.get("required")]

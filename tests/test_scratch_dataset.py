@@ -525,6 +525,20 @@ def test_an_out_dir_outside_the_repository_is_refused(tmp_path, monkeypatch, out
     assert os.listdir(tmp_path) == ["repo"]
 
 
+def test_the_dataset_command_refuses_an_out_dir_that_holds_a_training_manifest(out_root):
+    """WR-06: the trainer's manifest.json must not be overwritten by the dataset command."""
+    foreign = out_root / "manifest.json"
+    foreign.write_text('{"schema": 3, "checkpoint_sha256": "ab12"}', encoding="utf-8")
+    before = foreign.read_bytes()
+    with pytest.raises(SystemExit) as caught:
+        dataset.main(["--n", "8", "--dev", "4", "--out-dir", str(out_root)])
+    assert caught.value.code == 2
+    assert foreign.read_bytes() == before and os.listdir(out_root) == ["manifest.json"]
+    foreign.unlink()
+    run(out_root, n="8", dev="4")
+    run(out_root, n="8", dev="4")                  # its own earlier manifest is replaced as before
+
+
 def test_a_relative_out_dir_is_resolved_under_the_root(out_root):
     manifest = run(out_root, out="nested/out")
     assert manifest["files"]["train"]["path"] == "nested/out/train-seed3-n40.jsonl"

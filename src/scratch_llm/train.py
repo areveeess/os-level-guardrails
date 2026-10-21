@@ -56,7 +56,8 @@ from src.scratch_llm.dataset import assert_clean, file_sha256, held_out_sha256, 
 from src.scratch_llm.format import CONTEXT_CHARS, encode, supervised_mask
 from src.scratch_llm.inference import CHECKPOINT_KEYS, current_stamps
 from src.scratch_llm.model import GPTConfig, ScratchGPT
-from src.scratch_llm.provenance import git_commit, git_dirty, resolve_under_root, write_json_atomic
+from src.scratch_llm.provenance import (git_commit, git_dirty, refuse_foreign_manifest, resolve_under_root,
+                                        write_json_atomic)
 
 ALLOWED_ROOT = PROJECT_ROOT      # --train, --dev and --out-dir must stay inside this directory (tests point it at a tmp dir)
 EXIT_NON_FINITE = 3
@@ -361,6 +362,7 @@ def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = N
         [{"params": decay, "weight_decay": train_cfg.weight_decay}, {"params": no_decay, "weight_decay": 0.0}],
         lr=train_cfg.lr, betas=(train_cfg.beta1, train_cfg.beta2), fused=on_cuda)
     os.makedirs(out_dir, exist_ok=True)
+    refuse_foreign_manifest(out_dir, "checkpoint_sha256", "ScratchGPT training")     # before anything is deleted
     ckpt_path = os.path.join(out_dir, "scratch_gpt.pt")
     log_path = os.path.join(out_dir, "train_log.jsonl")
     for stale in (log_path, os.path.join(out_dir, "manifest.json")):
@@ -524,6 +526,10 @@ def main(argv=None) -> int:
     train_cfg = TrainConfig(seed=args.seed, max_steps=args.max_steps, eval_every=args.eval_every,
                             log_every=args.log_every, batch_tokens=args.batch_tokens, lr=args.lr,
                             min_lr=min(defaults.min_lr, args.lr), warmup=args.warmup, patience=args.patience)
+    try:
+        refuse_foreign_manifest(paths["out_dir"], "checkpoint_sha256", "ScratchGPT training")
+    except ValueError as e:
+        parser.error(f"--out-dir: {e}")
     os.makedirs(paths["out_dir"], exist_ok=True)
     try:
         train(paths["train"], paths["dev"], paths["out_dir"], model_cfg, train_cfg, args.device, _flush_print,

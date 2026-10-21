@@ -54,7 +54,8 @@ from src.benchmark.injecagent import DATA_DIR, EXFIL_TOOL, PROJECT_ROOT, load_to
 from src.scratch_llm.format import (ACTION_PREFIX, CONTEXT_CHARS, END, FORMAT_VERSION, GEN_RESERVE, HISTORY_ACTION_CHARS,
                                     OBS_CHARS, USER_CHARS, _flat, compact_action, render_context, supervised_mask)
 from src.scratch_llm import templates
-from src.scratch_llm.provenance import git_commit, git_dirty, resolve_under_root, write_json_atomic
+from src.scratch_llm.provenance import (git_commit, git_dirty, refuse_foreign_manifest, resolve_under_root,
+                                        write_json_atomic)
 
 GENERATOR_VERSION = 2   # 1 was the benign-only slice of plan 02-01; 2 is the full mix
 MAX_REDRAWS = 50   # attempts to draw one valid episode before generation gives up
@@ -1398,6 +1399,10 @@ def main(argv=None) -> int:
         out_dir = resolve_under_root(args.out_dir, ALLOWED_OUTPUT_ROOT)
     except ValueError:
         parser.error("--out-dir must stay inside the repository")
+    try:
+        refuse_foreign_manifest(out_dir, "generator_version", "dataset")        # before generating or writing anything
+    except ValueError as e:
+        parser.error(f"--out-dir: {e}")
     root = os.path.realpath(ALLOWED_OUTPUT_ROOT)
 
     train = generate_episodes(args.n, args.seed, "train")

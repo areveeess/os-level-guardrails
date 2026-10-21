@@ -9,6 +9,7 @@ standard library and no model code:
     write_json_atomic a JSON file written next to its final name and moved into place,
                       so a crash never leaves half a manifest
     resolve_under_root  a command-line path made absolute and checked to stay inside a root
+    refuse_foreign_manifest  stop a tool from replacing the manifest.json of a different tool
 
 The git calls copy the pattern of src/benchmark/runner.py (_git_commit / _git_dirty): a fixed
 argument list, no shell, the repository as working directory and a ten second limit, because they
@@ -56,6 +57,26 @@ def write_json_atomic(path: str, obj) -> None:
         json.dump(obj, f, indent=2, sort_keys=False)
         f.write("\n")
     os.replace(tmp, path)
+
+
+def refuse_foreign_manifest(out_dir: str, required_key: str, owner: str) -> None:
+    """ValueError when <out_dir>/manifest.json exists and is not a manifest written by `owner`.
+
+    The dataset command and the trainer both name their record manifest.json, and --out-dir accepts any
+    directory inside the repository, so `train --out-dir data/local` used to delete the committed dataset
+    manifest. A manifest belongs to `owner` when it is a JSON object holding `required_key` (the field only
+    that tool writes); anything else, including a file that is not JSON, is left alone and refused."""
+    path = os.path.join(out_dir, "manifest.json")
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            found = json.load(f)
+    except (OSError, ValueError):
+        found = None
+    if not isinstance(found, dict) or required_key not in found:
+        raise ValueError(f"{path} exists and is not a {owner} manifest (it has no {required_key!r} field); "
+                         f"refusing to overwrite or delete it - use another --out-dir")
 
 
 def resolve_under_root(path: str, root: str) -> str:
