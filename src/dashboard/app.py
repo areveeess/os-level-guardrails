@@ -13,13 +13,17 @@ Usage:
   DASHBOARD_HOST=<addr>  listen on another interface (only on a trusted network)
   DASHBOARD_PORT=<port>  listen on another port
   DASHBOARD_DEBUG=1      enable the Werkzeug debugger. WARNING: the debugger allows
-                         arbitrary code execution for anyone who can reach the port.
+                         arbitrary code execution for anyone who can reach the port, so it
+                         is refused unless DASHBOARD_HOST is a loopback address.
 """
 
 import os
 import sys
 import json
+import ipaddress
+from urllib.parse import urlsplit
 from flask import Flask, render_template, jsonify
+from flask import request  # WR-09: Host / Origin checks
 
 # Project paths
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -138,10 +142,61 @@ def get_stats():
     return jsonify(stats)
 
 
+def _is_loopback(host: str) -> bool:
+    """True for localhost and loopback IP literals (127.0.0.0/8, ::1)."""
+    host = host.strip().strip('[]')
+    if host.lower() == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _allowed_hostnames():
+    """Host header names accepted while the server is bound to loopback, or None when the
+    operator explicitly bound another interface (those Host values cannot be enumerated)."""
+    host = os.environ.get('DASHBOARD_HOST') or DEFAULT_HOST
+    if not _is_loopback(host):
+        return None
+    return {'localhost', '127.0.0.1', '::1', host.strip().strip('[]').lower()}
+
+
+@app.before_request
+def _reject_foreign_host():
+    """DNS rebinding: a page on evil.example whose name resolves to 127.0.0.1 can read the
+    API as 'same origin'. Its Host header still says evil.example, so refuse it."""
+    allowed = _allowed_hostnames()
+    if allowed is None:
+        return None
+    try:
+        hostname = urlsplit('//' + request.host).hostname
+    except ValueError:
+        hostname = None
+    if hostname is None or hostname.lower() not in allowed:
+        return jsonify({"error": "unexpected Host header"}), 403
+    return None
+
+
+def _same_origin(req) -> bool:
+    """Browsers label cross-site requests (Sec-Fetch-Site) and send Origin on POST. Refuse
+    anything not from this page; clients that send neither header (curl, scripts) pass."""
+    site = req.headers.get('Sec-Fetch-Site')
+    if site is not None and site not in ('same-origin', 'none'):
+        return False
+    origin = req.headers.get('Origin')
+    if origin is not None:
+        return urlsplit(origin).netloc.lower() == req.host.lower()
+    return True
+
+
 @app.route('/api/clear', methods=['POST'])
 def clear_logs():
-    """API endpoint: clear all logs (for starting fresh demo runs)."""
+    """API endpoint: clear all logs (for starting fresh demo runs). Same-origin only: a
+    cross-site 'simple' POST from any web page could otherwise wipe the decision log."""
     global _log_cache
+    if not _same_origin(request):
+        return jsonify({"error": "cross-origin request refused"}), 403
     try:
         os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
         with open(LOG_FILE, 'w', encoding='utf-8') as f:
@@ -162,12 +217,25 @@ DEFAULT_PORT = 5000
 
 
 def _run_settings():
-    """Server settings: loopback only and debugger off unless explicitly overridden."""
-    return {
-        'host': os.environ.get('DASHBOARD_HOST') or DEFAULT_HOST,
-        'port': int(os.environ.get('DASHBOARD_PORT') or DEFAULT_PORT),
-        'debug': os.environ.get('DASHBOARD_DEBUG', '').strip().lower() in ('1', 'true', 'yes', 'on'),
-    }
+    """Server settings: loopback only and debugger off unless explicitly overridden.
+
+    Refuses (SystemExit with a message) a bad port, and the debugger on a non-loopback
+    host: the Werkzeug debugger is remote code execution for anyone who can reach it.
+    """
+    host = os.environ.get('DASHBOARD_HOST') or DEFAULT_HOST
+    raw_port = os.environ.get('DASHBOARD_PORT') or str(DEFAULT_PORT)
+    try:
+        port = int(raw_port)
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        sys.exit(f"DASHBOARD_PORT must be an integer from 1 to 65535 (got {raw_port!r})")
+    debug = os.environ.get('DASHBOARD_DEBUG', '').strip().lower() in ('1', 'true', 'yes', 'on')
+    if debug and not _is_loopback(host):
+        sys.exit(f"Refusing to start: DASHBOARD_DEBUG enables the Werkzeug debugger (arbitrary code "
+                 f"execution) and DASHBOARD_HOST={host!r} is not a loopback address. "
+                 f"Unset DASHBOARD_DEBUG or bind to 127.0.0.1.")
+    return {'host': host, 'port': port, 'debug': debug}
 
 
 def main():
