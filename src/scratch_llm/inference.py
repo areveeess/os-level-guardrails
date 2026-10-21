@@ -28,11 +28,14 @@ import hashlib
 
 import torch
 
-from src.scratch_llm.format import (CONTEXT_CHARS, FORMAT_VERSION, GEN_RESERVE, STOI, VOCAB, VOCAB_SHA256, decode,
-                                    encode, render_context, render_fingerprint)
+from src.scratch_llm.format import (CONTEXT_CHARS, END, FORMAT_VERSION, GEN_RESERVE, HISTORY_ACTION_CHARS, STOI, VOCAB,
+                                    VOCAB_SHA256, decode, encode, render_context, render_fingerprint)
 from src.scratch_llm.model import GPTConfig, ScratchGPT
 
-MAX_NEW_CHARS = 320   # the longest legitimate action is about 230 characters; this bounds a runaway reply
+# The format allows an action line of HISTORY_ACTION_CHARS (400) characters (dataset.validate_episode enforces it) and
+# the model must be able to write one of that length plus its newline; shipped gold actions reach 335. This cap only
+# bounds a reply that never ends its line (review WR-02: it used to be 320, which cut long legitimate actions).
+MAX_NEW_CHARS = HISTORY_ACTION_CHARS + len(END)
 STOP_ID = STOI["\n"]
 
 CHECKPOINT_KEYS = ("state_dict", "cfg", "format_version", "vocab_sha256", "render_fingerprint",

@@ -30,9 +30,9 @@ from src.llm import registry
 from src.llm.scratch import LocalScratchProvider
 from src.policy_engine.engine import PolicyEngine
 from src.scratch_llm.dataset import generate_episodes, write_episodes
-from src.scratch_llm.format import (CONTEXT_CHARS, FORMAT_VERSION, GEN_RESERVE, VOCAB_SHA256, render_context,
-                                    render_fingerprint)
-from src.scratch_llm.inference import CHECKPOINT_KEYS, MAX_NEW_CHARS, load_generator
+from src.scratch_llm.format import (CONTEXT_CHARS, FORMAT_VERSION, GEN_RESERVE, HISTORY_ACTION_CHARS, VOCAB_SHA256,
+                                    compact_action, encode, render_context, render_fingerprint)
+from src.scratch_llm.inference import CHECKPOINT_KEYS, MAX_NEW_CHARS, ScratchGenerator, load_generator
 from src.scratch_llm.model import GPTConfig
 from src.scratch_llm.train import TrainConfig, train
 
@@ -219,6 +219,36 @@ def test_runner_rows_of_a_good_checkpoint_carry_the_scratch_stamps(tiny, tmp_pat
 
 
 # ── generation cap, errors and garbage as values ──
+
+class ScriptedModel:
+    """A stand-in for ScratchGPT.generate: appends a fixed reply character by character, honouring max_new and stop_id."""
+
+    def __init__(self, reply_ids, context=CONTEXT_CHARS):
+        self.reply_ids = list(reply_ids)
+        self.cfg = SimpleNamespace(context=context)
+
+    def num_params(self):
+        return 0
+
+    def generate(self, idx, max_new, stop_id, temperature=0.0):
+        new = []
+        for token in self.reply_ids[:max_new]:
+            new.append(token)
+            if token == stop_id:
+                break
+        return torch.cat([idx, torch.tensor([new], dtype=idx.dtype)], dim=1)
+
+
+def test_a_long_legitimate_action_is_not_cut_by_the_generation_cap():
+    """WR-02: gold actions of 335 characters exist in the training data; the cap was 320."""
+    action = compact_action({"action": "call_tool", "tool": "CiscoUmbrellaCreatePolicy",
+                             "args": {"policy_name": "p" * 150, "description": "d" * 120}})
+    assert 335 <= len(action) + 1 <= HISTORY_ACTION_CHARS
+    generator = ScratchGenerator(ScriptedModel(encode(action + "\n")), "cpu", "0" * 64)
+    assert MAX_NEW_CHARS >= HISTORY_ACTION_CHARS + 1
+    assert generator(messages_for_a_notes_request(), max_tokens=512) == action
+    assert generator.last_finish_reason == "stop" and generator.last_new_chars == len(action) + 1
+
 
 def test_generation_is_capped_by_max_tokens_and_by_the_hard_limit(tiny):
     gen = load_generator(tiny.path, device="cpu")
