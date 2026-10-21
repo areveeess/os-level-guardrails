@@ -40,6 +40,10 @@ LOG_FILE = os.path.join(PROJECT_ROOT, 'logs', 'guardrails.jsonl')
 DEFAULT_POLICY = os.path.join(os.path.dirname(__file__), 'policies', 'default_policy.yaml')
 
 
+# Action types whose target must be a (non-empty) string for the policy to judge it
+_TARGETED_ACTIONS = {"run_shell", "read_file", "write_file", "http_request", "call_tool"}
+
+
 class PolicyEngine:
     """Evaluates agent actions against the access-matrix policy.
     
@@ -107,6 +111,13 @@ class PolicyEngine:
             # Text-only responses are always allowed (no system interaction)
             decision = "ALLOW"
             reason = "Text responses are always allowed"
+
+        elif action_type in _TARGETED_ACTIONS and (
+                not isinstance(target, str)
+                or (action_type != "call_tool" and not target.strip())):
+            # The model controls these values and parse_action does not validate types.
+            # A list/number/null/missing target cannot be judged, so it is refused.
+            decision, reason = "BLOCK", "Missing or non-text action target (fail closed)"
 
         elif action_type == "run_shell":
             decision, reason = self._check_shell_command(target)
@@ -270,7 +281,7 @@ class PolicyEngine:
         entry = {
             "timestamp": datetime.datetime.now().isoformat(),
             "action": action_type,
-            "target": target,
+            "target": target if isinstance(target, str) else repr(target),
             "decision": decision,
             "reason": reason,
             "layer": layer

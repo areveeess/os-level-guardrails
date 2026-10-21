@@ -90,6 +90,8 @@ class _Parser:
     """Single-pass, quote-aware scanner. One instance scans one string at one depth."""
 
     def __init__(self, source: str, depth: int, results: Optional[List[SimpleCommand]] = None):
+        if not isinstance(source, str):
+            raise ShellParseError("command is not text")
         if depth > MAX_DEPTH:
             raise ShellParseError(f"nesting deeper than {MAX_DEPTH}")
         if len(source) > MAX_COMMAND_CHARS:

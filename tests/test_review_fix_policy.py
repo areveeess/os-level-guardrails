@@ -133,3 +133,50 @@ def test_cr02_well_formed_actions_still_flow(engine):
 def test_cr02_unhashable_action_type_is_a_parse_error_not_a_crash():
     with pytest.raises(ActionParseError):
         parse_action('{"action": ["run_shell"], "command": "ls"}')
+
+
+# ── WR-01: non-string / missing targets fail closed instead of crashing ──────
+
+BAD_TARGETS = [None, 5, ["ls", "-la"], ["curl", "x"], {"a": 1}, True, 1.5, b"ls", "", "   "]
+
+
+@pytest.mark.parametrize("action_type", ["run_shell", "read_file", "write_file", "http_request"])
+@pytest.mark.parametrize("target", BAD_TARGETS, ids=repr)
+def test_wr01_bad_target_is_blocked_not_a_crash(engine, action_type, target):
+    decision, reason = engine.check_detailed(action_type, target)
+    assert decision == "BLOCK"
+    assert "fail closed" in reason
+
+
+@pytest.mark.parametrize("target", [None, 5, ["ls", "-la"], {"a": 1}])
+def test_wr01_non_string_call_tool_target_is_blocked(engine, target):
+    assert engine.check("call_tool", target) == "BLOCK"
+
+
+def test_wr01_bad_target_is_logged_without_crashing(engine, tmp_path):
+    import json
+    log = tmp_path / "wr01.jsonl"
+    engine.log_file = str(log)
+    engine.check_detailed("run_shell", ["ls", "-la"])
+    entry = json.loads(log.read_text().splitlines()[-1])
+    assert entry["decision"] == "BLOCK"
+
+
+def test_wr01_guarded_executor_blocks_list_command(engine):
+    inner = RecordingExecutor()
+    obs = GuardedExecutor(engine, inner).execute({"action": "run_shell", "command": ["ls", "-la"]})
+    assert obs.status == "blocked" and inner.actions == []
+    obs = GuardedExecutor(engine, inner).execute({"action": "run_shell"})
+    assert obs.status == "blocked" and inner.actions == []
+
+
+def test_wr01_parse_shell_rejects_non_text():
+    with pytest.raises(ShellParseError):
+        parse_shell(["ls"])
+    with pytest.raises(ShellParseError):
+        parse_shell(None)
+
+
+def test_wr01_respond_with_any_message_is_still_allowed(engine):
+    assert engine.check("respond", "hello") == "ALLOW"
+    assert engine.check("respond", None) == "ALLOW"
