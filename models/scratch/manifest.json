@@ -1,7 +1,7 @@
 {
-  "schema": 1,
-  "created_at": "2026-10-21T08:38:46+00:00",
-  "code_commit": "c722878473d4577591157a012543a178a037f98e",
+  "schema": 4,
+  "created_at": "2026-10-21T20:33:19+00:00",
+  "code_commit": "1e2a02018a3e88d9333f4f15860ec8c321226dc1",
   "code_dirty": true,
   "python": "3.14.4",
   "torch": "2.11.0+cu128",
@@ -10,9 +10,9 @@
   "seed": 0,
   "dataset": {
     "train_path": "data/local/train-seed0-n40000.jsonl",
-    "train_sha256": "63a192b109bf2c8d071f1c7a1ba833072a2cba113a833161f98e3b8faabdcc46",
+    "train_sha256": "a2586548c7f76c63cf100c03aa91bc7b5d965ab12fa310ca9cefcde1301b411a",
     "dev_path": "data/local/dev-seed0-n2000.jsonl",
-    "dev_sha256": "58f5bcb09845c5a096109d1381534d767d1fd5aa4d95e83a1c0d94c27e43ad2a",
+    "dev_sha256": "1f6333eb8ac824739e697455dc60c4b0d5f5af0dd844ffc42a2238d28106202d",
     "n_train": 40000,
     "n_dev": 2000,
     "class_counts": {
@@ -55,24 +55,67 @@
     }
   },
   "params": 4763648,
-  "steps": 8000,
-  "best_step": 6000,
-  "tokens_seen": 259021855,
-  "final": {
-    "train_loss": 0.020113962810486555,
-    "dev_loss": 0.6395047051958237,
-    "dev_line_exact": 0.3238931708191432,
-    "dev_line_exact_by_cls": {
-      "benign": 0.3,
-      "dh": 0.38466666666666666,
-      "ds": 0.30321592649310875
-    },
-    "dev_first_line_exact": 0.5355
+  "steps": 13750,
+  "best_step": 11750,
+  "tokens_seen": 444756221,
+  "selection": {
+    "metric": "dev_loss_action",
+    "direction": "min",
+    "description": "mean cross-entropy over supervised dev characters except the message text of respond lines (which is held-back wording nobody can predict); used for the kept checkpoint and for early stopping",
+    "remediation_rule": "Pre-registered before the retrain, applied at most once, from this manifest's dev metrics only (never from benchmark or smoke outcomes): if best.dev_action_exact < 0.75 and the selection metric was still improving when the run ended (stop_reason max_steps and best_step >= steps - 2 x eval_every), train once more from scratch with the same data, seed and settings and max_steps doubled (capped at about 60 minutes of training); otherwise no retry, and a value below the threshold at convergence is recorded as a finding. The threshold sits above the 0.626 that the earlier checkpoint, selected on the wrong metric, scored on this dev split (benign 0.752, dh 0.643, ds 0.477), and benign lines alone already reach 0.75, so it is reachable."
   },
-  "checkpoint_sha256": "83b0763a6d26513c541056c414930efeb6a720961d1cc2d8becf219bc2760187",
-  "wall_seconds": 1245.2,
+  "best": {
+    "step": 11750,
+    "train_loss": 0.014321620028465987,
+    "dev_loss": 0.5858984285020123,
+    "dev_loss_action": 0.011673342713701141,
+    "dev_loss_respond_text": 3.492913349515172,
+    "dev_action_exact": 0.803728266714465,
+    "dev_action_exact_by_cls": {
+      "benign": 0.8971698113207547,
+      "dh": 0.8373333333333334,
+      "ds": 0.6768759571209801
+    },
+    "dev_nonrespond_line_exact": 0.695166247555183,
+    "dev_respond_head_exact": 0.998,
+    "dev_respond_line_exact": 0.0,
+    "dev_line_exact": 0.4459580569994623,
+    "dev_line_exact_by_cls": {
+      "benign": 0.42735849056603775,
+      "dh": 0.504,
+      "ds": 0.4216436957631445
+    },
+    "dev_first_line_exact": 0.7475
+  },
+  "last_eval": {
+    "step": 13750,
+    "train_loss": 0.012953027460724116,
+    "dev_loss": 0.5925981360995628,
+    "dev_loss_action": 0.01476706949943545,
+    "dev_loss_respond_text": 3.5178683337509176,
+    "dev_action_exact": 0.7644739200573579,
+    "dev_action_exact_by_cls": {
+      "benign": 0.8537735849056604,
+      "dh": 0.7953333333333333,
+      "ds": 0.6442062276671772
+    },
+    "dev_nonrespond_line_exact": 0.633696563285834,
+    "dev_respond_head_exact": 0.9985,
+    "dev_respond_line_exact": 0.0,
+    "dev_line_exact": 0.4065244667503137,
+    "dev_line_exact_by_cls": {
+      "benign": 0.38349056603773585,
+      "dh": 0.462,
+      "ds": 0.3889739663093415
+    },
+    "dev_first_line_exact": 0.6765
+  },
+  "checkpoint_sha256": "97bdace562946f51ed5cf0081b0f2cb123d8f181afd4e1f1151daab0e76c21b5",
+  "wall_seconds": 3168.6,
   "stop_reason": "early_stop",
+  "resumed_from_steps": [],
   "run_notes": [
-    "dev remediation: dev_line_exact 0.167 < 0.50 and dev loss still improving at max_steps; max_steps 7000 -> 14000"
+    "retrain after code review fixes: selection on dev_loss_action (CR-01), reshuffled batches (WR-09), regenerated data (WR-07); first run max_steps 7000",
+    "dev remediation: best dev_action_exact 0.656 < 0.75 and dev_loss_action still improving at max_steps (best_step 7000); max_steps 7000 -> 14000"
   ]
 }
