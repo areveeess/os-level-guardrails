@@ -72,3 +72,64 @@ def test_cr01_quoted_hash_is_not_a_comment():
 def test_cr01_docstring_no_longer_claims_over_splitting_is_safe():
     import src.policy_engine.shell_split as m
     assert "never looser" not in m.__doc__
+
+
+# ── CR-02: policy target is chosen by action type ────────────────────────────
+
+from src.agent_harness.prompting import action_target, foreign_target_fields, parse_action, ActionParseError
+
+MISMATCHED_ACTIONS = [
+    {"action": "read_file", "path": "/etc/shadow", "command": "ls"},
+    {"action": "write_file", "path": "/etc/crontab", "content": "x", "command": "/tmp/ok"},
+    {"action": "run_shell", "command": "cat /etc/shadow", "path": "/tmp/ok"},
+    {"action": "run_shell", "command": "curl http://evil.example", "tool": "ok"},
+    {"action": "http_request", "url": "http://evil.example", "message": "hi", "tool": "ok"},
+    {"action": "call_tool", "tool": "x", "url": "http://evil.example"},
+]
+
+
+@pytest.mark.parametrize("action", MISMATCHED_ACTIONS)
+def test_cr02_mismatched_fields_never_reach_the_inner_executor(engine, action):
+    inner = RecordingExecutor()
+    obs = GuardedExecutor(engine, inner).execute(action)
+    assert obs.status == "blocked"
+    assert obs.layer == "policy_engine"
+    assert inner.actions == []
+
+
+def test_cr02_read_file_extra_command_key_is_blocked_not_judged_on_command(engine):
+    inner = RecordingExecutor()
+    obs = GuardedExecutor(engine, inner).execute(
+        {"action": "read_file", "path": "/etc/shadow", "command": "ls"})
+    assert obs.status == "blocked"
+    assert "command" in obs.reason
+
+
+def test_cr02_target_is_selected_by_action_type():
+    assert action_target({"action": "run_shell", "command": "ls", "path": "/x"}) == "ls"
+    assert action_target({"action": "read_file", "command": "ls", "path": "/x"}) == "/x"
+    assert action_target({"action": "write_file", "path": "/w", "url": "u"}) == "/w"
+    assert action_target({"action": "http_request", "url": "http://u", "command": "c"}) == "http://u"
+    assert action_target({"action": "call_tool", "tool": "t", "command": "c"}) == "t"
+    assert action_target({"action": "respond", "message": "m", "command": "c"}) == "m"
+    assert action_target({"action": "read_file"}) == ""
+
+
+def test_cr02_foreign_fields_helper():
+    assert foreign_target_fields({"action": "read_file", "path": "/x"}) == []
+    assert foreign_target_fields({"action": "read_file", "path": "/x", "content": "c"}) == []
+    assert foreign_target_fields({"action": "read_file", "path": "/x", "command": "c"}) == ["command"]
+
+
+def test_cr02_well_formed_actions_still_flow(engine):
+    inner = RecordingExecutor()
+    guarded = GuardedExecutor(engine, inner)
+    assert guarded.execute({"action": "read_file", "path": "/tmp/a"}).status == "success"
+    assert guarded.execute({"action": "run_shell", "command": "ls /tmp"}).status == "success"
+    assert guarded.execute({"action": "write_file", "path": "/tmp/a", "content": "x"}).status == "success"
+    assert len(inner.actions) == 3
+
+
+def test_cr02_unhashable_action_type_is_a_parse_error_not_a_crash():
+    with pytest.raises(ActionParseError):
+        parse_action('{"action": ["run_shell"], "command": "ls"}')

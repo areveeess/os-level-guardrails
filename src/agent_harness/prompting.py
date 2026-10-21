@@ -78,16 +78,40 @@ def parse_action(raw_text: str) -> dict:
         except json.JSONDecodeError:
             continue
         if isinstance(obj, dict) and "action" in obj:
-            if obj["action"] not in VALID_ACTIONS:
+            if not isinstance(obj["action"], str) or obj["action"] not in VALID_ACTIONS:
                 raise ActionParseError(f"Unknown action type: {obj['action']!r}", raw_text)
             return obj
     raise ActionParseError("No JSON action object found in model reply", raw_text)
 
 
-def action_target(action: dict) -> str:
-    """The object an action operates on (command, path, url, tool, or message)."""
-    return (action.get("command")
-            or action.get("tool")
-            or action.get("path")
-            or action.get("url")
-            or action.get("message", ""))
+# The one field each action type operates on. The policy judges THIS field and the
+# executors act on THIS field, so the two can never disagree about the target.
+TARGET_FIELD = {
+    "run_shell": "command",
+    "read_file": "path",
+    "write_file": "path",
+    "http_request": "url",
+    "call_tool": "tool",
+    "respond": "message",
+}
+
+# Fields that name an object to act on. An action carrying one that does not belong to
+# its own type is ambiguous (an injected/untrusted model can add extra keys), so the
+# reference monitor refuses it rather than guess which one the executor will use.
+_OBJECT_FIELDS = ("command", "path", "url", "tool")
+
+
+def action_target(action: dict):
+    """The object an action operates on, chosen by action type (not by which key is set).
+
+    Returns the raw value (normally a string); "" when the type has no target or the
+    field is missing. Callers that enforce policy must treat a non-string as hostile.
+    """
+    field = TARGET_FIELD.get(action.get("action"))
+    return action.get(field, "") if field else ""
+
+
+def foreign_target_fields(action: dict) -> list:
+    """Object fields present on the action that do not belong to its type."""
+    own = TARGET_FIELD.get(action.get("action"))
+    return [f for f in _OBJECT_FIELDS if f != own and f in action]

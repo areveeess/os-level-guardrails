@@ -256,6 +256,12 @@ class PolicyEngine:
 
         return (self.default_action, f"URL '{url}' has no matching rule")
 
+    def record_decision(self, action_type: str, target, decision: str, reason: str):
+        """Log a decision made outside check_detailed (e.g. an action refused before it
+        could be evaluated), in the same format the dashboard reads."""
+        self._log_decision(action_type, target if isinstance(target, str) else repr(target),
+                           decision, reason)
+
     def _log_decision(self, action_type: str, target: str, decision: str, reason: str, layer: str = "policy_engine"):
         """Write a decision to the JSON Lines log file.
         

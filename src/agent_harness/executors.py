@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from src.agent_harness.environment import Environment
-from src.agent_harness.prompting import action_target
+from src.agent_harness.prompting import action_target, foreign_target_fields
 from src.agent_harness.tools import ToolExecutor
 
 MAX_OBSERVATION_CHARS = 2000
@@ -81,6 +81,15 @@ class GuardedExecutor(Executor):
 
     def execute(self, action: dict) -> Observation:
         action_type = action.get("action", "unknown")
+        # The policy judges the field the executor will act on: the one that belongs to
+        # the action's type. Extra object fields (an injected model adding `command` to
+        # a read_file) make the action ambiguous, so it is refused outright.
+        foreign = foreign_target_fields(action) if action_type != "respond" else []
+        if foreign:
+            reason = (f"Action '{action_type}' carries field(s) {foreign} that belong to other "
+                      f"action types (ambiguous target, fail closed)")
+            self.policy.record_decision(action_type, action_target(action), "BLOCK", reason)
+            return Observation("blocked", layer="policy_engine", reason=reason)
         decision, reason = self.policy.check_detailed(action_type, action_target(action))
         if decision == "BLOCK":
             return Observation("blocked", layer="policy_engine", reason=reason)
