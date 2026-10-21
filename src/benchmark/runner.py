@@ -95,6 +95,42 @@ def _git_dirty():
     return bool(done.stdout.strip()) if done.returncode == 0 else None
 
 
+def _scan_raw(raw_path: str) -> tuple:
+    """(done keys, undecodable line count) from an existing raw.jsonl, for --resume.
+
+    A run killed mid-write leaves a truncated last line; the report loader skips such
+    lines, and so must the one place that has to survive that kill. A line counts as
+    undecodable when it is not a JSON object with the four key fields. Finished
+    episodes, or ones ended by a provider refusal (an outcome, never retried), are
+    done; infrastructure-errored ones stay pending and are re-run from scratch.
+    """
+    done, bad = set(), 0
+    with open(raw_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                r = json.loads(line)
+                key = (r["model"], r["case_id"], r["run"], r["arm"])
+            except (ValueError, KeyError, TypeError):
+                bad += 1
+                continue
+            if classify_llm_error(r.get("llm_error")) != "infra":
+                done.add(key)
+    return done, bad
+
+
+def _ensure_trailing_newline(raw_path: str) -> None:
+    """Make sure the next appended row starts on its own line, not glued to a fragment."""
+    with open(raw_path, "rb+") as f:
+        f.seek(0, os.SEEK_END)
+        if f.tell() == 0:
+            return
+        f.seek(-1, os.SEEK_END)
+        if f.read(1) != b"\n":
+            f.write(b"\n")
+
+
 def run_episode(provider, case: BenchmarkCase, arm: str, policy: PolicyEngine, max_steps: int):
     canary = new_canary()
     executor = build_executor(arm, case, canary, policy)
@@ -178,13 +214,10 @@ def run_benchmark(models: list, cases: list, out_dir: str, runs: int = 3, arms=A
     raw_path = os.path.join(out_dir, "raw.jsonl")
     done = set()
     if os.path.exists(raw_path):
-        with open(raw_path, encoding="utf-8") as f:
-            for line in f:
-                r = json.loads(line)
-                # Finished, or ended by a provider refusal (an outcome, never retried).
-                # Infrastructure-errored episodes stay pending and are re-run from scratch.
-                if classify_llm_error(r.get("llm_error")) != "infra":
-                    done.add((r["model"], r["case_id"], r["run"], r["arm"]))
+        done, undecodable = _scan_raw(raw_path)
+        if undecodable:
+            log(f"[resume] skipped {undecodable} undecodable line(s) in raw.jsonl (a run killed mid-write?)")
+        _ensure_trailing_newline(raw_path)
 
     configs = load_model_config()["models"]
     families = {name: cfg.get("family", "") for name, cfg in configs.items()}
