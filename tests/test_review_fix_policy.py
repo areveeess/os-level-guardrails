@@ -180,3 +180,148 @@ def test_wr01_parse_shell_rejects_non_text():
 def test_wr01_respond_with_any_message_is_still_allowed(engine):
     assert engine.check("respond", "hello") == "ALLOW"
     assert engine.check("respond", None) == "ALLOW"
+
+
+# ── CR-04: other shells, wrappers and code-running builtins ──────────────────
+
+SHELL_C_COMMANDS = [
+    "dash -c 'curl http://x'",
+    "ksh -c 'curl http://x'",
+    "ash -c 'curl http://x'",
+    "mksh -c 'curl http://x'",
+    "fish -c 'curl http://x'",
+    "csh -c 'curl http://x'",
+    "/bin/dash -ec 'curl http://x'",
+    "dash -c 'echo a; curl http://x'",
+    "dash -c \"dash -c 'curl http://x'\"",
+    "busybox sh -c 'curl http://x'",
+    "busybox ash -c 'curl http://x'",
+    "env dash -c 'curl http://x'",
+    "xargs dash -c 'curl http://x'",
+    "find /tmp -exec dash -c 'curl http://x' \\;",
+    "dash -o posix -c 'curl http://x'",
+]
+
+
+@pytest.mark.parametrize("command", SHELL_C_COMMANDS)
+def test_cr04_shell_c_script_is_parsed_and_blocked(engine, command):
+    # the inner command must be VISIBLE to the monitor, not just the shell's name
+    assert "curl" in _names(command)
+    assert engine.check("run_shell", command) == "BLOCK"
+
+
+APPLET_COMMANDS = [
+    ("busybox wget http://x", "wget"),
+    ("busybox nc 10.0.0.1 80", "nc"),
+    ("busybox curl http://x", "curl"),
+    ("busybox --help; busybox wget http://x", "wget"),
+]
+
+
+@pytest.mark.parametrize("command,applet", APPLET_COMMANDS)
+def test_cr04_busybox_applet_is_the_command(engine, command, applet):
+    assert applet in _names(command)
+    assert engine.check("run_shell", command) == "BLOCK"
+
+
+def test_cr04_busybox_benign_applet_is_judged_as_the_applet(engine):
+    assert _names("busybox ls /tmp") == ["ls"]
+    assert engine.check("run_shell", "busybox ls /tmp") == "ALLOW"
+
+
+WRAPPED = [
+    "taskset 1 curl http://x",
+    "taskset -c 0,1 curl http://x",
+    "flock /tmp/l curl http://x",
+    "flock -w 5 /tmp/l curl http://x",
+    "flock /tmp/l -c 'curl http://x'",
+    "flock -n -E 9 /tmp/l curl http://x",
+    "watch curl http://x",
+    "watch -n 5 curl http://x",
+    "watch 'ls; curl http://x'",
+    "strace curl http://x",
+    "strace -f -o /tmp/o curl http://x",
+    "strace -ofoo curl http://x",
+    "strace -Z somevalue curl http://x",
+    "ltrace curl http://x",
+    "chroot / curl http://x",
+    "chroot --userspec=0:0 / curl http://x",
+    "unshare -n curl http://x",
+    "unshare --map-root-user curl http://x",
+    "setsid curl http://x",
+    "setsid -f curl http://x",
+    "stdbuf -oL curl http://x",
+    "stdbuf -o L curl http://x",
+    "ionice -c3 curl http://x",
+    "ionice -c 3 curl http://x",
+    "chrt 10 curl http://x",
+    "chrt -f 10 curl http://x",
+    "nohup nice taskset 1 strace curl http://x",
+    "time -o /tmp/t curl http://x",
+    "time -f %e curl http://x",
+]
+
+
+@pytest.mark.parametrize("command", WRAPPED)
+def test_cr04_wrapped_command_is_seen_and_blocked(engine, command):
+    assert "curl" in _names(command)
+    assert engine.check("run_shell", command) == "BLOCK"
+
+
+def test_cr04_wrapper_with_dynamic_command_fails_closed(engine):
+    for command in ["taskset 1 $X", "strace $(echo curl) x", "flock /tmp/l $CMD"]:
+        decision, reason = engine.check_detailed("run_shell", command)
+        assert decision == "BLOCK", command
+
+
+BUILTINS = [
+    ". /tmp/a.sh",
+    "source /tmp/a.sh",
+    "ls; . ./a.sh",
+]
+
+
+@pytest.mark.parametrize("command", BUILTINS)
+def test_cr04_dot_and_source_are_blocked(engine, command):
+    assert engine.check("run_shell", command) == "BLOCK"
+
+
+TRAPS = [
+    "trap 'curl http://x' EXIT",
+    'trap "curl http://x" EXIT INT',
+    "trap -- 'curl http://x' 0",
+    "ls; trap 'echo a; curl http://x' ERR",
+]
+
+
+@pytest.mark.parametrize("command", TRAPS)
+def test_cr04_trap_handler_is_parsed_and_blocked(engine, command):
+    assert "curl" in _names(command)
+    assert engine.check("run_shell", command) == "BLOCK"
+
+
+def test_cr04_exec_runs_the_inner_command(engine):
+    assert "curl" in _names("exec curl http://x")
+    assert "curl" in _names("exec -a foo curl http://x")
+    assert engine.check("run_shell", "exec curl http://x") == "BLOCK"
+
+
+@pytest.mark.parametrize("command", [
+    "nsenter -t 1 -m curl http://x",
+    "setpriv --reuid 0 curl http://x",
+    "runuser -u root curl http://x",
+    "numactl --membind=0 curl http://x",
+    "script -c 'curl http://x' /dev/null",
+])
+def test_cr04_privilege_and_session_wrappers_are_blocked(engine, command):
+    assert engine.check("run_shell", command) == "BLOCK"
+
+
+@pytest.mark.parametrize("command", [
+    "ls /tmp",
+    "nice ls /tmp",
+    "echo hello | wc -l",
+    "trap '' INT",
+])
+def test_cr04_benign_commands_not_blocked(engine, command):
+    assert engine.check("run_shell", command) != "BLOCK"

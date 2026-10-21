@@ -340,13 +340,30 @@ class _Parser:
         return j + 1
 
 
-# ── From words to commands: wrappers, eval, find -exec ──
+# ── From words to commands: wrappers, shells, eval, find -exec ──
 
 def _skip_options(words: List[_Word], value_opts=(), positional: int = 0) -> List[_Word]:
-    """Drop a wrapper's own name, its options (and their values) and `positional` operands."""
+    """Drop a wrapper's own name, its options (and their values) and `positional` operands.
+
+    Short options follow getopt: in a cluster such as `-fo out`, the first value-taking
+    letter takes the rest of the cluster as its value, or the next word when it is last.
+    """
+    letters = {o[1] for o in value_opts if len(o) == 2 and o[0] == '-'}
     i = 1
     while i < len(words) and words[i].text.startswith('-') and len(words[i].text) > 1:
-        i += 2 if words[i].text in value_opts else 1
+        a = words[i].text
+        i += 1
+        if a == '--':
+            break
+        if a.startswith('--'):
+            if '=' not in a and a in value_opts:
+                i += 1
+            continue
+        for k, ch in enumerate(a[1:], 1):
+            if ch in letters:
+                if k == len(a) - 1:
+                    i += 1
+                break
     return words[i + positional:] if i + positional <= len(words) else []
 
 
@@ -365,13 +382,21 @@ def _skip_env(words: List[_Word]) -> List[_Word]:
     return words[i:]
 
 
+def _skip_busybox(words: List[_Word]) -> List[_Word]:
+    """`busybox APPLET args`: the applet is the command that runs."""
+    if len(words) > 1 and not words[1].text.startswith('-'):
+        return words[1:]
+    return []
+
+
 _WRAPPERS = {
     'env': _skip_env,
+    'busybox': _skip_busybox,
     'nohup': _skip_options,
     'command': _skip_options,
     'builtin': _skip_options,
     'exec': lambda w: _skip_options(w, value_opts=('-a',)),
-    'time': _skip_options,
+    'time': lambda w: _skip_options(w, value_opts=('-f', '--format', '-o', '--output')),
     'setsid': _skip_options,
     'nice': lambda w: _skip_options(w, value_opts=('-n', '--adjustment')),
     'ionice': lambda w: _skip_options(w, value_opts=('-c', '-n', '-p', '-P', '-u')),
@@ -383,6 +408,19 @@ _WRAPPERS = {
                        '--max-args', '--max-procs', '--max-lines', '--max-chars',
                        '--delimiter', '--arg-file', '--eof')),
 }
+
+# Wrappers whose option syntax is too varied to skip precisely. Every later word that
+# could start the wrapped command is examined as a command (an over-approximation:
+# it can only add commands, never hide one), and for watch/flock the remaining words
+# are also parsed as the shell script they hand to /bin/sh.
+_SUFFIX_WRAPPERS = {'taskset', 'flock', 'watch', 'strace', 'ltrace', 'chroot', 'unshare', 'chrt'}
+_SCRIPT_WRAPPERS = {'watch', 'flock'}
+_SCRIPT_META = re.compile(r'[\s;&|`$()<>]')
+
+# Anything that can be told to run a script. `-c STRING` is parsed; without `-c` the
+# shell reads a file or stdin the monitor cannot see, so the policy blocks them by name.
+_SHELLS = {'sh', 'bash', 'dash', 'ash', 'ksh', 'ksh93', 'mksh', 'pdksh', 'zsh', 'csh', 'tcsh',
+           'fish', 'rbash', 'yash', 'posh'}
 
 _FIND_EXEC = {'-exec', '-execdir', '-ok', '-okdir'}
 
@@ -403,8 +441,71 @@ def _unwrap(words: List[_Word]) -> List[_Word]:
     return words
 
 
+def _shell_script(words: List[_Word]) -> Optional[str]:
+    """The `-c` script string of a shell invocation, or None if it has no inline script."""
+    i, has_c = 1, False
+    while i < len(words):
+        a = words[i].text
+        if a == '--':
+            i += 1
+            break
+        if len(a) < 2 or a[0] not in '-+':
+            break
+        i += 1
+        if a.startswith('--'):
+            if a in ('--rcfile', '--init-file'):
+                i += 1
+            continue
+        for k, ch in enumerate(a[1:], 1):
+            if ch == 'c' and a[0] == '-':
+                has_c = True
+            if ch in 'oO':
+                if k == len(a) - 1:
+                    i += 1
+                break
+    if not has_c:
+        return None
+    if i >= len(words):
+        raise ShellParseError("shell -c without a script")
+    script = words[i]
+    if script.dynamic or script.glob:
+        raise ShellParseError("shell -c script is only known at run time")
+    return script.text
+
+
+def _trap_action(words: List[_Word]) -> Optional[str]:
+    """The handler string of `trap ACTION SIGNAL...`, or None when it is not a handler."""
+    i = 1
+    while i < len(words) and words[i].text.startswith('-') and len(words[i].text) > 1:
+        if words[i].text == '--':
+            i += 1
+            break
+        i += 1
+    if i + 1 >= len(words) or words[i].text == '-':
+        return None
+    action = words[i]
+    if action.dynamic or action.glob:
+        raise ShellParseError("trap handler is only known at run time")
+    return action.text
+
+
+def _suffix_commands(words: List[_Word], text: str, base: str, depth: int) -> List[SimpleCommand]:
+    found: List[SimpleCommand] = []
+    for k in range(1, len(words)):
+        word = words[k]
+        if word.text.startswith('-'):
+            continue
+        if word.dynamic or word.glob:
+            raise ShellParseError(f"{base}: command position is only known at run time")
+        found.extend(_resolve(words[k:], text, [], [], depth, scan=False))
+        if base in _SCRIPT_WRAPPERS and any(_SCRIPT_META.search(w.text) for w in words[k:]):
+            joined = ' '.join(w.text.replace(_MARKER, 'X') for w in words[k:])
+            _Parser(joined, depth + 1, found).run()
+    return found
+
+
 def _resolve(words: List[_Word], text: str, writes: List[str], reads: List[str],
-             depth: int) -> List[SimpleCommand]:
+             depth: int, scan: bool = True) -> List[SimpleCommand]:
     """Turn the words of one simple command into the commands that will actually run."""
     words = _unwrap(words)
     name = words[0]
@@ -420,6 +521,17 @@ def _resolve(words: List[_Word], text: str, writes: List[str], reads: List[str],
         return found
 
     found = [SimpleCommand(text=text, argv=[w.text for w in words], writes=writes, reads=reads)]
+
+    if base in _SHELLS:
+        script = _shell_script(words)
+        if script is not None:
+            _Parser(script, depth + 1, found).run()
+    elif base == 'trap':
+        handler = _trap_action(words)
+        if handler:
+            _Parser(handler, depth + 1, found).run()
+    elif scan and base in _SUFFIX_WRAPPERS:
+        found.extend(_suffix_commands(words, text, base, depth))
 
     if base == 'find':
         i = 1
