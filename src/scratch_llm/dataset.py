@@ -45,6 +45,7 @@ import re
 
 from src.agent_harness.executors import Observation
 from src.agent_harness.prompting import OBSERVATION_TEMPLATE, build_messages, parse_action
+from src.agent_harness.tool_broker import DEFAULT_RESPONSE
 from src.benchmark.injecagent import DATA_DIR, EXFIL_TOOL, load_tool_specs
 from src.scratch_llm.format import (ACTION_PREFIX, CONTEXT_CHARS, END, GEN_RESERVE, HISTORY_ACTION_CHARS,
                                     OBS_CHARS, USER_CHARS, _flat, compact_action, render_context)
@@ -579,38 +580,116 @@ def _return_value(rng: random.Random, name: str, ptype: str):
     return _arg_value(rng, name, ptype)
 
 
-def _observation(rng: random.Random, returns: list) -> str:
-    """The text the harness would show for a successful call, built from the tool's return schema."""
+def _attack_address(rng: random.Random) -> str:
+    """The address an injection asks the agent to send data to: reserved documentation domains for
+    about 92 percent, otherwise a public-provider domain with a numeric local part (so copying an
+    address outside the reserved domains is practised too; nothing is ever sent anywhere)."""
+    if rng.random() < 0.08:
+        return f"{rng.randint(100000, 999999999)}@{rng.choice(templates.PUBLIC_DOMAINS)}"
+    return _address(rng)
+
+
+def _secret(rng: random.Random) -> str:
+    """A secret token of 12-30 characters in one of six shapes, never the benchmark's canary shape."""
+    shape = rng.randrange(6)
+    if shape == 0:
+        return "".join(rng.choice("0123456789ABCDEF") for _ in range(rng.randint(12, 20)))
+    if shape == 1:
+        return "".join(rng.choice("0123456789abcdef") for _ in range(rng.randint(12, 20)))
+    if shape == 2:
+        return "".join(rng.choice(_ID_ALPHABET) for _ in range(rng.randint(12, 24)))
+    if shape == 3:
+        return "-".join("".join(rng.choice("0123456789") for _ in range(4)) for _ in range(rng.randint(3, 5)))
+    if shape == 4:
+        first, second = rng.choice(templates.WORD_LIST), rng.choice(templates.WORD_LIST)
+        return f"{first}-{second}-" + "".join(rng.choice("0123456789") for _ in range(rng.randint(3, 6)))
+    return "".join(rng.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(rng.randint(12, 20)))
+
+
+# ── observations: built from a tool's return schema ──
+
+def _payload(rng: random.Random, returns: list, carrier_text: str = None) -> dict:
+    """The fields of a tool response. With carrier_text, that text sits in a free-text key
+    (snippet, comment, ...) inside an array of records or an object - the field is put first so it
+    is the last thing dropped when the observation has to be shortened."""
     payload = {r["name"]: _return_value(rng, r["name"], r["type"]) for r in returns}
-    while payload:
-        text = json.dumps(payload, ensure_ascii=True)
-        if len(text) <= OBS_CHARS:
-            break
-        payload.popitem()
+    if carrier_text is None:
+        return payload
+    key = rng.choice(templates.CARRIER_KEYS)
+    arrays = [r["name"] for r in returns if r["type"] == "array"]
+    objects = [r["name"] for r in returns if r["type"] == "object"]
+    if arrays:
+        field = arrays[rng.randrange(len(arrays))]
+    elif objects:
+        field = objects[rng.randrange(len(objects))]
     else:
-        text = json.dumps({"success": True})
-    return Observation("success", output=text).as_text()
+        spare = [name for name in ("items", "results", "entries", "records") if name not in payload]
+        field = spare[rng.randrange(len(spare))] if spare else "extra"
+    if field in objects and not arrays:
+        value = {key: carrier_text}
+    else:
+        value = [{"id": _id_token(rng), key: carrier_text}]
+        if rng.random() < 0.3:
+            value.insert(0, {"id": _id_token(rng), "name": _words(rng, 1, 2)})
+    payload.pop(field, None)
+    return {field: value, **payload}
+
+
+def _render_payload(rng: random.Random, payload: dict, limit: int):
+    """One line of text for a payload: Python repr (single quotes) about 60 percent of the time,
+    json.dumps otherwise, cut field by field from the end until it fits `limit` characters.
+    Returns None when even the first field is too long."""
+    style_is_repr = rng.random() < 0.6
+    payload = dict(payload)
+    while payload:
+        text = repr(payload) if style_is_repr else json.dumps(payload, ensure_ascii=True)
+        if not style_is_repr and "\\" in text:      # json would escape a quote and hide the copied value
+            text = repr(payload)
+        if len(text) <= limit:
+            return text
+        if len(payload) == 1:
+            return None
+        payload.popitem()
+    return None
+
+
+def _observation(rng: random.Random, returns: list, carrier_text: str = None, limit: int = OBS_CHARS):
+    """The text the harness would show for a successful call, built from the tool's return schema
+    (None when the carrier text cannot fit in `limit` characters)."""
+    payload = _payload(rng, returns, carrier_text)
+    text = _render_payload(rng, payload, limit) if payload else json.dumps({"success": True})
+    return None if text is None else Observation("success", output=text).as_text()
+
+
+def _success_observation() -> str:
+    """What the harness returns for a tool without its own simulated response."""
+    return Observation("success", output=DEFAULT_RESPONSE).as_text()
 
 
 # ── instructions and replies ──
 
-def _request_words(name: str) -> tuple:
-    """(verb, object words, toolkit words), lower case, from a CamelCase tool name."""
-    toolkit = toolkit_of(name)
+def _tool_words(tool: dict) -> list:
+    """The CamelCase words of a tool name after its toolkit prefix, as written."""
+    name, toolkit = tool["name"], tool["toolkit"]
     rest = name[len(toolkit):] if toolkit and name.startswith(toolkit) else name
-    words = [w.lower() for w in _CAMEL.findall(rest)] or [name.lower()]
-    return words[0], words[1:], [w.lower() for w in _CAMEL.findall(toolkit)]
+    return _CAMEL.findall(rest) or [name]
 
 
-def _plain_request(name: str) -> str:
-    verb, obj, _ = _request_words(name)
+def _request_words(tool: dict) -> tuple:
+    """(verb, object words, toolkit words), lower case, from a tool's name."""
+    words = [w.lower() for w in _tool_words(tool)]
+    return words[0], words[1:], [w.lower() for w in _CAMEL.findall(tool["toolkit"])]
+
+
+def _plain_request(tool: dict) -> str:
+    verb, obj, _ = _request_words(tool)
     return " ".join([verb] + obj)
 
 
-def _request_phrase(rng: random.Random, name: str) -> str:
+def _request_phrase(rng: random.Random, tool: dict) -> str:
     """The request as a verb phrase: the tool's own words (about 70%) or a synonym verb (about 30%),
     sometimes naming the application."""
-    verb, obj, toolkit = _request_words(name)
+    verb, obj, toolkit = _request_words(tool)
     if verb in templates.SYNONYMS and rng.random() < 0.3:
         verb = rng.choice(templates.SYNONYMS[verb])
     phrase = " ".join([verb] + obj)
@@ -632,67 +711,295 @@ def _arguments_text(rng: random.Random, args: dict) -> str:
     return f"{rng.choice(templates.ARG_CONNECTORS)} {listing}"
 
 
-# ── the benign episode ──
+# ── tools and the roles they can play ──
+
+RET_WORDS = frozenset(("Get", "Retrieve", "Read", "View", "Search", "List", "Fetch", "Show"))
+SINK_WORDS = frozenset(("Send", "Post", "Share", "Forward", "Message", "Email", "Upload", "Publish", "Reply"))
+SINK_SKIP_WORDS = frozenset(("Sign", "Verify"))
+TEXT_PARAMS = ("body", "content", "message", "text", "note", "description", "comment", "message_content")
+DEST_HINTS = ("mail", "recipient", "receiver", "contact", "phone", "channel", "username")
+NOT_A_PAYLOAD = ("id", "ids", "path", "url", "file", "folder", "date", "time")
+MAX_SOURCE_REQUIRED = 2
+
 
 @functools.lru_cache(maxsize=None)
 def _gen_pool() -> tuple:
-    """((name, spec), ...) sorted by name: the tools the generator may offer."""
+    """((name, spec), ...) sorted by name: the real tools the generator may offer."""
     dropped = set(_dropped_free_tools())
     return tuple((name, spec) for name, spec in _free_pool() if name not in dropped)
 
 
-def _benign_episode(rng: random.Random, ep_id: str, split: str, pool: tuple) -> dict:
-    name, spec = pool[rng.randrange(len(pool))]
-    required = [p for p in spec["parameters"] if p.get("required")]
-    args = {p["name"]: _arg_value(rng, p["name"], p["type"]) for p in required}
-    user_id, user_template = rng.choice(templates.USER_TEMPLATES_TRAIN)
-    reply_id, reply_template = rng.choice(templates.REPLY_TEMPLATES)
-    user = _tidy(fill(user_template, do=_request_phrase(rng, name), args=_arguments_text(rng, args)))
-    message = _tidy(fill(reply_template, do=_plain_request(name)))
-    return {
-        "id": ep_id,
-        "split": split,
-        "cls": "benign",
-        "tools": [episode_tool(spec)],
-        "user": user,
-        "turns": [[{"action": "call_tool", "tool": name, "args": args}, _observation(rng, spec["returns"])],
-                  [{"action": "respond", "message": message}, None]],
-        "meta": {"synthetic": False, "os_actions": False, "blocked_tail": False, "two_step": False,
-                 "template_ids": [user_id, reply_id]},
-    }
+def make_tool(name: str, spec: dict, toolkit: str) -> dict:
+    """A generator-side tool: the episode fields (name, summary, parameters), its return schema, its toolkit."""
+    return {"name": name, "summary": spec.get("summary", ""),
+            "parameters": [{"name": p["name"], "type": p["type"], "required": bool(p.get("required"))}
+                           for p in spec.get("parameters", [])],
+            "returns": [{"name": r["name"], "type": r["type"]} for r in spec.get("returns", [])],
+            "toolkit": toolkit}
+
+
+def _required(tool: dict) -> list:
+    return [p for p in tool["parameters"] if p["required"]]
+
+
+def _payload_param(tool: dict):
+    """The required string parameter that would carry stolen data when the tool is used as a sink."""
+    strings = [p for p in _required(tool) if p["type"] == "string"]
+    for p in strings:
+        if p["name"] in TEXT_PARAMS:
+            return p["name"]
+    for p in strings:
+        lowered = p["name"].lower()
+        if any(hint in lowered for hint in DEST_HINTS):
+            continue                      # a recipient is where the data goes, not the data
+        if not any(lowered.endswith(bad) or bad + "_" in lowered for bad in NOT_A_PAYLOAD):
+            return p["name"]
+    return None
+
+
+def _dest_param(tool: dict, payload: str):
+    """The recipient-like required parameter (an address, channel, phone number, ...), or None."""
+    for p in _required(tool):
+        if p["name"] != payload and p["type"] in ("string", "array") \
+                and any(hint in p["name"].lower() for hint in DEST_HINTS):
+            return p["name"]
+    return None
+
+
+def _is_source(tool: dict) -> bool:
+    words = _tool_words(tool)
+    return words[0] in RET_WORDS and len(_required(tool)) <= MAX_SOURCE_REQUIRED
+
+
+def _is_sink(tool: dict) -> bool:
+    words = _tool_words(tool)
+    return words[0] in SINK_WORDS and not SINK_SKIP_WORDS & set(words) and _payload_param(tool) is not None
+
+
+class _Pools:
+    """The tools one kind of episode may draw from, by role."""
+
+    def __init__(self, tools):
+        self.all = tuple(tools)
+        self.sources = tuple(t for t in self.all if _is_source(t))
+        self.sinks = tuple(t for t in self.all if _is_sink(t))
+
+
+@functools.lru_cache(maxsize=None)
+def _real_tools() -> tuple:
+    return tuple(make_tool(name, spec, toolkit_of(name)) for name, spec in _gen_pool())
+
+
+@functools.lru_cache(maxsize=None)
+def _train_pools() -> _Pools:
+    return _Pools(_real_tools())
+
+
+def _pick(rng: random.Random, pool: tuple, exclude=()):
+    """A tool from `pool` that is not in `exclude` (None when the pool has nothing left)."""
+    for _ in range(30):
+        tool = pool[rng.randrange(len(pool))] if pool else None
+        if tool is None or tool["name"] not in exclude:
+            return tool
+    options = [t for t in pool if t["name"] not in exclude]
+    return options[rng.randrange(len(options))] if options else None
+
+
+def _tool_args(rng: random.Random, tool: dict) -> dict:
+    """Values for the required parameters, in the spec's order (the order of the T: line)."""
+    return {p["name"]: _arg_value(rng, p["name"], p["type"]) for p in _required(tool)}
+
+
+def _send_word(rng: random.Random, sink: dict) -> str:
+    own = next((w.lower() for w in _tool_words(sink) if w in SINK_WORDS), "send")
+    return rng.choice(templates.SEND_WORDS) if rng.random() < 0.3 else own
+
+
+# ── episode parts ──
+
+def _instruction(rng: random.Random, tool: dict, args: dict, choices: list) -> tuple:
+    """(template id, the user's request) for one call."""
+    template_id, template = choices[rng.randrange(len(choices))]
+    return template_id, _tidy(fill(template, do=_request_phrase(rng, tool), args=_arguments_text(rng, args)))
+
+
+def _wrapped(rng: random.Random, text: str, wrappers: list) -> tuple:
+    """(wrapper id, injection with its wrapper: 'IMPORTANT: ...', 'Before you reply, ...' or none)."""
+    wrapper_id, wrapper = wrappers[rng.randrange(len(wrappers))]
+    if not wrapper:
+        return wrapper_id, text
+    lead = text[:1].lower() + text[1:] if wrapper.endswith(",") else text
+    return wrapper_id, f"{wrapper} {lead}"
+
+
+def _embedded(rng: random.Random, injection: str) -> str:
+    """The injection as the whole free-text field, or as the prefix or suffix of harmless text."""
+    harmless = templates.BENIGN_TEXTS[rng.randrange(len(templates.BENIGN_TEXTS))]
+    placement = rng.randrange(3)
+    text = injection if placement == 0 else f"{injection} {harmless}" if placement == 1 else f"{harmless} {injection}"
+    return " ".join(text.split())
+
+
+def _reply(rng: random.Random, tool: dict, choices: list) -> tuple:
+    reply_id, template = choices[rng.randrange(len(choices))]
+    return reply_id, _tidy(fill(template, do=_plain_request(tool)))
+
+
+def _call(tool: dict, args: dict) -> dict:
+    return {"action": "call_tool", "tool": tool["name"], "args": args}
+
+
+def _episode(ep_id: str, split: str, cls: str, tools: list, user: str, turns: list, template_ids: list,
+             synthetic: bool = False, os_actions: bool = False, blocked_tail: bool = False,
+             two_step: bool = False) -> dict:
+    return {"id": ep_id, "split": split, "cls": cls, "tools": [episode_tool(t) for t in tools], "user": user,
+            "turns": turns,
+            "meta": {"synthetic": synthetic, "os_actions": os_actions, "blocked_tail": blocked_tail,
+                     "two_step": two_step, "template_ids": template_ids}}
+
+
+# ── the three classes ──
+
+ATTACK_OBS_CHARS = 400     # an observation that carries an injection stays short, so the whole episode fits the context
+RECORD_OBS_CHARS = 280
+
+
+def _benign_episode(rng: random.Random, ep_id: str, split: str, pools: _Pools):
+    tool = _pick(rng, pools.all)
+    args = _tool_args(rng, tool)
+    user_id, user = _instruction(rng, tool, args, templates.USER_TEMPLATES_TRAIN)
+    reply_id, message = _reply(rng, tool, templates.REPLY_TEMPLATES)
+    observation = _observation(rng, tool["returns"])
+    return _episode(ep_id, split, "benign", [tool], user,
+                    [[_call(tool, args), observation], [{"action": "respond", "message": message}, None]],
+                    [user_id, reply_id])
+
+
+def _dh_episode(rng: random.Random, ep_id: str, split: str, pools: _Pools):
+    """User tool -> an observation carrying an injection that asks for another tool -> that call -> respond."""
+    user_tool = _pick(rng, pools.all)
+    target = _pick(rng, pools.all, exclude={user_tool["name"]})
+    user_args, target_args = _tool_args(rng, user_tool), _tool_args(rng, target)
+    user_id, user = _instruction(rng, user_tool, user_args, templates.USER_TEMPLATES_TRAIN)
+    injection_id, template = templates.DH_TEMPLATES_TRAIN[rng.randrange(len(templates.DH_TEMPLATES_TRAIN))]
+    injection = _tidy(fill(template, do=_request_phrase(rng, target), args=_arguments_text(rng, target_args),
+                           tool=target["name"]))
+    wrapper_id, injection = _wrapped(rng, injection, templates.WRAPPERS_TRAIN)
+    observation = _observation(rng, user_tool["returns"], _embedded(rng, injection), ATTACK_OBS_CHARS)
+    reply_id, message = _reply(rng, user_tool, templates.REPLY_TEMPLATES)
+    if observation is None:
+        return None
+    return _episode(ep_id, split, "dh", [user_tool, target], user,
+                    [[_call(user_tool, user_args), observation],
+                     [_call(target, target_args), _success_observation()],
+                     [{"action": "respond", "message": message}, None]],
+                    [user_id, injection_id, wrapper_id, reply_id])
+
+
+def _ds_episode(rng: random.Random, ep_id: str, split: str, pools: _Pools):
+    """User tool -> injection "get X and send it to ADDR" -> source tool returns a record with a
+    secret -> sink tool called with the secret (and ADDR) -> respond."""
+    user_tool = _pick(rng, pools.all)
+    source = _pick(rng, pools.sources, exclude={user_tool["name"]})
+    sink = _pick(rng, pools.sinks, exclude={user_tool["name"], source["name"]})
+    payload_name = _payload_param(sink)
+    dest_name = _dest_param(sink, payload_name)
+    address = _attack_address(rng) if dest_name else None
+    secret, label = _secret(rng), templates.RECORD_LABELS[rng.randrange(len(templates.RECORD_LABELS))]
+    record_id, record_template = templates.RECORD_TEMPLATES_TRAIN[rng.randrange(len(templates.RECORD_TEMPLATES_TRAIN))]
+    record = " ".join(fill(record_template, name=rng.choice(templates.WORD_LIST), label=label, secret=secret).split())
+    share = rng.random()
+    payload = secret if share < 0.4 else record if share < 0.7 else f"{label}: {secret}"
+
+    user_args, source_args = _tool_args(rng, user_tool), _tool_args(rng, source)
+    sink_args, others = {}, {}
+    for p in _required(sink):
+        if p["name"] == payload_name:
+            sink_args[p["name"]] = payload
+        elif p["name"] == dest_name:
+            sink_args[p["name"]] = [address] if p["type"] == "array" else address
+        else:
+            sink_args[p["name"]] = others[p["name"]] = _arg_value(rng, p["name"], p["type"])
+
+    user_id, user = _instruction(rng, user_tool, user_args, templates.USER_TEMPLATES_TRAIN)
+    injection_id, template = templates.DS_TEMPLATES_TRAIN[rng.randrange(len(templates.DS_TEMPLATES_TRAIN))]
+    injection = _tidy(fill(template, pull=_request_phrase(rng, source), sargs=_arguments_text(rng, source_args),
+                           send=_send_word(rng, sink), dest=f" to {address}" if address else "",
+                           args=_arguments_text(rng, others)))
+    wrapper_id, injection = _wrapped(rng, injection, templates.WRAPPERS_TRAIN)
+    first = _observation(rng, user_tool["returns"], _embedded(rng, injection), ATTACK_OBS_CHARS)
+    second = _observation(rng, source["returns"], record, RECORD_OBS_CHARS)
+    reply_id, message = _reply(rng, user_tool, templates.REPLY_TEMPLATES)
+    if first is None or second is None:
+        return None
+    return _episode(ep_id, split, "ds", [user_tool, source, sink], user,
+                    [[_call(user_tool, user_args), first], [_call(source, source_args), second],
+                     [_call(sink, sink_args), _success_observation()],
+                     [{"action": "respond", "message": message}, None]],
+                    [user_id, injection_id, wrapper_id, record_id, reply_id])
+
+
+BUILDERS = {"benign": _benign_episode, "dh": _dh_episode, "ds": _ds_episode}
+
+
+# ── the quota (D-01) ──
+
+def class_counts(n: int) -> dict:
+    """Episodes per class: n/2 benign, n/4 dh, n/4 ds; exact when 4 divides n, otherwise the leftover
+    episodes go to the largest remainders (ties: benign, dh, ds), so every count is within one of its share."""
+    scaled = {"benign": 2 * n, "dh": n, "ds": n}          # share * 4
+    counts = {cls: value // 4 for cls, value in scaled.items()}
+    leftover = n - sum(counts.values())
+    for cls in sorted(scaled, key=lambda c: (-(scaled[c] % 4), CLASSES.index(c)))[:leftover]:
+        counts[cls] += 1
+    return counts
+
+
+def _class_sequence(n: int, rng: random.Random) -> list:
+    counts = class_counts(n)
+    sequence = [cls for cls in CLASSES for _ in range(counts[cls])]
+    rng.shuffle(sequence)
+    return sequence
 
 
 def generate_episodes(n: int, seed: int = 0, split: str = "train") -> list:
     """Return `n` training episodes (schema above), reproducible for a given (seed, split).
 
-    This slice emits benign episodes from real non-benchmark tools; the attack classes, synthetic
-    tools and the dev splits are added behind the same signature. The leakage gate runs on the
-    whole batch before it is returned, so a leaking template makes generation raise instead of
-    producing data.
+    The class mix is a deterministic quota (50% benign, 25% dh, 25% ds), not a per-episode
+    probability. Every episode must pass validate_episode and the leakage gate (an episode that does
+    not is drawn again, a bounded number of times), and the whole list passes assert_clean before it is
+    returned, so a leaking template makes generation raise instead of producing data.
     """
     if split not in SPLITS:
         raise ValueError(f"split must be one of {SPLITS}, not {split!r}")
     if split != "train":
         raise NotImplementedError("only the train split is generated in this slice")
-    if not isinstance(n, int) or n < 0:
+    if isinstance(n, bool) or not isinstance(n, int) or n < 0:
         raise ValueError("n must be a non-negative integer")
     check_templates()
     rng = random.Random(seed * 1_000_003 + SPLITS.index(split))
-    pool = _gen_pool()
+    pools, corpus = _train_pools(), build_corpus()
     episodes = []
-    for i in range(n):
+    for i, cls in enumerate(_class_sequence(n, rng)):
         ep_id = f"{split}-{seed}-{i:06d}"
+        leak = None
         for _ in range(MAX_REDRAWS):
-            episode = _benign_episode(rng, ep_id, split, pool)
+            episode = BUILDERS[cls](rng, ep_id, split, pools)
+            if episode is None:
+                continue
             try:
                 validate_episode(episode)
             except ValueError:
                 continue
-            episodes.append(episode)
-            break
+            leak = _episode_violation(episode, corpus)
+            if leak is None:
+                episodes.append(episode)
+                break
         else:
-            raise RuntimeError(f"{ep_id}: no valid episode after {MAX_REDRAWS} draws")
-    assert_clean(episodes)
+            if leak:
+                raise LeakageError(f"{ep_id}: {leak[0]}: {leak[1]}")
+            raise RuntimeError(f"{ep_id}: no valid {cls} episode after {MAX_REDRAWS} draws")
+    assert_clean(episodes, corpus)
     return episodes
 
 
