@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "created_at": "2026-10-21T04:48:09Z",
+  "code_commit": "696e32dedcd067bdbf59bdbfa9c2301e2b1b6f3d",
+  "code_dirty": true,
+  "python": "3.14.4",
+  "generator_version": 2,
+  "format_version": 2,
+  "seed": 0,
+  "held_out_sha256": "13f3aae47fa271ff8e863137d0443023cb8973a203391a51aa72ed1a7423e676",
+  "held_out_count": 79,
+  "held_only_param_count": 50,
+  "free_pool_count": 251,
+  "dropped_free_tools": [],
+  "dev_tool_count": 25,
+  "dev_tools_sha256": "474808776f3a3404376877c8c00310370970f841c12601fe5641a81f0cd08f74",
+  "mix": {
+    "benign": 0.5,
+    "dh": 0.25,
+    "ds": 0.25
+  },
+  "files": {
+    "train": {
+      "path": "data/local/train-seed0-n40000.jsonl",
+      "n": 40000,
+      "sha256": "63a192b109bf2c8d071f1c7a1ba833072a2cba113a833161f98e3b8faabdcc46",
+      "class_counts": {
+        "benign": 20000,
+        "dh": 10000,
+        "ds": 10000
+      },
+      "split_counts": {
+        "train": 40000
+      },
+      "synthetic_fraction": 0.35,
+      "os_action_fraction": 0.1,
+      "blocked_tail_fraction": 0.08,
+      "two_step_fraction": 0.12,
+      "mean_chars": 656.61,
+      "max_context_chars": 1694,
+      "supervised_fraction": 0.405087
+    },
+    "dev": {
+      "path": "data/local/dev-seed0-n2000.jsonl",
+      "n": 2000,
+      "sha256": "58f5bcb09845c5a096109d1381534d767d1fd5aa4d95e83a1c0d94c27e43ad2a",
+      "class_counts": {
+        "benign": 1000,
+        "dh": 500,
+        "ds": 500
+      },
+      "split_counts": {
+        "dev_synthetic": 1000,
+        "dev_tools": 1000
+      },
+      "synthetic_fraction": 0.5,
+      "os_action_fraction": 0.1,
+      "blocked_tail_fraction": 0.08,
+      "two_step_fraction": 0.12,
+      "mean_chars": 656.7,
+      "max_context_chars": 1392,
+      "supervised_fraction": 0.401882
+    }
+  },
+  "gate": {
+    "passed": true,
+    "rules": [
+      "held-out tool",
+      "held-out tool name in text",
+      "held-only parameter name",
+      "synthetic tool with a held-out signature",
+      "canary shape",
+      "banned benchmark phrase",
+      "benchmark e-mail address",
+      "8-word shingle",
+      "verbatim benchmark sentence",
+      "tool summary"
+    ],
+    "held_only_param_scope": "Held-only parameter names (names that occur only in held-out benchmark tools, such as to, subject or url) are rejected as tool parameter names (on the T: line / in tool specs) and as call_tool argument keys. The same words in free text, that is U: requests, O: observation values and respond messages, are allowed and are not gated."
+  }
+}
