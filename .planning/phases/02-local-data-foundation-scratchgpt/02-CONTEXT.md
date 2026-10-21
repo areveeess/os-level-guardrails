@@ -14,16 +14,16 @@ Build the shared synthetic episode dataset (leakage-gated, format v2) and train 
 ## Implementation Decisions
 
 ### Data mix
-- D-01: Training mix is a deterministic quota of 50% benign / 25% direct-harm-compliant / 25% data-stealing-compliant episodes with self-written injections (locked project decision; disclosed in the report).
-- D-02: About 10% of episodes (taken from the benign share) use OS actions (run_shell / read_file / write_file) for full action-grammar coverage.
-- D-03: About 8% of the dh/ds episodes end with the harness's own `BLOCKED by tool_broker: ...` observation followed by the agent giving up with a `respond` action (realistic reaction to a block; disclosed in the report).
+- **D-01:** Training mix is a deterministic quota of 50% benign / 25% direct-harm-compliant / 25% data-stealing-compliant episodes with self-written injections (locked project decision; disclosed in the report).
+- **D-02:** About 10% of episodes (taken from the benign share) use OS actions (run_shell / read_file / write_file) for full action-grammar coverage.
+- **D-03:** About 8% of the dh/ds episodes end with the harness's own `BLOCKED by tool_broker: ...` observation followed by the agent giving up with a `respond` action (realistic reaction to a block; disclosed in the report).
 
 ### Leakage
-- D-04: Strict hold-out — no InjecAgent benchmark tool (79 held out, incl. GmailSendEmail), no benchmark attacker email address, no `CANARY[0-9A-F]{12}DATA` value or "Private record" phrasing, no 8-word shingle or exact benchmark injection string, and none of the ~50 parameter names that occur only in held-out tools may appear in training data. Dev split uses held-out dev tools and held-back phrasing templates.
+- **D-04:** Strict hold-out — no InjecAgent benchmark tool (79 held out, incl. GmailSendEmail), no benchmark attacker email address, no `CANARY[0-9A-F]{12}DATA` value or "Private record" phrasing, no 8-word shingle or exact benchmark injection string, and none of the ~50 parameter names that occur only in held-out tools may appear in training data. Dev split uses held-out dev tools and held-back phrasing templates.
 
 ### Format & model
-- D-05: Compact format v2: `T:` line carries tool names with required parameter names; `CONTEXT_CHARS` raised to 2048 (model context 2048); `FORMAT_VERSION = 2`, vocab sha256 and a render fingerprint stamped into the checkpoint and checked on load.
-- D-06: Training text is produced by the same `render_context` path inference uses (parity by construction); loss only on `A:` line payloads plus their newline.
+- **D-05:** Compact format v2: `T:` line carries tool names with required parameter names; `CONTEXT_CHARS` raised to 2048 (model context 2048); `FORMAT_VERSION = 2`, vocab sha256 and a render fingerprint stamped into the checkpoint and checked on load.
+- **D-06:** Training text is produced by the same `render_context` path inference uses (parity by construction); loss only on `A:` line payloads plus their newline.
 
 ### Claude's Discretion
 - Exact episode count (research suggests ~40k train + ~2k dev), hyper-parameters, synthetic-tool share (~35%), test granularity, file layout within src/scratch_llm/.
