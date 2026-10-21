@@ -175,7 +175,7 @@ def test_four_episodes_can_be_memorised_and_the_saved_checkpoint_regenerates_eve
                      train_cfg=cfg, device="cpu", log=quiet)
     assert manifest["stop_reason"] == "target_loss"
     assert manifest["steps"] < 1500
-    assert manifest["final"]["dev_line_exact"] == 1.0
+    assert manifest["best"]["dev_line_exact"] == 1.0
     gen = load_generator(os.path.join(out, "scratch_gpt.pt"), device="cpu")
     for ep in chosen:
         for k, (action, _) in enumerate(ep["turns"]):
@@ -259,6 +259,22 @@ def test_the_kept_checkpoint_and_early_stopping_follow_the_action_loss_not_the_p
     assert meta["step"] == 4 and meta["dev_loss_action"] == 0.20 and meta["dev_loss"] == 1.9
 
 
+def test_the_manifest_describes_the_kept_checkpoint_in_best_and_the_last_evaluation_in_last_eval(files, tmp_path,
+                                                                                               monkeypatch):
+    """WR-04: `final` used to be the last evaluation, so the manifest quoted numbers of a checkpoint that was not kept."""
+    monkeypatch.setattr(train_module, "evaluate", scripted_results([(2.0, 0.40), (1.0, 0.10), (1.5, 0.30)]))
+    out = str(tmp_path / "best_block")
+    manifest = train(*files, out, model_cfg=GPTConfig(**TINY), device="cpu", log=quiet,
+                     train_cfg=quick_config(max_steps=6, eval_every=2, log_every=2, patience=5))
+    assert manifest["best_step"] == 4 and manifest["steps"] == 6
+    assert manifest["best"]["step"] == 4 and manifest["best"]["dev_loss"] == 1.0
+    assert manifest["best"]["dev_loss_action"] == 0.10
+    assert manifest["last_eval"]["step"] == 6 and manifest["last_eval"]["dev_loss_action"] == 0.30
+    log = read_log(out)
+    kept = {k: v for k, v in manifest["best"].items() if k != "step"}
+    assert kept == {k: log[1][k] for k in kept}
+
+
 # ── manifest ──
 
 def test_manifest_has_the_fixed_fields_no_environment_values_and_the_checkpoint_hash(files, tmp_path, monkeypatch):
@@ -274,7 +290,8 @@ def test_manifest_has_the_fixed_fields_no_environment_values_and_the_checkpoint_
     with open(os.path.join(out, "scratch_gpt.pt"), "rb") as f:
         assert manifest["checkpoint_sha256"] == hashlib.sha256(f.read()).hexdigest()
     assert manifest["run_notes"] == [] and manifest["stop_reason"] == "max_steps"
-    assert set(manifest["final"]) == {"train_loss", *EVAL_KEYS}
+    assert "final" not in manifest
+    assert set(manifest["best"]) == set(manifest["last_eval"]) == {"step", "train_loss", *EVAL_KEYS}
     assert manifest["selection"]["metric"] == SELECTION_METRIC == "dev_loss_action"
     assert "dev_action_exact < 0.50" in manifest["selection"]["remediation_rule"]
     assert manifest["dataset"]["n_train"] == 64 and manifest["dataset"]["n_dev"] == 8

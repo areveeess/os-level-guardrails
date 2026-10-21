@@ -65,9 +65,9 @@ MAX_NOTE_CHARS = 200
 MANIFEST_KEYS = ("schema", "created_at", "code_commit", "code_dirty", "python", "torch", "cuda", "device", "seed",
                  "dataset", "held_out_sha256", "format_version", "vocab_sha256", "render_fingerprint",
                  "context_chars", "gen_reserve", "config", "params", "steps", "best_step", "tokens_seen", "selection",
-                 "final",
+                 "best", "last_eval",
                  "checkpoint_sha256", "wall_seconds", "stop_reason", "run_notes")
-MANIFEST_SCHEMA = 2
+MANIFEST_SCHEMA = 3
 CLASSES = ("benign", "dh", "ds")
 # every metric evaluate() returns, in the order the manifest lists them
 EVAL_KEYS = ("dev_loss", "dev_loss_action", "dev_loss_respond_text", "dev_action_exact", "dev_action_exact_by_cls",
@@ -434,6 +434,7 @@ def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = N
 
     _write_curve(os.path.join(out_dir, "loss_curve.png"), history, params, best["step"])
     last = history[-1]
+    kept = next(h for h in history if h["step"] == best["step"])
     wall = round(time.time() - started, 1)
     manifest = {
         "schema": MANIFEST_SCHEMA,
@@ -455,7 +456,10 @@ def train(train_path: str, dev_path: str, out_dir: str, model_cfg: GPTConfig = N
                                      "respond lines (which is held-back wording nobody can predict); used for the "
                                      "kept checkpoint and for early stopping",
                       "remediation_rule": REMEDIATION_RULE},
-        "final": {"train_loss": last["train_loss"], **{k: last[k] for k in EVAL_KEYS}},
+        # best = the evaluation of the checkpoint that is kept (what scratch_gpt.pt is); last_eval = the final
+        # evaluation of the run, which can be a later step. Quote `best` when describing the model (review WR-04).
+        "best": {"step": best["step"], "train_loss": kept["train_loss"], **{k: kept[k] for k in EVAL_KEYS}},
+        "last_eval": {"step": last["step"], "train_loss": last["train_loss"], **{k: last[k] for k in EVAL_KEYS}},
         "checkpoint_sha256": file_sha256(ckpt_path),
         "wall_seconds": wall,
         "stop_reason": stop_reason,
