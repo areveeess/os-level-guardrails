@@ -367,18 +367,55 @@ def _skip_options(words: List[_Word], value_opts=(), positional: int = 0) -> Lis
     return words[i + positional:] if i + positional <= len(words) else []
 
 
+# env's own options. Anything else is refused: an option we do not know might take a
+# value, and then the value would be mistaken for the command (`env -a x curl`).
+_ENV_FLAG_LETTERS = 'i0v'
+_ENV_VALUE_LETTERS = 'uCa'                       # take an argument (attached or next word)
+_ENV_LONG_FLAGS = {'ignore-environment', 'null', 'debug', 'list-signal-handling', 'help', 'version'}
+_ENV_LONG_VALUES = {'unset', 'chdir', 'argv0'}
+_ENV_LONG_OPTIONAL = {'block-signal', 'default-signal', 'ignore-signal'}   # value only via `=`
+_ENV_LONG_ALL = _ENV_LONG_FLAGS | _ENV_LONG_VALUES | _ENV_LONG_OPTIONAL | {'split-string'}
+
+
+def _env_long_option(name: str) -> str:
+    """Resolve a (possibly abbreviated) long option name the way getopt_long does."""
+    if name in _ENV_LONG_ALL:
+        return name
+    matches = [o for o in _ENV_LONG_ALL if o.startswith(name)] if name else []
+    if len(matches) != 1:
+        raise ShellParseError(f"unknown or ambiguous env option --{name}")
+    return matches[0]
+
+
 def _skip_env(words: List[_Word]) -> List[_Word]:
     i = 1
     while i < len(words):
         a = words[i].text
-        if a == '-S' or a.startswith('-S') or a.startswith('--split-string'):
-            raise ShellParseError("env -S is not supported")
-        if a in ('-u', '--unset', '-C', '--chdir'):
-            i += 2
-        elif a.startswith('-') or _ASSIGNMENT.match(a):
+        if a == '--':
             i += 1
-        else:
             break
+        if _ASSIGNMENT.match(a) or a == '-' or not a.startswith('-'):
+            if a == '-' or _ASSIGNMENT.match(a):
+                i += 1
+                continue
+            break
+        if a.startswith('--'):
+            name, has_value, _ = a[2:].partition('=')
+            option = _env_long_option(name)
+            if option == 'split-string':
+                raise ShellParseError("env -S is not supported")
+            i += 2 if option in _ENV_LONG_VALUES and not has_value else 1
+            continue
+        i += 1
+        for k, ch in enumerate(a[1:], 1):
+            if ch == 'S':
+                raise ShellParseError("env -S is not supported")
+            if ch in _ENV_VALUE_LETTERS:
+                if k == len(a) - 1:
+                    i += 1
+                break
+            if ch not in _ENV_FLAG_LETTERS:
+                raise ShellParseError(f"unknown env option -{ch}")
     return words[i:]
 
 

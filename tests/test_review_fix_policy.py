@@ -325,3 +325,62 @@ def test_cr04_privilege_and_session_wrappers_are_blocked(engine, command):
 ])
 def test_cr04_benign_commands_not_blocked(engine, command):
     assert engine.check("run_shell", command) != "BLOCK"
+
+
+# ── WR-03: env option parsing ────────────────────────────────────────────────
+
+ENV_VISIBLE = [
+    "env -a x curl http://x",
+    "env -a x -i curl http://x",
+    "env --argv0 x curl http://x",
+    "env --argv0=x curl http://x",
+    "env -u FOO curl http://x",
+    "env -uFOO curl http://x",
+    "env --unset FOO curl http://x",
+    "env --unset=FOO curl http://x",
+    "env --un=FOO curl http://x",
+    "env -C /tmp curl http://x",
+    "env --chdir=/tmp curl http://x",
+    "env -iu FOO curl http://x",
+    "env -i0 curl http://x",
+    "env -v curl http://x",
+    "env --ignore-environment curl http://x",
+    "env --ignore-e curl http://x",
+    "env -- curl http://x",
+    "env FOO=bar -i curl http://x",
+    "env - curl http://x",
+]
+
+
+@pytest.mark.parametrize("command", ENV_VISIBLE)
+def test_wr03_env_options_are_skipped_correctly(engine, command):
+    assert _names(command) == ["curl"]
+    assert engine.check("run_shell", command) == "BLOCK"
+
+
+ENV_FAIL_CLOSED = [
+    "env -iS ' curl http://x'",
+    "env -S 'curl http://x'",
+    "env -Scurl",
+    "env --split='curl http://x'",
+    "env --split-string 'curl http://x'",
+    "env --sp 'curl http://x'",
+    "env -Z curl http://x",
+    "env -iZ curl http://x",
+    "env --bogus curl http://x",
+    "env --i curl http://x",           # ambiguous abbreviation (ignore-environment / ignore-signal)
+]
+
+
+@pytest.mark.parametrize("command", ENV_FAIL_CLOSED)
+def test_wr03_unknown_or_splitting_env_options_fail_closed(engine, command):
+    with pytest.raises(ShellParseError):
+        parse_shell(command)
+    decision, reason = engine.check_detailed("run_shell", command)
+    assert decision == "BLOCK" and "fail closed" in reason
+
+
+def test_wr03_benign_env_still_allowed(engine):
+    assert engine.check("run_shell", "env FOO=bar ls /tmp") == "ALLOW"
+    assert engine.check("run_shell", "env -i FOO=bar ls /tmp") == "ALLOW"
+    assert engine.check("run_shell", "env -u HOME ls /tmp") == "ALLOW"
