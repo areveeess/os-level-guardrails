@@ -32,7 +32,8 @@ from src.policy_engine.engine import PolicyEngine
 from src.scratch_llm.dataset import generate_episodes, write_episodes
 from src.scratch_llm.format import (CONTEXT_CHARS, FORMAT_VERSION, GEN_RESERVE, HISTORY_ACTION_CHARS, VOCAB_SHA256,
                                     compact_action, encode, render_context, render_fingerprint)
-from src.scratch_llm.inference import CHECKPOINT_KEYS, MAX_NEW_CHARS, ScratchGenerator, load_generator
+from src.scratch_llm.inference import (CHECKPOINT_KEYS, MAX_NEW_CHARS, ContextOverflowError, ScratchGenerator,
+                                       load_generator)
 from src.scratch_llm.model import GPTConfig
 from src.scratch_llm.train import TrainConfig, train
 
@@ -248,6 +249,60 @@ def test_a_long_legitimate_action_is_not_cut_by_the_generation_cap():
     assert MAX_NEW_CHARS >= HISTORY_ACTION_CHARS + 1
     assert generator(messages_for_a_notes_request(), max_tokens=512) == action
     assert generator.last_finish_reason == "stop" and generator.last_new_chars == len(action) + 1
+
+
+def messages_with_prompt_length(target):
+    """Chat messages whose compact prompt (render_context) is exactly `target` characters: one tool with a long name."""
+    def build(name_length):
+        tool = {"name": "T" * name_length, "summary": "s",
+                "parameters": [{"name": "p", "type": "string", "required": True}]}
+        return build_messages("list my notes", [tool])
+
+    base = len(render_context(build(1)))
+    messages = build(1 + target - base)
+    assert len(render_context(messages)) == target
+    return messages
+
+
+def test_a_prompt_longer_than_the_context_is_an_error_not_a_cropped_answer(tiny):
+    """WR-03: a 2,402-character prompt used to be cropped to its last 2,048 characters and answered with garbage."""
+    messages = messages_with_prompt_length(CONTEXT_CHARS + 354)
+    generator = load_generator(tiny.path, device="cpu")
+    with pytest.raises(ContextOverflowError, match="context_overflow"):
+        generator(messages)
+    assert generator.last_finish_reason == "context_overflow" and generator.last_prompt_chars == CONTEXT_CHARS + 354
+    provider = LocalScratchProvider("scratch-gpt", tiny.path)
+    response = provider.generate(messages)
+    assert not response.ok and "context_overflow" in response.error and response.text == ""
+    assert response.finish_reason == "context_overflow" and response.prompt_tokens == CONTEXT_CHARS + 354
+
+
+def test_the_run_ends_with_an_llm_error_row_when_the_prompt_cannot_fit(tiny, tmp_path, monkeypatch):
+    """The runner records the overflow as the episode's llm_error instead of scoring garbage as model behaviour."""
+    provider = LocalScratchProvider("scratch-gpt", tiny.path)
+    case = benign_cases(load_tool_specs())[0]
+    big = dict(case.tools[0], name="T" * (CONTEXT_CHARS + 50))
+    case = type(case)(**{**case.__dict__, "tools": [big], "user_tool": big["name"]})
+    episode, score = run_episode(provider, case, "unprotected", PolicyEngine(log_file=str(tmp_path / "d.jsonl"), verbose=False), 3)
+    assert score["llm_error"] and "context_overflow" in score["llm_error"] and episode.steps == []
+
+
+@pytest.mark.parametrize("prompt_chars", [900, CONTEXT_CHARS - GEN_RESERVE + 2, CONTEXT_CHARS - 4, CONTEXT_CHARS])
+def test_no_forward_pass_ever_reads_more_than_the_context(prompt_chars):
+    seen = []
+
+    class Recording(ScriptedModel):
+        def generate(self, idx, max_new, stop_id, temperature=0.0):
+            seen.append((idx.shape[1], max_new))
+            return super().generate(idx, max_new, stop_id, temperature)
+
+    generator = ScratchGenerator(Recording(encode("x" * 500)), "cpu", "0" * 64)
+    generator(messages_with_prompt_length(prompt_chars), max_tokens=512)
+    (prompt_len, max_new), = seen
+    assert prompt_len == prompt_chars
+    assert prompt_len + max_new - 1 <= CONTEXT_CHARS      # the pass that writes the last character still fits
+    assert max_new == min(MAX_NEW_CHARS, 512, CONTEXT_CHARS - prompt_chars + 1)
+    assert generator.last_finish_reason == "length"        # the cap, not the model, ended the reply
 
 
 def test_generation_is_capped_by_max_tokens_and_by_the_hard_limit(tiny):

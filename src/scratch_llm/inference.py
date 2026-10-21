@@ -74,12 +74,25 @@ def _sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
+class ContextOverflowError(ValueError):
+    """The rendered prompt is longer than the model's context; answering it would mean reading a cropped prompt."""
+
+    finish_reason = "context_overflow"
+
+
 class ScratchGenerator:
     """Callable (messages, temperature, max_tokens) -> the model's next reply as one line of text.
 
     After each call: last_prompt_chars (characters the model read), last_new_chars (characters it
     wrote, including the stop newline when there was one) and last_finish_reason ("stop" when the
-    model ended its line, "length" when the cap cut it off). One character is one token.
+    model ended its line, "length" when the cap cut it off, "context_overflow" when the prompt did not
+    fit). One character is one token.
+
+    The model reads at most `context` characters. A prompt longer than that used to be silently cropped
+    from the left (dropping the start of the T: line) and answered with garbage that looked like ordinary
+    model behaviour (review WR-03). Now a prompt that does not fit raises ContextOverflowError, which the
+    provider turns into an error response the benchmark records, and a reply is capped so that no forward
+    pass ever sees more than `context` characters (the reply is then cut short with finish_reason "length").
     """
 
     def __init__(self, model: ScratchGPT, device: str, checkpoint_sha256: str):
@@ -95,8 +108,15 @@ class ScratchGenerator:
     def __call__(self, messages: list, temperature: float = 0.0, max_tokens: int = 512) -> str:
         prompt = render_context(messages)
         ids = encode(prompt)
-        max_new = max(0, min(int(max_tokens), MAX_NEW_CHARS))
+        context = self.model.cfg.context
         self.last_prompt_chars = len(ids)
+        if len(ids) > context:
+            self.last_new_chars, self.last_finish_reason = 0, "context_overflow"
+            raise ContextOverflowError(
+                f"context_overflow: the prompt is {len(ids)} characters but the model reads at most {context} "
+                f"(too many or too long tool descriptions for this model)")
+        # the pass that writes the k-th character reads len(ids) + k - 1 characters, which must stay within context
+        max_new = max(0, min(int(max_tokens), MAX_NEW_CHARS, context - len(ids) + 1))
         if max_new == 0:
             self.last_new_chars, self.last_finish_reason = 0, "length"
             return ""
