@@ -18,6 +18,7 @@ What each group pins:
 import collections
 import json
 import os
+import random
 import re
 import subprocess
 import sys
@@ -468,7 +469,7 @@ def test_main_writes_both_files_and_a_manifest_that_matches_them(out_root, capsy
 def test_manifest_has_exactly_the_fixed_field_list_and_the_gate_scope(out_root):
     manifest = run(out_root)
     assert list(manifest) == MANIFEST_KEYS
-    assert manifest["schema"] == 1 and manifest["seed"] == 3
+    assert manifest["schema"] == 2 and manifest["seed"] == 3
     assert manifest["held_out_sha256"] == dataset.held_out_sha256() and manifest["held_out_count"] == 79
     assert manifest["held_only_param_count"] == 50
     assert manifest["free_pool_count"] == len(dataset.free_tool_specs())
@@ -476,12 +477,56 @@ def test_manifest_has_exactly_the_fixed_field_list_and_the_gate_scope(out_root):
     assert re.fullmatch(r"[0-9a-f]{64}", manifest["dev_tools_sha256"])
     assert manifest["mix"] == {"benign": 0.5, "dh": 0.25, "ds": 0.25}
     assert manifest["generator_version"] == dataset.GENERATOR_VERSION
-    assert list(manifest["gate"]) == ["passed", "rules", "held_only_param_scope"]
+    assert list(manifest["gate"]) == ["passed", "rules", "held_only_param_scope", "rejected"]
     assert manifest["gate"]["passed"] is True
     assert manifest["gate"]["held_only_param_scope"] == dataset.HELD_ONLY_GATE_SCOPE
     assert "held-only parameter name" in manifest["gate"]["rules"]
     assert re.fullmatch(r"[0-9a-f]{40}|unknown", manifest["code_commit"])
     assert manifest["code_dirty"] in (True, False, None)
+
+
+def test_the_manifest_records_how_many_draws_were_rejected_and_why(out_root):
+    """WR-08: the generator redraws silently; the manifest must show what it rejected."""
+    rejected = run(out_root)["gate"]["rejected"]
+    assert list(rejected) == ["train", "dev"]
+    for key, accepted in (("train", 40), ("dev", 8)):
+        entry = rejected[key]
+        assert list(entry) == ["draws", "accepted", "rejected"] and entry["accepted"] == accepted
+        assert entry["draws"] == accepted + sum(entry["rejected"].values())
+        assert all(reason == "no episode built" or reason.startswith(("invalid: ", "leak: "))
+                   for reason in entry["rejected"])
+        assert list(entry["rejected"]) == sorted(entry["rejected"])
+        assert not any(re.search(r"[0-9]", reason) for reason in entry["rejected"] if reason.startswith("invalid: "))
+
+
+def test_generate_episodes_reports_draws_and_rejections():
+    report = {}
+    episodes = dataset.generate_episodes(300, 0, "train", report)
+    assert report["accepted"] == len(episodes) == 300
+    assert report["draws"] == 300 + sum(report["rejected"].values()) >= 300
+    assert dataset.generate_episodes(8, 0, "train") == dataset.generate_episodes(8, 0, "train", {})   # a report changes nothing
+
+
+def test_generation_fails_when_the_gate_keeps_rejecting_draws(monkeypatch):
+    """WR-08: a rule that rejects every other draw used to be invisible because the redraw always succeeded."""
+    real, calls_seen = dataset._episode_violation, {"n": 0}
+
+    def every_other_draw_leaks(ep, corpus):
+        calls_seen["n"] += 1
+        return (dataset.RULE_BANNED, "planted") if calls_seen["n"] % 2 else real(ep, corpus)
+
+    monkeypatch.setattr(dataset, "_episode_violation", every_other_draw_leaks)
+    with pytest.raises(dataset.LeakageError, match="rejected by the leakage gate"):
+        dataset.generate_episodes(12, 0, "train")
+
+
+def test_synthetic_tools_never_take_a_held_only_name_even_for_text_and_destination_parameters(monkeypatch):
+    banned = frozenset(dataset.TEXT_PARAMS[:-1]) | {"email", "recipient"}
+    monkeypatch.setattr(dataset, "_held_only_params", lambda: banned)
+    for seed in range(150):
+        parameters = dataset._synthetic_parameters(random.Random(seed), "sink")
+        required = [p["name"] for p in parameters if p["required"]]
+        assert required and not set(required) & banned, (seed, required)
 
 
 def test_same_arguments_give_the_same_file_hashes(out_root):

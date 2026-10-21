@@ -59,6 +59,8 @@ from src.scratch_llm.provenance import (git_commit, git_dirty, refuse_foreign_ma
 
 GENERATOR_VERSION = 2   # 1 was the benign-only slice of plan 02-01; 2 is the full mix
 MAX_REDRAWS = 50   # attempts to draw one valid episode before generation gives up
+MAX_LEAK_REJECTION_RATE = 0.001     # leak rejections allowed per draw before generation fails (see generate_episodes)
+MIN_LEAK_REJECTIONS_ALLOWED = 3     # ... but never fewer than this, so tiny test sets are not tripped by one unlucky draw
 SPLITS = ("train", "dev_tools", "dev_synthetic")
 CLASSES = ("benign", "dh", "ds")
 EPISODE_KEYS = ("id", "split", "cls", "tools", "user", "turns", "meta")
@@ -882,11 +884,15 @@ def _draw_names(rng: random.Random, names: tuple, count: int, used: set) -> list
 
 def _synthetic_parameters(rng: random.Random, role: str) -> list:
     names, types = _syn_params()
-    text_names = [n for n in TEXT_PARAMS if n in types]
+    # names is already without held-only names; types is not, so filter here too (review WR-08): a benchmark
+    # update that made one of these held-only would otherwise be absorbed silently by redraws
+    held = _held_only_params()
+    text_names = [n for n in TEXT_PARAMS if n in types and n not in held]
+    dest_names = [n for n in templates.SYN_DEST_NAMES if n not in held]
     if role == "sink":
         required = [text_names[rng.randrange(len(text_names))]]
         if rng.random() < 0.85:
-            required.append(templates.SYN_DEST_NAMES[rng.randrange(len(templates.SYN_DEST_NAMES))])
+            required.append(dest_names[rng.randrange(len(dest_names))])
         if rng.random() < 0.3:
             required += _draw_names(rng, names, 1, set(required))
         rng.shuffle(required)
@@ -1248,7 +1254,12 @@ def _flags(rng: random.Random, n: int, split: str, classes: list) -> list:
     return flags
 
 
-def generate_episodes(n: int, seed: int = 0, split: str = "train") -> list:
+def _reason_key(message: str) -> str:
+    """A validation message reduced to a countable reason: no episode id, numbers replaced by N."""
+    return re.sub(r"[0-9]+", "N", message.split(": ", 1)[-1])[:100]
+
+
+def generate_episodes(n: int, seed: int = 0, split: str = "train", report: dict = None) -> list:
     """Return `n` training episodes (schema above), reproducible for a given (seed, split).
 
     The class mix is a deterministic quota (50% benign, 25% dh, 25% ds), not a per-episode
@@ -1256,6 +1267,12 @@ def generate_episodes(n: int, seed: int = 0, split: str = "train") -> list:
     episodes. Every episode must pass validate_episode and the leakage gate (an episode that does not
     is drawn again, a bounded number of times), and the whole list passes assert_clean before it is
     returned, so a leaking template makes generation raise instead of producing data.
+
+    A rejected draw is never silent (review WR-08). If `report` is a dict it is filled with `draws`, `accepted`
+    and `rejected` (a count per reason: "no episode built", "invalid: <validation message>", "leak: <rule>"), which
+    the dataset manifest stores under gate.rejected. Generation fails with LeakageError when the leak rejections
+    exceed MAX_LEAK_REJECTION_RATE of the draws (at least MIN_LEAK_REJECTIONS_ALLOWED): a template, tool or
+    parameter name that keeps tripping the gate is a defect to fix, not something to draw around.
     """
     if split not in SPLITS:
         raise ValueError(f"split must be one of {SPLITS}, not {split!r}")
@@ -1266,26 +1283,40 @@ def generate_episodes(n: int, seed: int = 0, split: str = "train") -> list:
     pools, corpus = (_train_pools() if split == "train" else _dev_pools()), build_corpus()
     classes = _class_sequence(n, rng)
     flags = _flags(rng, n, split, classes)
-    episodes = []
+    episodes, rejected, draws = [], {}, 0
+
+    def reject(reason: str):
+        rejected[reason] = rejected.get(reason, 0) + 1
+
     for i, (cls, flag) in enumerate(zip(classes, flags)):
         ep_id = f"{split}-{seed}-{i:06d}"
         leak = None
         for _ in range(MAX_REDRAWS):
+            draws += 1
             episode = _build(cls, rng, ep_id, _Ctx(split, flag["synthetic"], pools), flag)
             if episode is None:
+                reject("no episode built")
                 continue
             try:
                 validate_episode(episode)
-            except ValueError:
+            except ValueError as e:
+                reject("invalid: " + _reason_key(str(e)))
                 continue
             leak = _episode_violation(episode, corpus)
             if leak is None:
                 episodes.append(episode)
                 break
+            reject(f"leak: {leak[0]}")
         else:
             if leak:
                 raise LeakageError(f"{ep_id}: {leak[0]}: {leak[1]}")
             raise RuntimeError(f"{ep_id}: no valid {cls} episode after {MAX_REDRAWS} draws")
+    if report is not None:
+        report.update(draws=draws, accepted=len(episodes), rejected=dict(sorted(rejected.items())))
+    leaks = {reason: count for reason, count in rejected.items() if reason.startswith("leak: ")}
+    if sum(leaks.values()) > max(MIN_LEAK_REJECTIONS_ALLOWED, int(MAX_LEAK_REJECTION_RATE * draws)):
+        raise LeakageError(f"{sum(leaks.values())} of {draws} draws were rejected by the leakage gate ({leaks}); "
+                           f"fix the generator or the templates instead of redrawing around them")
     assert_clean(episodes, corpus)
     return episodes
 
@@ -1364,7 +1395,7 @@ def read_episodes(path: str) -> list:
 MAX_EPISODES = 200000
 ALLOWED_OUTPUT_ROOT = PROJECT_ROOT     # --out-dir must stay inside this directory (tests point it at a tmp dir)
 DEFAULT_OUT_DIR = "data/local"
-MANIFEST_SCHEMA = 1
+MANIFEST_SCHEMA = 2
 GATE_RULES = (RULE_HELD_OUT_TOOL, RULE_HELD_OUT_NAME, RULE_HELD_ONLY_PARAM, RULE_SYNTHETIC_SIGNATURE,
               RULE_CANARY, RULE_BANNED, RULE_EMAIL, RULE_SHINGLE, RULE_SENTENCE, RULE_SUMMARY)
 CLASS_MIX = {"benign": 0.5, "dh": 0.25, "ds": 0.25}
@@ -1376,6 +1407,18 @@ def _file_entry(path: str, root: str, episodes: list, digest: str) -> dict:
     entry = {"path": os.path.relpath(path, root).replace(os.sep, "/"), "n": stats.pop("n"), "sha256": digest}
     entry.update(stats)
     return entry
+
+
+def _merge_reports(*reports: dict) -> dict:
+    """Sum the draw counts of several generate_episodes reports (the dev set is generated in two halves)."""
+    merged = {"draws": 0, "accepted": 0, "rejected": {}}
+    for report in reports:
+        merged["draws"] += report.get("draws", 0)
+        merged["accepted"] += report.get("accepted", 0)
+        for reason, count in report.get("rejected", {}).items():
+            merged["rejected"][reason] = merged["rejected"].get(reason, 0) + count
+    merged["rejected"] = dict(sorted(merged["rejected"].items()))
+    return merged
 
 
 def main(argv=None) -> int:
@@ -1405,9 +1448,12 @@ def main(argv=None) -> int:
         parser.error(f"--out-dir: {e}")
     root = os.path.realpath(ALLOWED_OUTPUT_ROOT)
 
-    train = generate_episodes(args.n, args.seed, "train")
+    train_report, tools_report, synthetic_report = {}, {}, {}
+    train = generate_episodes(args.n, args.seed, "train", train_report)
     half = args.dev // 2
-    dev = generate_episodes(half, args.seed, "dev_tools") + generate_episodes(half, args.seed, "dev_synthetic")
+    dev = (generate_episodes(half, args.seed, "dev_tools", tools_report)
+           + generate_episodes(half, args.seed, "dev_synthetic", synthetic_report))
+    dev_report = _merge_reports(tools_report, synthetic_report)
     os.makedirs(out_dir, exist_ok=True)
     train_path = os.path.join(out_dir, f"train-seed{args.seed}-n{args.n}.jsonl")
     dev_path = os.path.join(out_dir, f"dev-seed{args.seed}-n{args.dev}.jsonl")
@@ -1433,7 +1479,8 @@ def main(argv=None) -> int:
         "mix": dict(CLASS_MIX),
         "files": {"train": _file_entry(train_path, root, train, train_sha),
                   "dev": _file_entry(dev_path, root, dev, dev_sha)},
-        "gate": {"passed": True, "rules": list(GATE_RULES), "held_only_param_scope": HELD_ONLY_GATE_SCOPE},
+        "gate": {"passed": True, "rules": list(GATE_RULES), "held_only_param_scope": HELD_ONLY_GATE_SCOPE,
+                 "rejected": {"train": train_report, "dev": dev_report}},
     }
     manifest_path = os.path.join(out_dir, "manifest.json")
     write_json_atomic(manifest_path, manifest)
