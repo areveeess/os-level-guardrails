@@ -57,6 +57,9 @@ models/**/*.safetensors
 models/**/*.gguf
 models/**/*.log
 models/**/*.done
+models/**/*.tmp
 models/scratch-pilot/
 data/local/*.jsonl
+data/local/*.tmp
+**/manifest.json.tmp
 docs/build/
