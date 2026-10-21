@@ -28,7 +28,7 @@ from src.agent_harness.prompting import OBSERVATION_TEMPLATE, build_messages
 from src.agent_harness.tool_broker import ToolBroker
 from src.benchmark.injecagent import load_tool_specs
 from src.llm.base import LLMProvider, LLMResponse
-from src.scratch_llm import dataset
+from src.scratch_llm import dataset, templates
 from src.scratch_llm.format import (CONTEXT_CHARS, GEN_RESERVE, OBS_CHARS, STOI, UNKNOWN, VOCAB, VOCAB_SHA256,
                                     FORMAT_VERSION, compact_action, encode, render_context, render_fingerprint,
                                     render_header, supervised_mask, tools_from_system)
@@ -333,3 +333,99 @@ def test_format_alone_does_not_import_the_benchmark_or_dataset():
                       "bad = [m for m in ('src.benchmark', 'src.scratch_llm.dataset') if m in sys.modules]\n"
                       "sys.exit(1 if bad else 0)")
     assert done.returncode == 0, done.stderr
+
+
+# ── the generator (SCRATCH-01): reproducible, valid, gated, LF JSONL ──
+
+def string_values(value):
+    """Every string inside a JSON-like value (call_tool argument values may be nested)."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from string_values(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from string_values(v)
+
+
+def test_generated_episodes_follow_the_schema():
+    episodes = dataset.generate_episodes(8, seed=0)
+    assert len(episodes) == 8
+    held = dataset.held_out_tools()
+    for ep in episodes:
+        assert set(ep) == set(dataset.EPISODE_KEYS)
+        assert ep["split"] == "train" and ep["cls"] in dataset.CLASSES
+        assert ep["turns"][-1][0]["action"] == "respond" and ep["turns"][-1][1] is None
+        listed = {t["name"]: required_names(t) for t in ep["tools"]}
+        assert not set(listed) & held
+        for action, _ in ep["turns"]:
+            if action["action"] == "call_tool":
+                assert list(action["args"]) == listed[action["tool"]]
+        dataset.validate_episode(ep)
+
+
+def test_generated_argument_values_are_copyable_from_the_prompt():
+    for ep in dataset.generate_episodes(60, seed=3):
+        seen = ep["user"]
+        for action, observation in ep["turns"]:
+            if action["action"] == "call_tool":
+                for value in string_values(action["args"]):
+                    assert value in seen, (ep["id"], value, seen)
+            if observation:
+                seen += " " + observation
+
+
+def test_generated_episodes_satisfy_parity_mask_and_replay():
+    for ep in dataset.generate_episodes(50, seed=0):
+        assert_prefix_parity(ep)
+        assert_replay_parity(ep)
+        text = dataset.training_text(ep)
+        supervised = "".join(ch for ch, m in zip(text, supervised_mask(text)) if m)
+        assert supervised == "".join(compact_action(a) + "\n" for a, _ in ep["turns"])
+
+
+def test_write_and_read_round_trip_with_lf_only_and_a_file_hash(tmp_path):
+    episodes = dataset.generate_episodes(8, seed=0)
+    path = str(tmp_path / "eps.jsonl")
+    digest = dataset.write_episodes(path, episodes)
+    raw = open(path, "rb").read()
+    assert digest == hashlib.sha256(raw).hexdigest() == dataset.file_sha256(path)
+    assert b"\r" not in raw
+    assert dataset.read_episodes(path) == json.loads(json.dumps(episodes))
+
+
+def test_same_seed_gives_the_same_hash_and_another_seed_a_different_one(tmp_path):
+    def digest(seed, name):
+        return dataset.write_episodes(str(tmp_path / name), dataset.generate_episodes(8, seed=seed))
+    assert digest(0, "a.jsonl") == digest(0, "b.jsonl")
+    assert digest(1, "c.jsonl") != digest(0, "a.jsonl")
+
+
+def test_generation_does_not_depend_on_the_hash_seed(tmp_path):
+    code = ("import sys\n"
+            "import src.scratch_llm.dataset as d\n"
+            "d.write_episodes(sys.argv[1], d.generate_episodes(20, seed=0))\n")
+    digests = []
+    for hash_seed in ("1", "2"):
+        out = str(tmp_path / f"h{hash_seed}.jsonl")
+        done = subprocess.run([sys.executable, "-c", code, out], cwd=PROJECT_ROOT, capture_output=True,
+                              text=True, timeout=300, env=dict(os.environ, PYTHONHASHSEED=hash_seed))
+        assert done.returncode == 0, done.stderr
+        digests.append(dataset.file_sha256(out))
+    assert digests[0] == digests[1]
+
+
+def test_generated_set_passes_the_gate_and_an_unknown_split_is_refused():
+    dataset.assert_clean(dataset.generate_episodes(8, seed=0))
+    with pytest.raises(ValueError):
+        dataset.generate_episodes(4, 0, "nonsense")
+
+
+def test_template_inventory_is_large_enough():
+    train = [t for t, _ in templates.USER_TEMPLATES_TRAIN if t.startswith("user:t")]
+    dev = [t for t, _ in templates.USER_TEMPLATES_DEV if t.startswith("user:d")]
+    replies = [t for t, _ in templates.REPLY_TEMPLATES if t.startswith("reply:")]
+    assert len(train) >= 40 and len(set(train)) == len(train)
+    assert len(dev) >= 8 and not set(dev) & set(train)
+    assert len(replies) >= 15

@@ -49,4 +49,14 @@ run_sandboxed_inner.py
 
 # Benchmark smoke runs (final results/ runs are committed)
 results/smoke-*/
+
+# Local model artifacts: weights, progress logs and generated episode files are large and
+# regenerable; manifests, train logs and loss curves stay tracked.
+models/**/*.pt
+models/**/*.safetensors
+models/**/*.gguf
+models/**/*.log
+models/**/*.done
+models/scratch-pilot/
+data/local/*.jsonl
 docs/build/

@@ -40,14 +40,18 @@ import functools
 import hashlib
 import json
 import os
+import random
+import re
 
 from src.agent_harness.executors import Observation
 from src.agent_harness.prompting import OBSERVATION_TEMPLATE, build_messages, parse_action
 from src.benchmark.injecagent import DATA_DIR, EXFIL_TOOL, load_tool_specs
 from src.scratch_llm.format import (ACTION_PREFIX, CONTEXT_CHARS, END, GEN_RESERVE, HISTORY_ACTION_CHARS,
                                     OBS_CHARS, USER_CHARS, _flat, compact_action, render_context)
+from src.scratch_llm import templates
 
 GENERATOR_VERSION = 1
+MAX_REDRAWS = 50   # attempts to draw one valid episode before generation gives up
 SPLITS = ("train", "dev_tools", "dev_synthetic")
 CLASSES = ("benign", "dh", "ds")
 EPISODE_KEYS = ("id", "split", "cls", "tools", "user", "turns", "meta")
@@ -280,3 +284,246 @@ def assert_clean(episodes, corpus=None):
         hit = sorted(names & corpus.held_out)
         if hit:
             raise LeakageError(f"{ep['id']}: held-out tool {hit}")
+
+
+# ── value generators (every draw comes from the one random.Random passed in) ──
+
+_CAMEL = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+")
+_ID_ALPHABET = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def fill(template: str, **slots) -> str:
+    """Plain slot replacement ({do}, {args}); text without a slot is left as it is."""
+    for key, value in slots.items():
+        template = template.replace("{" + key + "}", value)
+    return template
+
+
+def _tidy(text: str) -> str:
+    """One sentence: single spaces, no space before punctuation, capital first letter."""
+    text = re.sub(r" ([.,;:?!])", r"\1", " ".join(text.split()))
+    return text[:1].upper() + text[1:]
+
+
+def _words(rng: random.Random, low: int, high: int) -> str:
+    return " ".join(rng.choice(templates.WORD_LIST) for _ in range(rng.randint(low, high)))
+
+
+def _id_token(rng: random.Random) -> str:
+    length = rng.randint(5, 12)
+    prefix = rng.choice(templates.ID_PREFIXES)
+    lead = prefix + "-" if prefix else ""
+    return lead + "".join(rng.choice(_ID_ALPHABET) for _ in range(max(3, length - len(lead))))
+
+
+def _address(rng: random.Random) -> str:
+    """A synthetic e-mail address on a reserved documentation domain (RFC 2606): it reaches nobody."""
+    first = rng.choice(templates.FIRST_NAMES)
+    kind = rng.randint(0, 2)
+    if kind == 0:
+        return f"{first}{rng.randint(1, 999)}@{rng.choice(templates.RESERVED_DOMAINS)}"
+    if kind == 1:
+        return f"{first}.{rng.choice(templates.WORD_LIST)}@{rng.choice(templates.RESERVED_DOMAINS)}"
+    return f"{first}{rng.randint(1, 99)}@{rng.choice(templates.WORD_LIST)}.{rng.choice(templates.RESERVED_TLDS)}"
+
+
+def _string_value(rng: random.Random, name: str, single_word: bool = False) -> str:
+    """A string whose shape follows the parameter name (id, address, date, path, ...)."""
+    n = name.lower()
+    if n.endswith(("id", "ids", "token", "code", "key", "ref")) or "uuid" in n:
+        return _id_token(rng)
+    if "mail" in n or "recipient" in n:
+        return _address(rng)
+    if any(k in n for k in ("url", "link", "uri", "website")):
+        return f"https://{rng.choice(templates.WORD_LIST)}.example/{rng.choice(templates.WORD_LIST)}"
+    if any(k in n for k in ("path", "file", "folder", "directory")):
+        return (f"/home/user/{rng.choice(templates.PATH_DIRS)}/{rng.choice(templates.WORD_LIST)}"
+                f"{rng.choice(templates.PATH_EXTENSIONS)}")
+    if "phone" in n:
+        return f"+1-555-{rng.randint(0, 9999):04d}"
+    if "time" in n and "timezone" not in n:
+        return f"2026-{rng.randint(1, 12):02d}-{rng.randint(1, 28):02d} {rng.randint(0, 23):02d}:{rng.randint(0, 59):02d}"
+    if "date" in n:
+        return f"2026-{rng.randint(1, 12):02d}-{rng.randint(1, 28):02d}"
+    return _words(rng, 1, 1 if single_word else 3)
+
+
+def _arg_value(rng: random.Random, name: str, ptype: str):
+    """A value of the declared JSON type for a required parameter (ASCII, no quotes or backslashes)."""
+    if ptype == "integer":
+        return rng.randint(0, 200)
+    if ptype == "number":
+        return round(rng.uniform(0, 200), 1)
+    if ptype == "boolean":
+        return rng.choice([True, False])
+    if ptype == "array":
+        return [_string_value(rng, name, single_word=True) for _ in range(rng.randint(1, 3))]
+    if ptype == "object":
+        keys = rng.sample(templates.OBJECT_KEYS, rng.randint(1, 2))
+        return {key: _words(rng, 1, 1) for key in keys}
+    return _string_value(rng, name)
+
+
+def _return_value(rng: random.Random, name: str, ptype: str):
+    """A value for a field of a simulated tool response (the tool's `returns` list)."""
+    if ptype == "boolean":
+        return True if name == "success" else rng.choice([True, False])
+    if ptype == "array":
+        items = []
+        for _ in range(rng.randint(1, 3)):
+            if rng.random() < 0.5:
+                items.append(_words(rng, 1, 1))
+            else:
+                items.append({"id": _id_token(rng), rng.choice(templates.RECORD_KEYS): _words(rng, 1, 3)})
+        return items
+    return _arg_value(rng, name, ptype)
+
+
+def _observation(rng: random.Random, returns: list) -> str:
+    """The text the harness would show for a successful call, built from the tool's return schema."""
+    payload = {r["name"]: _return_value(rng, r["name"], r["type"]) for r in returns}
+    while payload:
+        text = json.dumps(payload, ensure_ascii=True)
+        if len(text) <= OBS_CHARS:
+            break
+        payload.popitem()
+    else:
+        text = json.dumps({"success": True})
+    return Observation("success", output=text).as_text()
+
+
+# ── instructions and replies ──
+
+def _request_words(name: str) -> tuple:
+    """(verb, object words, toolkit words), lower case, from a CamelCase tool name."""
+    toolkit = toolkit_of(name)
+    rest = name[len(toolkit):] if toolkit and name.startswith(toolkit) else name
+    words = [w.lower() for w in _CAMEL.findall(rest)] or [name.lower()]
+    return words[0], words[1:], [w.lower() for w in _CAMEL.findall(toolkit)]
+
+
+def _plain_request(name: str) -> str:
+    verb, obj, _ = _request_words(name)
+    return " ".join([verb] + obj)
+
+
+def _request_phrase(rng: random.Random, name: str) -> str:
+    """The request as a verb phrase: the tool's own words (about 70%) or a synonym verb (about 30%),
+    sometimes naming the application."""
+    verb, obj, toolkit = _request_words(name)
+    if verb in templates.SYNONYMS and rng.random() < 0.3:
+        verb = rng.choice(templates.SYNONYMS[verb])
+    phrase = " ".join([verb] + obj)
+    if toolkit and rng.random() < 0.5:
+        phrase += f" {rng.choice(templates.TOOLKIT_PREPOSITIONS)} {' '.join(toolkit)}"
+    return phrase
+
+
+def _render_value(value) -> str:
+    """How a value is written inside the instruction: strings as they are, everything else as the
+    compact JSON the action will contain, so the model copies it verbatim."""
+    return value if isinstance(value, str) else json.dumps(value, separators=(",", ":"), ensure_ascii=True)
+
+
+def _arguments_text(rng: random.Random, args: dict) -> str:
+    if not args:
+        return ""
+    listing = ", ".join(f"{name.replace('_', ' ').lower()} {_render_value(value)}" for name, value in args.items())
+    return f"{rng.choice(templates.ARG_CONNECTORS)} {listing}"
+
+
+# ── the benign episode ──
+
+def _gen_pool() -> tuple:
+    """((name, spec), ...) sorted by name: the tools the generator may offer."""
+    return _free_pool()
+
+
+def _benign_episode(rng: random.Random, ep_id: str, split: str, pool: tuple) -> dict:
+    name, spec = pool[rng.randrange(len(pool))]
+    required = [p for p in spec["parameters"] if p.get("required")]
+    args = {p["name"]: _arg_value(rng, p["name"], p["type"]) for p in required}
+    user_id, user_template = rng.choice(templates.USER_TEMPLATES_TRAIN)
+    reply_id, reply_template = rng.choice(templates.REPLY_TEMPLATES)
+    user = _tidy(fill(user_template, do=_request_phrase(rng, name), args=_arguments_text(rng, args)))
+    message = _tidy(fill(reply_template, do=_plain_request(name)))
+    return {
+        "id": ep_id,
+        "split": split,
+        "cls": "benign",
+        "tools": [episode_tool(spec)],
+        "user": user,
+        "turns": [[{"action": "call_tool", "tool": name, "args": args}, _observation(rng, spec["returns"])],
+                  [{"action": "respond", "message": message}, None]],
+        "meta": {"synthetic": False, "os_actions": False, "blocked_tail": False, "two_step": False,
+                 "template_ids": [user_id, reply_id]},
+    }
+
+
+def generate_episodes(n: int, seed: int = 0, split: str = "train") -> list:
+    """Return `n` training episodes (schema above), reproducible for a given (seed, split).
+
+    This slice emits benign episodes from real non-benchmark tools; the attack classes, synthetic
+    tools and the dev splits are added behind the same signature. The leakage gate runs on the
+    whole batch before it is returned, so a leaking template makes generation raise instead of
+    producing data.
+    """
+    if split not in SPLITS:
+        raise ValueError(f"split must be one of {SPLITS}, not {split!r}")
+    if split != "train":
+        raise NotImplementedError("only the train split is generated in this slice")
+    if not isinstance(n, int) or n < 0:
+        raise ValueError("n must be a non-negative integer")
+    rng = random.Random(seed * 1_000_003 + SPLITS.index(split))
+    pool = _gen_pool()
+    episodes = []
+    for i in range(n):
+        ep_id = f"{split}-{seed}-{i:06d}"
+        for _ in range(MAX_REDRAWS):
+            episode = _benign_episode(rng, ep_id, split, pool)
+            try:
+                validate_episode(episode)
+            except ValueError:
+                continue
+            episodes.append(episode)
+            break
+        else:
+            raise RuntimeError(f"{ep_id}: no valid episode after {MAX_REDRAWS} draws")
+    assert_clean(episodes)
+    return episodes
+
+
+# ── files ──
+
+def file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_episodes(path: str, episodes: list) -> str:
+    """One compact JSON object per line, LF line endings on every OS, so the sha256 of the
+    file is the same on Windows and in WSL. Keys keep their insertion order (the order is part
+    of the gold action text: {"action", "tool", "args"}), and generation is deterministic.
+    Returns the file's sha256."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        for ep in episodes:
+            f.write(json.dumps(ep, separators=(",", ":"), ensure_ascii=True) + "\n")
+    os.replace(tmp, path)
+    return file_sha256(path)
+
+
+def read_episodes(path: str) -> list:
+    """Load a JSONL episode file, validating every line."""
+    episodes = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                episode = json.loads(line)
+                validate_episode(episode)
+                episodes.append(episode)
+    return episodes
