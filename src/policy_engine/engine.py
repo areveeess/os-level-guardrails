@@ -65,8 +65,8 @@ _FILE_COMMANDS = {
     'zcat', 'bzcat', 'xzcat',
 }
 # Recursive by nature, or recursive when given -r/-R/--recursive
-_ALWAYS_RECURSIVE = {'rgrep', 'rg', 'ag', 'ack', 'tree'}
-_RECURSIVE_WITH_FLAG = {'grep', 'egrep', 'fgrep', 'zgrep', 'cp', 'diff', 'du', 'scp', 'tar'}
+_ALWAYS_RECURSIVE = {'rgrep', 'rg', 'ag', 'ack', 'tree', 'tar', 'zip', '7z', '7za', 'cpio'}
+_RECURSIVE_WITH_FLAG = {'grep', 'egrep', 'fgrep', 'zgrep', 'cp', 'diff', 'du', 'scp'}
 _CD_COMMANDS = {'cd', 'pushd', 'popd', 'chdir'}
 
 
@@ -461,11 +461,14 @@ class PolicyEngine:
         What cannot be resolved statically is refused for file-reading commands.
         """
         argv = cmd.argv
+        base = os.path.basename(argv[0]) if argv else ''
+        strict = base in _FILE_COMMANDS
+        if cmd.stdin_args and strict:
+            return ('BLOCK', f"File names for '{base}' are read from standard input by xargs "
+                             f"and cannot be checked (fail closed)")
         if len(argv) <= 1:
             return ('ALLOW', 'No file arguments')
 
-        base = os.path.basename(argv[0])
-        strict = base in _FILE_COMMANDS
         recursive = self._is_recursive(base, argv)
 
         for i, arg in enumerate(argv[1:], 1):

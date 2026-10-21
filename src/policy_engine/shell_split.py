@@ -74,6 +74,9 @@ class SimpleCommand:
     # or brace. The text alone cannot say, and the file policy needs to know.
     argv_dynamic: List[bool] = field(default_factory=list)
     argv_glob: List[bool] = field(default_factory=list)
+    # Run through xargs: its file operands are read from standard input at run time, so
+    # the argument list above is not the whole story.
+    stdin_args: bool = False
 
     def dynamic_at(self, i: int) -> bool:
         return i < len(self.argv_dynamic) and self.argv_dynamic[i]
@@ -472,18 +475,22 @@ _SHELLS = {'sh', 'bash', 'dash', 'ash', 'ksh', 'ksh93', 'mksh', 'pdksh', 'zsh', 
 _FIND_EXEC = {'-exec', '-execdir', '-ok', '-okdir'}
 
 
-def _unwrap(words: List[_Word]) -> List[_Word]:
-    """Peel wrapper commands so `words` starts at the command that really runs."""
+def _unwrap(words: List[_Word], peeled: Optional[List[str]] = None) -> List[_Word]:
+    """Peel wrapper commands so `words` starts at the command that really runs. The names
+    of the wrappers removed are appended to `peeled` when given."""
     while words:
         first = words[0]
         if first.dynamic or first.glob:
             return words
-        handler = _WRAPPERS.get(os.path.basename(first.text))
+        name = os.path.basename(first.text)
+        handler = _WRAPPERS.get(name)
         if handler is None:
             return words
         rest = handler(words)
         if not rest:
             return words            # e.g. a bare `env`: nothing underneath to expose
+        if peeled is not None:
+            peeled.append(name)
         words = rest
     return words
 
@@ -554,7 +561,8 @@ def _suffix_commands(words: List[_Word], text: str, base: str, depth: int) -> Li
 def _resolve(words: List[_Word], text: str, writes: List[str], reads: List[str],
              depth: int, scan: bool = True) -> List[SimpleCommand]:
     """Turn the words of one simple command into the commands that will actually run."""
-    words = _unwrap(words)
+    peeled: List[str] = []
+    words = _unwrap(words, peeled)
     name = words[0]
     if name.dynamic or name.glob:
         raise ShellParseError("dynamic command name")
@@ -569,7 +577,8 @@ def _resolve(words: List[_Word], text: str, writes: List[str], reads: List[str],
 
     found = [SimpleCommand(text=text, argv=[w.text for w in words], writes=writes, reads=reads,
                            argv_dynamic=[w.dynamic for w in words],
-                           argv_glob=[w.glob for w in words])]
+                           argv_glob=[w.glob for w in words],
+                           stdin_args='xargs' in peeled)]
 
     if base in _SHELLS:
         script = _shell_script(words)

@@ -514,3 +514,36 @@ def test_cr03_guarded_executor_never_runs_the_bypasses(engine):
         inner = RecordingExecutor()
         obs = GuardedExecutor(engine, inner).execute({"action": "run_shell", "command": command})
         assert obs.status == "blocked" and inner.actions == [], command
+
+
+# ── CR-03 follow-up: stdin-fed file names (xargs) and archivers that walk directories ──
+
+@pytest.mark.parametrize("command", [
+    "printf '\057etc\057shadow\n' | xargs cat",
+    "echo L2V0Yy9zaGFkb3c= | base64 -d | xargs cat",
+    "ls /tmp | xargs wc -l",
+    "find /tmp -name '*.txt' | xargs grep todo",
+    "echo /tmp/a | xargs -I{} cat {}",
+    "echo /tmp/a | xargs -n1 head",
+    "echo /tmp/a | env xargs cat",
+    "tar cf /tmp/a.tar /etc",
+    "tar -C / -cf /tmp/a.tar etc/shadow",
+    "tar cf - -C / etc/shadow | tar xO",
+    "tar xf /tmp/a.tar -C /",
+    "zip -r /tmp/a.zip /etc",
+])
+def test_cr03_followup_unverifiable_inputs_are_blocked(engine, command):
+    decision, reason = engine.check_detailed("run_shell", command)
+    assert decision == "BLOCK", reason
+
+
+@pytest.mark.parametrize("command", [
+    "echo /tmp/a | xargs echo",
+    "tar cf /tmp/a.tar notes",
+    "tar tf /tmp/a.tar",
+    "tar xf /tmp/a.tar -C /tmp",
+    "xargs --version",
+])
+def test_cr03_followup_benign_uses_are_not_blocked(engine, command):
+    decision, reason = engine.check_detailed("run_shell", command)
+    assert decision != "BLOCK", reason
