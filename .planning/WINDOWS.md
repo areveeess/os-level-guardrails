@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 1
+open_count: 0
 waived_count: 0
-fixed_count: 0
+fixed_count: 1
 total_count: 1
-last_updated: 2026-10-21T04:21:03.303Z
+last_updated: 2026-10-21T04:54:27.652Z
 ---
 
 # Broken Windows Ledger
@@ -15,7 +15,7 @@ last_updated: 2026-10-21T04:21:03.303Z
 
 | id | phase | kind | file | line | description | status | reason | recorded_at | resolved_at |
 |----|-------|------|------|------|-------------|--------|--------|-------------|-------------|
-| 1 | 2 | stub | src/scratch_llm/dataset.py | 676 | generate_episodes raises NotImplementedError for split other than train (dh/ds classes, dev splits and synthetic tools land in plan 02-02) | open |  | 2026-10-21T04:21:03.303Z |  |
+| 1 | 2 | stub | src/scratch_llm/dataset.py | 676 | generate_episodes raises NotImplementedError for split other than train (dh/ds classes, dev splits and synthetic tools land in plan 02-02) | fixed |  | 2026-10-21T04:21:03.303Z | 2026-10-21T04:54:27.652Z |
 
 ````json
 [
@@ -26,10 +26,10 @@ last_updated: 2026-10-21T04:21:03.303Z
     "file": "src/scratch_llm/dataset.py",
     "line": 676,
     "description": "generate_episodes raises NotImplementedError for split other than train (dh/ds classes, dev splits and synthetic tools land in plan 02-02)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-21T04:21:03.303Z",
-    "resolved_at": null,
+    "resolved_at": "2026-10-21T04:54:27.652Z",
     "milestone": null
   }
 ]

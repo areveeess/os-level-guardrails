@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 2
 current_phase_name: Local Data Foundation & ScratchGPT
 status: executing
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-10-21T04:22:44.970Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-10-21T04:54:50.284Z"
 last_activity: 2026-10-21
 last_activity_desc: Phase 2 execution started
-state_head: 2741b9d7a9cd5c97c8401dcea8b415219427e2bd
+state_head: 5f110e591f602cc65253ea8db1df1b877c7e7168
 progress:
   total_phases: 5
   completed_phases: 1
   total_plans: 8
-  completed_plans: 5
+  completed_plans: 6
   percent: 20
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-21)
 ## Current Position
 
 Phase: 2 (Local Data Foundation & ScratchGPT) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-10-21 — Phase 2 execution started
 
@@ -61,6 +61,7 @@ Progress: [██░░░░░░░░] 20% (Phase 1 of 5 complete)
 | Phase 01 P03 | 15 min | 3 tasks | 9 files |
 | Phase 01 P04 | 35 min | 2 tasks | 7 files |
 | Phase 2 P01 | 20 min | 3 tasks | 8 files |
+| Phase 02 P02 | 26min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -81,6 +82,8 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-04: Control rows (provider scripted) are excluded from every LLM report table and chart, not only headline and pooled; attribution sentence scoped to the control (sandbox/seccomp not reached by it)
 - [Phase 2]: Plan 02-01: write_episodes preserves key insertion order (no sort_keys) so call_tool args keep the spec's required order and the gold action text keeps the documented action/tool/args grammar
 - [Phase 2]: Plan 02-01: leakage gate checks 8-word shingles under two normalisations (union 2780, research-only 2035) and benchmark sentences in U:, O: and A: lines; signature rule applies to synthetic tools only
+- [Phase 02]: D-02 read as 10% of all episodes, drawn only from the benign half; sinks without a recipient parameter get an injection without an address (verbatim-copy rule wins)
+- [Phase 02]: Dataset manifest committed after the CLI commit so code_commit names it; train sha256 63a192b1..., dev sha256 58f5bcb0... (seed 0, 40000+2000)
 
 ### Pending Todos
 
@@ -108,6 +111,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-21T04:22:44.822Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-10-21T04:54:35.015Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None
