@@ -294,9 +294,12 @@ RULE_SUMMARY = "tool summary"
 SHINGLE_WORDS = 8
 _WORD = re.compile(r"[a-z0-9@._']+")
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-_CANARY = re.compile(r"CANARY[0-9A-F]{12}DATA")
-_BANNED_CASE_SENSITIVE = ("CANARY",)
-_BANNED_ANY_CASE = ("private record", "account owner. reference")
+# The benchmark's canary is CANARY<12 upper-case hex>DATA, but every other rule is case-insensitive, so this one is
+# too (review WR-07): canary0a1b2c3d4e5fdata and Canary0A1B2C3D4E5FData are the same leak. No legitimate template
+# or tool uses the word, so the bare word is banned in any case as well.
+_CANARY = re.compile(r"canary[0-9a-f]{12}data", re.IGNORECASE)
+_HEX12 = re.compile(r"[0-9A-Fa-f]{12}")      # the variable part of a canary, as a whole token
+_BANNED_ANY_CASE = ("canary", "private record", "account owner. reference")
 
 
 def _tokens(text: str, strip: bool = True) -> list:
@@ -387,9 +390,6 @@ def _text_violation(text: str, corpus: Corpus, sentences: bool = False):
     if match:
         return RULE_CANARY, match.group(0)
     lowered = text.lower()
-    for phrase in _BANNED_CASE_SENSITIVE:
-        if phrase in text:
-            return RULE_BANNED, phrase
     for phrase in _BANNED_ANY_CASE:
         if phrase in lowered:
             return RULE_BANNED, phrase
@@ -598,12 +598,21 @@ def _attack_address(rng: random.Random) -> str:
 
 
 def _secret(rng: random.Random) -> str:
-    """A secret token of 12-30 characters in one of six shapes, never the benchmark's canary shape."""
+    """A secret token of 12-30 characters in one of six shapes, never the benchmark's canary shape.
+
+    The canary's variable part is 12 hex characters, so no token is ever exactly 12 hex characters (review
+    WR-07): the two hex shapes start at 13, and the guard below catches the rare 12-character draw of another
+    shape that happens to use only hex characters."""
+    token = _secret_token(rng)
+    return token[:-1] + "Z" if _HEX12.fullmatch(token) else token
+
+
+def _secret_token(rng: random.Random) -> str:
     shape = rng.randrange(6)
     if shape == 0:
-        return "".join(rng.choice("0123456789ABCDEF") for _ in range(rng.randint(12, 20)))
+        return "".join(rng.choice("0123456789ABCDEF") for _ in range(rng.randint(13, 20)))
     if shape == 1:
-        return "".join(rng.choice("0123456789abcdef") for _ in range(rng.randint(12, 20)))
+        return "".join(rng.choice("0123456789abcdef") for _ in range(rng.randint(13, 20)))
     if shape == 2:
         return "".join(rng.choice(_ID_ALPHABET) for _ in range(rng.randint(12, 24)))
     if shape == 3:

@@ -148,6 +148,23 @@ def test_rule_5_canary_shape_in_an_argument(base_spec):
     expect_rule(ep, RULE_CANARY)
 
 
+@pytest.mark.parametrize("spelling", ["canary0a1b2c3d4e5fdata", "Canary0A1B2C3D4E5FData", "cAnArY0123456789abDATA"])
+def test_rule_5b_canary_shape_in_any_letter_case(base_spec, spelling):
+    """WR-07: the canary rule was case-sensitive while every other rule was not."""
+    ep = make_episode(base_spec)
+    ep["turns"][0][1] = f'{{"status": "ok", "note": "{spelling}"}}'
+    expect_rule(ep, RULE_CANARY)
+    ep = make_episode(base_spec)
+    first = required_names(base_spec)[0]
+    ep["turns"][0][0]["args"][first] = spelling
+    expect_rule(ep, RULE_CANARY)
+
+
+@pytest.mark.parametrize("word", ["canary", "Canary", "CANARY"])
+def test_rule_6b_the_bare_word_canary_is_banned_in_any_case(base_spec, word):
+    expect_rule(make_episode(base_spec, user=f"Please check the {word} value for me."), RULE_BANNED)
+
+
 def test_rule_6_private_record_phrasing_in_an_observation(base_spec):
     ep = make_episode(base_spec)
     ep["turns"][0][1] = "Private record for somebody else. Number 12"

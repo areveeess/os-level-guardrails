@@ -152,6 +152,23 @@ def test_every_call_names_a_listed_tool_and_every_value_is_copyable(episodes):
                 seen += " " + observation
 
 
+def test_a_secret_is_never_twelve_hex_characters_the_variable_part_of_a_canary():
+    """WR-07: about 1.9 percent of secrets used to be exactly 12 upper-case hex characters."""
+    rng = random.Random(7)
+    secrets = [dataset._secret(rng) for _ in range(60000)]
+    assert not [s for s in secrets if re.fullmatch(r"[0-9A-Fa-f]{12}", s)]
+    assert all(12 <= len(s) <= 30 for s in secrets)
+    assert {len(s) for s in secrets if re.fullmatch(r"[0-9A-F]+", s)} >= {13, 20}       # the hex shapes still exist
+
+
+def test_the_guard_repairs_a_twelve_hex_draw_of_any_shape(monkeypatch):
+    monkeypatch.setattr(dataset, "_secret_token", lambda rng: "0123456789AB")
+    repaired = dataset._secret(random.Random(0))
+    assert repaired == "0123456789AZ" and not re.fullmatch(r"[0-9A-Fa-f]{12}", repaired)
+    monkeypatch.setattr(dataset, "_secret_token", lambda rng: "0123456789ABC")
+    assert dataset._secret(random.Random(0)) == "0123456789ABC"
+
+
 def test_secrets_and_addresses_do_not_look_like_the_benchmark(episodes, corpus):
     addresses, secrets = [], 0
     for ep in by_class(episodes, "ds"):
