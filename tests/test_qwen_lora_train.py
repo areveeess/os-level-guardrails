@@ -23,6 +23,7 @@ import json
 import math
 import os
 import re
+import shutil
 from types import SimpleNamespace
 
 import pytest
@@ -492,3 +493,312 @@ def test_cli_output_is_served_by_the_provider_with_every_stamp_check(cli_run, ti
     from src.llm.hf_local import HFLocalProvider
     provider = HFLocalProvider("tiny-lora", tiny_dir, adapter=cli_run.out_dir, device="cpu", max_new_tokens=8)
     assert provider.resolved_model.endswith("+tiny-lora@" + cli_run.manifest["adapter_sha256"][:12])
+
+
+# ── restart-proof and fail-closed (D-06): resume, identity refusal, exit codes, remediation ──
+
+def resume_config(**changes):
+    return quick_config(**{**dict(max_steps=6, eval_every=2, micro_batch=2, accum=1, patience=10), **changes})
+
+
+def interrupt_at(call_number):
+    """An evaluate() that raises KeyboardInterrupt at its `call_number`-th call (the real one otherwise)."""
+    real, state = train_module.evaluate, {"calls": 0}
+
+    def wrapper(*args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == call_number:
+            raise KeyboardInterrupt
+        return real(*args, **kwargs)
+
+    return wrapper
+
+
+def read_log(out_dir):
+    with open(os.path.join(out_dir, "train_log.jsonl"), encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def close(a, b):
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(close(a[k], b[k]) for k in a)
+    if isinstance(a, float):
+        return math.isclose(a, b, rel_tol=1e-4, abs_tol=1e-8)
+    return a == b
+
+
+@pytest.fixture(scope="module")
+def straight_run(tiny_dir, data_files, tmp_path_factory):
+    out_dir = str(tmp_path_factory.mktemp("straight") / "adapter")
+    manifest = train(data_files[0], data_files[1], out_dir, base_model=tiny_dir, cfg=resume_config(), device="cpu",
+                     log=lambda *_: None)
+    return SimpleNamespace(out_dir=out_dir, manifest=manifest)
+
+
+@pytest.fixture(scope="module")
+def interrupted(tiny_dir, data_files, tmp_path_factory):
+    """A run killed (KeyboardInterrupt) inside its second evaluation, i.e. after the resume file of step 2 exists."""
+    out_dir = str(tmp_path_factory.mktemp("interrupted") / "adapter")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(train_module, "evaluate", interrupt_at(2))
+        with pytest.raises(KeyboardInterrupt):
+            train(data_files[0], data_files[1], out_dir, base_model=tiny_dir, cfg=resume_config(), device="cpu",
+                  log=lambda *_: None)
+    return out_dir
+
+
+def test_resume_a_killed_run_keeps_the_resume_file_and_the_in_run_adapter(interrupted):
+    assert os.path.isfile(os.path.join(interrupted, train_module.RESUME_FILE))
+    assert os.path.isfile(os.path.join(interrupted, train_module.IN_RUN_ADAPTER, "adapter_model.safetensors"))
+    assert not os.path.exists(os.path.join(interrupted, "manifest.json"))
+    assert not os.path.exists(os.path.join(interrupted, "adapter_model.safetensors"))
+
+
+def test_resume_continues_at_the_next_step_and_equals_an_uninterrupted_run(tiny_dir, data_files, interrupted,
+                                                                         straight_run, tmp_path):
+    from safetensors.torch import load_file
+    out_dir = str(tmp_path / "resumed")
+    shutil.copytree(interrupted, out_dir)
+    logged = []
+    manifest = train(data_files[0], data_files[1], out_dir, base_model=tiny_dir, cfg=resume_config(), device="cpu",
+                     log=logged.append, resume=True)
+    assert "RESUMED from step 2" in logged
+    assert [line for line in logged if line.startswith("step ")][0].startswith("step 3/6 ")
+    assert manifest["resumed_from_steps"] == [2] and "resumed from step 2" in manifest["run_notes"]
+    reference = straight_run.manifest
+    assert reference["resumed_from_steps"] == []
+    for key in ("steps", "best_step", "stop_reason", "tokens_seen"):
+        assert manifest[key] == reference[key], key
+    resumed_log, straight_log = read_log(out_dir), read_log(straight_run.out_dir)
+    assert [r["step"] for r in resumed_log] == [r["step"] for r in straight_log] == [2, 4, 6]
+    for mine, theirs in zip(resumed_log, straight_log):
+        assert close({k: v for k, v in mine.items() if k != "elapsed_s"},
+                     {k: v for k, v in theirs.items() if k != "elapsed_s"}), (mine, theirs)
+    a = load_file(os.path.join(out_dir, "adapter_model.safetensors"))
+    b = load_file(os.path.join(straight_run.out_dir, "adapter_model.safetensors"))
+    assert set(a) == set(b) and all(torch.allclose(a[k], b[k], atol=1e-5) for k in a)
+    for name in (train_module.RESUME_FILE, train_module.IN_RUN_ADAPTER):
+        assert not os.path.exists(os.path.join(out_dir, name))
+
+
+def test_resume_refuses_a_different_dev_file_config_or_base_revision_naming_the_field(tiny_dir, data_files, interrupted,
+                                                                                    tmp_path):
+    other_dev = str(tmp_path / "other_dev.jsonl")
+    write_episodes(other_dev, generate_episodes(8, 9, "dev_tools"))
+    with pytest.raises(ValueError, match="dev_sha256"):
+        train(data_files[0], other_dev, interrupted, base_model=tiny_dir, cfg=resume_config(), device="cpu",
+              log=lambda *_: None, resume=True)
+    with pytest.raises(ValueError, match="max_steps"):
+        train(data_files[0], data_files[1], interrupted, base_model=tiny_dir, cfg=resume_config(max_steps=8),
+              device="cpu", log=lambda *_: None, resume=True)
+    # the refusals changed nothing: the killed run can still be resumed
+    assert os.path.isfile(os.path.join(interrupted, train_module.RESUME_FILE))
+    edited = str(tmp_path / "edited")
+    shutil.copytree(interrupted, edited)
+    path = os.path.join(edited, train_module.RESUME_FILE)
+    state = torch.load(path, map_location="cpu", weights_only=True)
+    state["identity"]["base_model"]["revision"] = "somewhere-else"
+    torch.save(state, path)
+    with pytest.raises(ValueError, match="base_model.revision"):
+        train(data_files[0], data_files[1], edited, base_model=tiny_dir, cfg=resume_config(), device="cpu",
+              log=lambda *_: None, resume=True)
+    assert os.path.isfile(path)
+
+
+def test_resume_refuses_when_the_resume_file_or_the_in_run_adapter_is_missing(tiny_dir, data_files, interrupted,
+                                                                            tmp_path):
+    empty = str(tmp_path / "empty")
+    with pytest.raises(ValueError, match="qwen_lora.resume.tmp"):
+        train(data_files[0], data_files[1], empty, base_model=tiny_dir, cfg=resume_config(), device="cpu",
+              log=lambda *_: None, resume=True)
+    no_adapter = str(tmp_path / "no_adapter")
+    shutil.copytree(interrupted, no_adapter)
+    shutil.rmtree(os.path.join(no_adapter, train_module.IN_RUN_ADAPTER))
+    with pytest.raises(ValueError, match="adapter.best.tmp"):
+        train(data_files[0], data_files[1], no_adapter, base_model=tiny_dir, cfg=resume_config(), device="cpu",
+              log=lambda *_: None, resume=True)
+    assert os.path.isfile(os.path.join(no_adapter, train_module.RESUME_FILE))
+
+
+def test_resume_a_fresh_run_removes_stale_files_but_never_the_launchers(tiny_dir, data_files, tmp_path):
+    out_dir = tmp_path / "stale"
+    (out_dir / train_module.IN_RUN_ADAPTER).mkdir(parents=True)
+    (out_dir / train_module.IN_RUN_ADAPTER / "adapter_model.safetensors").write_bytes(b"old")
+    for name, content in ((train_module.RESUME_FILE, b"old"), (train_module.RESUME_FILE + ".tmp", b"old"),
+                          ("adapter_model.safetensors", b"old"), ("adapter_config.json", b"{}"),
+                          ("loss_curve.png", b"old"), ("manifest.json", b'{"adapter_sha256": "old"}')):
+        (out_dir / name).write_bytes(content)
+    launcher = {"train_progress.log": b"progress\n", "train.done": b"", "gpu_preflight.log": b"reading\n"}
+    for name, content in launcher.items():
+        (out_dir / name).write_bytes(content)
+    manifest = train(data_files[0], data_files[1], str(out_dir), base_model=tiny_dir, cfg=quick_config(max_steps=2),
+                     device="cpu", log=lambda *_: None)
+    assert manifest["adapter_sha256"] != "old"
+    assert (out_dir / "adapter_model.safetensors").read_bytes() != b"old"
+    for name in (train_module.IN_RUN_ADAPTER, train_module.RESUME_FILE, train_module.RESUME_FILE + ".tmp"):
+        assert not (out_dir / name).exists(), name
+    for name, content in launcher.items():
+        assert (out_dir / name).read_bytes() == content, name
+
+
+# failure exits: each leaves nothing loadable
+
+def assert_nothing_loadable(out_dir):
+    for name in ("adapter_model.safetensors", "adapter_config.json", "manifest.json", train_module.IN_RUN_ADAPTER,
+                 train_module.RESUME_FILE, train_module.RESUME_FILE + ".tmp"):
+        assert not os.path.exists(os.path.join(out_dir, name)), name
+
+
+def failing_main(tiny_dir, data_files, tmp_path_factory):
+    out_dir = str(tmp_path_factory.mktemp("failing") / "adapter")
+    code, lines = run_main(cli_args(*data_files, out_dir, tiny_dir), tmp_path_factory.getbasetemp())
+    return code, lines, out_dir
+
+
+def from_call(real, first_bad_call, replacement):
+    """`real`, except that the `first_bad_call`-th and every later call returns/raises through `replacement`."""
+    state = {"calls": 0}
+
+    def wrapper(*args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] >= first_bad_call:
+            return replacement(real, *args, **kwargs)
+        return real(*args, **kwargs)
+
+    return wrapper
+
+
+def test_non_finite_training_loss_exits_3_and_leaves_nothing_loadable(tiny_dir, data_files, tmp_path_factory,
+                                                                    monkeypatch):
+    def nan_loss(real, peft_model, input_ids, attention, labels):
+        return torch.tensor(float("nan")), 1
+
+    monkeypatch.setattr(train_module, "supervised_loss", from_call(train_module.supervised_loss, 3, nan_loss))
+    code, lines, out_dir = failing_main(tiny_dir, data_files, tmp_path_factory)
+    assert code == 3 and "FAILED non_finite_loss step 2" in lines
+    assert not any(line.startswith("DONE") for line in lines)
+    assert_nothing_loadable(out_dir)
+    assert read_log(out_dir)[-1] == {"step": 2, "event": "non_finite_loss"}
+
+
+def test_non_finite_dev_loss_exits_3_and_leaves_nothing_loadable(tiny_dir, data_files, tmp_path_factory, monkeypatch):
+    def nan_dev(real, *args, **kwargs):
+        return {**real(*args, **kwargs), "dev_loss_action": float("nan")}
+
+    monkeypatch.setattr(train_module, "evaluate", from_call(train_module.evaluate, 2, nan_dev))
+    code, lines, out_dir = failing_main(tiny_dir, data_files, tmp_path_factory)
+    assert code == 3 and "FAILED non_finite_dev_loss step 4" in lines
+    assert_nothing_loadable(out_dir)             # the resume file of step 2 was removed too
+    assert read_log(out_dir)[-1] == {"step": 4, "event": "non_finite_dev_loss"}
+
+
+def test_vram_guard_exits_4_when_reserved_memory_passes_95_percent(tiny_dir, data_files, tmp_path_factory, monkeypatch):
+    monkeypatch.setattr(train_module, "read_vram_mib", lambda device: {"allocated": 900, "reserved": 960, "total": 1000})
+    code, lines, out_dir = failing_main(tiny_dir, data_files, tmp_path_factory)
+    assert code == 4
+    assert "FAILED vram_budget reserved 960 total 1000" in lines
+    assert_nothing_loadable(out_dir)
+
+
+def test_vram_guard_stays_quiet_at_the_limit_and_records_the_peak(tiny_dir, data_files, tmp_path_factory, monkeypatch):
+    monkeypatch.setattr(train_module, "read_vram_mib", lambda device: {"allocated": 900, "reserved": 950, "total": 1000})
+    code, lines, out_dir = failing_main(tiny_dir, data_files, tmp_path_factory)
+    assert code == 0 and not any(line.startswith("FAILED") for line in lines)
+    assert read_json(os.path.join(out_dir, "manifest.json"))["peak_vram_mib"] == {"allocated": 900, "reserved": 950,
+                                                                                  "total": 1000}
+
+
+def test_cuda_out_of_memory_exits_4_like_the_vram_guard(tiny_dir, data_files, tmp_path_factory, monkeypatch):
+    def out_of_memory(real, *args, **kwargs):
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+    monkeypatch.setattr(train_module, "supervised_loss", from_call(train_module.supervised_loss, 3, out_of_memory))
+    code, lines, out_dir = failing_main(tiny_dir, data_files, tmp_path_factory)
+    assert code == 4 and "FAILED cuda_oom step 2" in lines
+    assert_nothing_loadable(out_dir)
+
+
+def test_leak_through_the_command_line_stops_before_any_adapter_file_exists(tiny_dir, data_files, tmp_path_factory):
+    spec = load_tool_specs()["GmailSendEmail"]
+    names = [p["name"] for p in spec["parameters"] if p.get("required")]
+    leaking = dict(generate_episodes(1, 0)[0], id="train-0-leak", tools=[episode_tool(spec)],
+                   user="Please send the quarterly note for me.",
+                   turns=[[{"action": "call_tool", "tool": "GmailSendEmail", "args": {n: "x1" for n in names}},
+                           '{"status": "ok"}'],
+                          [{"action": "respond", "message": "Done."}, None]])
+    directory = tmp_path_factory.mktemp("leaking_cli")
+    bad = str(directory / "leaking.jsonl")
+    write_episodes(bad, [leaking])
+    out_dir = str(directory / "adapter")
+    with pytest.raises(LeakageError):
+        run_main(cli_args(bad, data_files[1], out_dir, tiny_dir), tmp_path_factory.getbasetemp())
+    assert not os.path.exists(os.path.join(out_dir, "adapter_model.safetensors"))
+    assert not os.path.exists(os.path.join(out_dir, "manifest.json"))
+
+
+def exit_code_of(argv, root):
+    with pytest.raises(SystemExit) as stopped:
+        run_main(argv, root)
+    return stopped.value.code
+
+
+def test_cli_refuses_paths_outside_the_repository_missing_inputs_and_foreign_manifests(tiny_dir, data_files, tmp_path):
+    hub_id = "Qwen/Qwen2.5-0.5B-Instruct"                      # never loaded: every refusal happens before the model
+    jail = tmp_path / "jail"
+    jail.mkdir()
+    shutil.copy(data_files[0], jail / "train.jsonl")
+    shutil.copy(data_files[1], jail / "dev.jsonl")
+    train_in, dev_in = str(jail / "train.jsonl"), str(jail / "dev.jsonl")
+    outside = str(tmp_path / "outside" / "adapter")
+    assert exit_code_of(cli_args(train_in, dev_in, outside, hub_id), jail) == 2                  # --out-dir outside the root
+    assert not os.path.exists(outside)
+    assert exit_code_of(cli_args(data_files[0], dev_in, str(jail / "out"), hub_id), jail) == 2   # --train outside the root
+    assert exit_code_of(cli_args(train_in, dev_in, str(jail / "out"), tiny_dir), jail) == 2      # directory --base-model outside
+    assert exit_code_of(cli_args(str(jail / "missing.jsonl"), dev_in, str(jail / "out"), hub_id), jail) == 2
+    assert not os.path.exists(jail / "out")
+    foreign = jail / "foreign"
+    foreign.mkdir()
+    (foreign / "manifest.json").write_text('{"checkpoint_sha256": "x"}', encoding="utf-8")
+    assert exit_code_of(cli_args(train_in, dev_in, str(foreign), hub_id), jail) == 2
+    assert (foreign / "manifest.json").read_text(encoding="utf-8") == '{"checkpoint_sha256": "x"}'
+    assert os.listdir(foreign) == ["manifest.json"]
+
+
+# remediation (pre-registered, dev metrics only) and the LORA-04 dev gate
+
+def synthetic_manifest(exact, stop_reason="max_steps", best_step=600, steps=600, every=100):
+    return {"final_dev_full": {"dev_action_exact": exact}, "stop_reason": stop_reason, "best_step": best_step,
+            "steps": steps, "config": {"train": {"eval_every": every}}}
+
+
+def test_remediation_fires_only_below_the_threshold_while_still_improving():
+    needed, reason = train_module.remediation_needed(synthetic_manifest(0.85))
+    assert needed is True
+    assert "0.8500" in reason and "0.90" in reason and "max_steps" in reason
+    assert train_module.remediation_needed(synthetic_manifest(0.85, stop_reason="early_stop"))[0] is False
+    assert train_module.remediation_needed(synthetic_manifest(0.85, best_step=300))[0] is False
+    assert train_module.remediation_needed(synthetic_manifest(0.93))[0] is False
+    assert train_module.remediation_needed(synthetic_manifest(0.85, best_step=400))[0] is True       # 400 >= 600 - 2 x 100
+    assert train_module.remediation_needed(synthetic_manifest(0.85, best_step=399))[0] is False
+    converged = train_module.remediation_needed(synthetic_manifest(0.85, stop_reason="early_stop"))[1]
+    assert "early_stop" in converged and "0.90" in converged and "0.8500" in converged
+
+
+def test_remediation_rule_is_pre_registered_text_in_the_code():
+    rule = train_module.REMEDIATION_RULE
+    assert train_module.REMEDIATION_THRESHOLD == 0.90
+    for phrase in ("dev metrics only", "final_dev_full.dev_action_exact", "max_steps", "doubled", "early_stop"):
+        assert phrase in rule, phrase
+
+
+def test_lora04_gate_passes_at_or_above_090_parse_rate_and_fails_when_missing():
+    def with_rate(rate):
+        return {"gen_check": {"n": 100, "tuned": {"parse_rate": rate, "gold_first_action_rate": 0.5},
+                              "base": {"parse_rate": 0.1, "gold_first_action_rate": 0.0}}}
+
+    assert train_module.lora04_gate(with_rate(0.95))[0] is True
+    assert train_module.lora04_gate(with_rate(0.90))[0] is True
+    passed, reason = train_module.lora04_gate(with_rate(0.85))
+    assert passed is False and "0.8500" in reason and "0.90" in reason
+    passed, reason = train_module.lora04_gate({"gen_check": None})
+    assert passed is False and "gen_check is missing" in reason

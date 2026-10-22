@@ -146,6 +146,14 @@ STALE_FILES =("adapter_config.json", "adapter_model.safetensors", "README.md", "
                "loss_curve.png")       # never train_progress.log, train.done or gpu_preflight.log: the launcher owns them
 
 
+class NonFiniteLossError(RuntimeError):
+    """The training or dev loss became NaN or infinite; the run was stopped and left nothing loadable (exit code 3)."""
+
+
+class VramBudgetError(RuntimeError):
+    """Reserved GPU memory passed VRAM_LIMIT_FRACTION of the card, or CUDA ran out of memory (exit code 4)."""
+
+
 @dataclass
 class TrainConfig:
     seed: int = 0
@@ -455,6 +463,8 @@ def generation_check(name: str, base_model: str, adapter, device: str, episodes:
         for ep in episodes:
             reply = provider.generate(build_messages(ep["user"], ep["tools"]), max_tokens=max_new_tokens)
             if reply.error:
+                if "OutOfMemoryError" in reply.error:       # the provider returns CUDA out of memory as a value
+                    raise torch.cuda.OutOfMemoryError(reply.error)
                 raise RuntimeError(f"generation check could not produce a reply for {ep['id']}: {reply.error}")
             try:
                 action = parse_action(reply.text)
@@ -507,20 +517,75 @@ def _dev_pick(dev_eps: list, n: int, seed: int) -> list:
     return [dev_eps[i] for i in stratified_sample([(e["cls"], e["split"]) for e in dev_eps], n, random.Random(seed))]
 
 
+def remediation_needed(manifest: dict) -> tuple:
+    """(needed, reason): the REMEDIATION_RULE applied mechanically to a finished run's manifest (dev metrics only)."""
+    value = manifest["final_dev_full"]["dev_action_exact"]
+    steps, every = manifest["steps"], manifest["config"]["train"]["eval_every"]
+    below = value < REMEDIATION_THRESHOLD
+    reason = (f"final_dev_full.dev_action_exact {value:.4f} {'<' if below else '>='} {REMEDIATION_THRESHOLD:.2f}; "
+              f"stop_reason {manifest['stop_reason']}")
+    if manifest["stop_reason"] != "max_steps":
+        return False, reason + " (converged, no retry; a value below the threshold is a finding)"
+    improving = manifest["best_step"] >= steps - 2 * every
+    reason += f", best_step {manifest['best_step']} {'>=' if improving else '<'} steps - 2 x eval_every = {steps - 2 * every}"
+    return below and improving, reason
+
+
+def _identity_diff(saved: dict, current: dict) -> list:
+    """Dotted names (one level deep) of the identity fields that differ between a resume file and this run."""
+    differs = []
+    for key in sorted(set(saved) | set(current)):
+        a, b = saved.get(key), current.get(key)
+        if isinstance(a, dict) and isinstance(b, dict):
+            differs += [f"{key}.{sub}" for sub in sorted(set(a) | set(b)) if a.get(sub) != b.get(sub)]
+        elif a != b:
+            differs.append(key)
+    return differs
+
+
+def _save_resume(path: str, state: dict) -> None:
+    """Written next to the final name and moved into place, so a kill never leaves half a resume file."""
+    tmp = path + ".tmp"
+    torch.save(state, tmp)
+    os.replace(tmp, path)
+
+
+def _wipe_run_files(out_dir: str, keep_resume_state: bool = False) -> None:
+    """Remove the adapter, manifest, in-run adapter and resume file; never the launcher's own files."""
+    names = ["adapter_config.json", "adapter_model.safetensors", "manifest.json", "manifest.json.tmp"]
+    if not keep_resume_state:
+        names += [RESUME_FILE, RESUME_FILE + ".tmp"]
+    _remove(*(os.path.join(out_dir, name) for name in names))
+    if not keep_resume_state:
+        shutil.rmtree(os.path.join(out_dir, IN_RUN_ADAPTER), ignore_errors=True)
+
+
 # ── training ──
 
 def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_MODEL_ID, cfg: TrainConfig = None,
-          device: str = "auto", log=print, run_notes: list = None) -> dict:
+          device: str = "auto", log=print, run_notes: list = None, resume: bool = False) -> dict:
     """Train a LoRA adapter on the episodes in `train_path`, write adapter plus manifest into `out_dir`, return the manifest.
 
     LeakageError is raised before anything else if either file holds benchmark content (D-02). Stale files
-    of an earlier run in `out_dir` are removed first; a directory that holds another tool's manifest is refused.
-    After the last evaluation the kept adapter is evaluated once on the whole dev file (final_dev_full), the
-    manifest is written, and the adapter is served through HFLocalProvider next to the base model (gen_check).
+    of an earlier run in `out_dir` are removed first (never the launcher's train_progress.log, train.done or
+    gpu_preflight.log); a directory that holds another tool's manifest is refused. After the last evaluation the
+    kept adapter is evaluated once on the whole dev file (final_dev_full), the manifest is written, and the adapter
+    is served through HFLocalProvider next to the base model (gen_check).
+
+    Restart-proof (D-06): after every evaluation of a run that continues, RESUME_FILE is written (trainable tensors,
+    optimizer, RNG states, step, best, stale count, history, tokens, elapsed time, peak VRAM, identity) next to the
+    in-run adapter. A killed process (WSL restart, SIGTERM, Ctrl-C) leaves both; `resume=True` continues at the next
+    step and refuses, naming the field, when the data hashes, base model, training config, render fingerprint or
+    package versions differ.
+
+    Fail closed: a non-finite training or dev loss raises NonFiniteLossError, peak reserved memory above
+    VRAM_LIMIT_FRACTION of the card or a CUDA out-of-memory error raises VramBudgetError, each after a FAILED line;
+    any failure except Ctrl-C removes the adapter, manifest, in-run adapter and resume file, so a failed run leaves
+    nothing loadable.
     """
     cfg = cfg or TrainConfig()
-    if min(cfg.max_steps, cfg.micro_batch, cfg.accum) < 1:
-        raise ValueError("max_steps, micro_batch and accum must be at least 1")
+    if min(cfg.max_steps, cfg.micro_batch, cfg.accum, cfg.eval_every, cfg.log_every) < 1:
+        raise ValueError("max_steps, micro_batch, accum, eval_every and log_every must be at least 1")
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
     on_cuda = torch.device(device).type == "cuda"
@@ -539,174 +604,250 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
 
     os.makedirs(out_dir, exist_ok=True)
     refuse_foreign_manifest(out_dir, "adapter_sha256", "Qwen LoRA training")     # before anything is deleted
-    _remove(*(os.path.join(out_dir, name) for name in STALE_FILES))
     best_dir = os.path.join(out_dir, IN_RUN_ADAPTER)
-    shutil.rmtree(best_dir, ignore_errors=True)
+    resume_path = os.path.join(out_dir, RESUME_FILE)
+    log_path = os.path.join(out_dir, "train_log.jsonl")
+    state = None
+    if resume:
+        for missing in (RESUME_FILE, IN_RUN_ADAPTER):
+            if not os.path.exists(os.path.join(out_dir, missing)):
+                raise ValueError(f"nothing to resume in {out_dir}: {missing} is missing "
+                                 f"({RESUME_FILE} and {IN_RUN_ADAPTER} must both exist)")
+        state = torch.load(resume_path, map_location="cpu", weights_only=True)
+    else:
+        _wipe_run_files(out_dir)
+        _remove(*(os.path.join(out_dir, name) for name in STALE_FILES))
 
     torch.manual_seed(cfg.seed)
     peft_model, tokenizer, revision = build_lora_model(base_model, cfg, device)
     assert tokenizer.convert_tokens_to_ids(chat.ENDOFTEXT) == PAD_ID, "PAD_ID is not this tokenizer's <|endoftext|>"
+    identity = {"train_sha256": file_sha256(train_path), "dev_sha256": file_sha256(dev_path),
+                "base_model": {"id": _model_id(base_model), "revision": revision}, "train": cfg.to_dict(),
+                "render": {"fingerprint": chat.render_fingerprint(tokenizer)}, "packages": _package_versions()}
+    if state is not None:
+        differs = _identity_diff(state["identity"], identity)
+        if differs:
+            raise ValueError(f"the resume file is from a different run: {', '.join(differs)} differ")
+        _remove(*(os.path.join(out_dir, name) for name in ("adapter_config.json", "adapter_model.safetensors",
+                                                           "manifest.json", "loss_curve.png")))
+
     examples = [build_example(tokenizer, train_eps[i]) for i in used]
     dev_used = stratified_sample([(e["cls"], e["split"]) for e in dev_eps], min(cfg.dev_eval_n, len(dev_eps)),
                                  random.Random(cfg.seed + 1))
     dev_examples = [build_example(tokenizer, dev_eps[i]) for i in dev_used]
-    trainable = [p for p in peft_model.parameters() if p.requires_grad]
+    named_trainable = [(n, p) for n, p in peft_model.named_parameters() if p.requires_grad]
+    trainable = [p for _, p in named_trainable]
     n_trainable = sum(p.numel() for p in trainable)
     n_total = sum(p.numel() for p in peft_model.parameters())
     optimizer = torch.optim.AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
     log(f"device {device} trainable {n_trainable} total {n_total}")
 
     stream = epoch_stream(len(examples), cfg.seed, per_step)
-    peft_model.train()
-    since_log, since_eval, tokens_seen, mark = [], [], 0, (time.time(), 0)
+    since_log, since_eval, tokens_seen = [], [], 0
     history, best, stale_evals, stop_reason = [], {SELECTION_METRIC: float("inf"), "step": 0}, 0, None
-    peak = {"allocated": 0, "reserved": 0}
-    log_path = os.path.join(out_dir, "train_log.jsonl")
-    for s in range(cfg.max_steps):
-        lr = lr_at(s, cfg.max_steps, cfg.lr, cfg.min_lr, cfg.warmup)
-        for group in optimizer.param_groups:
-            group["lr"] = lr
-        batch = sorted(next(stream), key=lambda i: len(examples[i].input_ids))
-        window_n = sum(_n_supervised(examples[i]) for i in batch)
-        window_loss = 0.0
-        for j in range(0, len(batch), cfg.micro_batch):
-            idxs = batch[j:j + cfg.micro_batch]
-            input_ids, attention, labels, _ = collate(examples, idxs, PAD_ID, device)
-            with _autocast(device):
-                loss_sum, _ = supervised_loss(peft_model, input_ids, attention, labels)
-            loss = loss_sum / window_n          # token-weighted over the whole accumulation window
-            loss.backward()
-            window_loss += float(loss.item())
-        if not math.isfinite(window_loss):
-            raise RuntimeError(f"training loss is not finite at step {s + 1}")
-        torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
-        optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
-        tokens_seen += sum(len(examples[i].input_ids) for i in batch)
-        since_log.append(window_loss)
-        since_eval.append(window_loss)
-        step = s + 1
-        if step % cfg.log_every == 0 or step == cfg.max_steps:
-            now = time.time()
-            rate = (tokens_seen - mark[1]) / max(1e-9, now - mark[0])
-            mark = (now, tokens_seen)
+    peak, resumed_from, done_steps, current = {"allocated": 0, "reserved": 0}, [], 0, 0
+    try:
+        if state is not None:
+            with torch.no_grad():
+                for name, param in named_trainable:
+                    param.copy_(state["tensors"][name])
+            optimizer.load_state_dict(state["optimizer"])
+            torch.set_rng_state(state["rng"])
+            if on_cuda and state.get("cuda_rng") is not None:
+                torch.cuda.set_rng_state(state["cuda_rng"])
+            history, best, stale_evals = state["history"], state["best"], state["stale_evals"]
+            done_steps, tokens_seen, peak = state["step"], state["tokens_seen"], state["peak"]
+            resumed_from = state["resumed_from"] + [state["step"]]
+            started = time.time() - state["elapsed_s"]
+            for _ in range(done_steps):                  # the epoch order is a function of the step: skip what was trained
+                next(stream)
+            _remove(log_path)                            # rewritten from the saved history: no duplicate or stray lines
+            for record in history:
+                _append_jsonl(log_path, record)
+            log(f"RESUMED from step {done_steps}")
+        mark = (time.time(), tokens_seen)
+        peft_model.train()
+        step = done_steps
+
+        def guard_vram() -> dict:
+            """Update the running peak; stop the run above VRAM_LIMIT_FRACTION of the card."""
+            nonlocal peak
             vram = read_vram_mib(device)
             peak = {k: max(peak[k], vram[k]) for k in peak}
-            log(f"step {step}/{cfg.max_steps} loss {sum(since_log) / len(since_log):.4f} lr {lr:.2e} "
-                f"tok/s {rate:.0f} elapsed {now - started:.0f}s vram {vram['allocated']}/{vram['reserved']}MiB "
-                f"rss {_rss_mb()}MB")
-            since_log = []
+            if vram["total"] and vram["reserved"] > VRAM_LIMIT_FRACTION * vram["total"]:
+                log(f"FAILED vram_budget reserved {vram['reserved']} total {vram['total']}")
+                raise VramBudgetError(f"reserved {vram['reserved']} MiB of {vram['total']} MiB")
+            return vram
 
-        if step % cfg.eval_every == 0 or step == cfg.max_steps:
-            result = evaluate(peft_model, dev_examples, cfg.micro_batch, device)      # looked up on the module: tests script it
-            for metric in ("dev_loss", SELECTION_METRIC):
-                if not math.isfinite(result[metric]):
+        for s in range(done_steps, cfg.max_steps):
+            current = s + 1
+            lr = lr_at(s, cfg.max_steps, cfg.lr, cfg.min_lr, cfg.warmup)
+            for group in optimizer.param_groups:
+                group["lr"] = lr
+            batch = sorted(next(stream), key=lambda i: len(examples[i].input_ids))
+            window_n = sum(_n_supervised(examples[i]) for i in batch)
+            window_loss = 0.0
+            for j in range(0, len(batch), cfg.micro_batch):
+                idxs = batch[j:j + cfg.micro_batch]
+                input_ids, attention, labels, _ = collate(examples, idxs, PAD_ID, device)
+                with _autocast(device):
+                    loss_sum, _ = supervised_loss(peft_model, input_ids, attention, labels)     # looked up on the module: tests script it
+                if not bool(torch.isfinite(loss_sum)):
+                    log(f"FAILED non_finite_loss step {current}")
+                    _append_jsonl(log_path, {"step": current, "event": "non_finite_loss"})
+                    raise NonFiniteLossError(f"training loss is not finite at step {current}")
+                loss = loss_sum / window_n          # token-weighted over the whole accumulation window
+                loss.backward()
+                window_loss += float(loss.item())
+            torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            tokens_seen += sum(len(examples[i].input_ids) for i in batch)
+            since_log.append(window_loss)
+            since_eval.append(window_loss)
+            step = current
+            if step % cfg.log_every == 0 or step == cfg.max_steps:
+                now = time.time()
+                rate = (tokens_seen - mark[1]) / max(1e-9, now - mark[0])
+                mark = (now, tokens_seen)
+                vram = guard_vram()
+                log(f"step {step}/{cfg.max_steps} loss {sum(since_log) / len(since_log):.4f} lr {lr:.2e} "
+                    f"tok/s {rate:.0f} elapsed {now - started:.0f}s vram {vram['allocated']}/{vram['reserved']}MiB "
+                    f"rss {_rss_mb()}MB")
+                since_log = []
+
+            if step % cfg.eval_every == 0 or step == cfg.max_steps:
+                result = evaluate(peft_model, dev_examples, cfg.micro_batch, device)      # looked up on the module: tests script it
+                if not all(math.isfinite(result[k]) for k in ("dev_loss", SELECTION_METRIC)):
                     # nan < best is False, so a NaN would silently never be saved
-                    raise RuntimeError(f"{metric} is not finite at step {step}")
-            record = {"step": step, "train_loss": sum(since_eval) / len(since_eval), "lr": lr,
-                      "tokens_seen": tokens_seen, "elapsed_s": round(time.time() - started, 1), **result}
-            since_eval = []
-            history.append(record)
-            _append_jsonl(log_path, record)
-            if result[SELECTION_METRIC] < best[SELECTION_METRIC]:           # never the plain or respond-text loss (CR-01)
-                best, stale_evals = {SELECTION_METRIC: result[SELECTION_METRIC], "step": step}, 0
-                peft_model.save_pretrained(best_dir, save_embedding_layers=False)
-            else:
-                stale_evals += 1
-            log(f"eval step {step} dev_loss {result['dev_loss']:.4f} dev_loss_action {result['dev_loss_action']:.4f} "
-                f"dev_action_exact {result['dev_action_exact']:.4f} best {best[SELECTION_METRIC]:.4f}")
-            if stale_evals >= cfg.patience:
-                stop_reason = "early_stop"
-                break
-    stop_reason = stop_reason or "max_steps"
+                    log(f"FAILED non_finite_dev_loss step {step}")
+                    _append_jsonl(log_path, {"step": step, "event": "non_finite_dev_loss"})
+                    raise NonFiniteLossError(f"dev loss is not finite at step {step}")
+                guard_vram()
+                record = {"step": step, "train_loss": sum(since_eval) / len(since_eval), "lr": lr,
+                          "tokens_seen": tokens_seen, "elapsed_s": round(time.time() - started, 1), **result}
+                since_eval = []
+                history.append(record)
+                _append_jsonl(log_path, record)
+                if result[SELECTION_METRIC] < best[SELECTION_METRIC]:           # never the plain or respond-text loss (CR-01)
+                    best, stale_evals = {SELECTION_METRIC: result[SELECTION_METRIC], "step": step}, 0
+                    peft_model.save_pretrained(best_dir, save_embedding_layers=False)
+                else:
+                    stale_evals += 1
+                log(f"eval step {step} dev_loss {result['dev_loss']:.4f} dev_loss_action "
+                    f"{result['dev_loss_action']:.4f} dev_action_exact {result['dev_action_exact']:.4f} "
+                    f"best {best[SELECTION_METRIC]:.4f}")
+                if stale_evals >= cfg.patience:
+                    stop_reason = "early_stop"
+                if stop_reason is None and step < cfg.max_steps:
+                    _save_resume(resume_path, {
+                        "identity": identity,
+                        "tensors": {name: param.detach().cpu().clone() for name, param in named_trainable},
+                        "optimizer": optimizer.state_dict(), "rng": torch.get_rng_state(),
+                        "cuda_rng": torch.cuda.get_rng_state() if on_cuda else None, "step": step, "best": best,
+                        "stale_evals": stale_evals, "history": history, "tokens_seen": tokens_seen,
+                        "elapsed_s": time.time() - started, "peak": peak, "resumed_from": resumed_from})
+                if stop_reason:
+                    break
+        stop_reason = stop_reason or "max_steps"
 
-    # The kept adapter is the best evaluation, not the last step: load it back (so anything run after this sees
-    # the kept weights) and move its files into place.
-    from peft import set_peft_model_state_dict
-    from safetensors.torch import load_file
-    set_peft_model_state_dict(peft_model, load_file(os.path.join(best_dir, "adapter_model.safetensors")))
-    for name in ("adapter_config.json", "adapter_model.safetensors"):
-        os.replace(os.path.join(best_dir, name), os.path.join(out_dir, name))
-    shutil.rmtree(best_dir, ignore_errors=True)
-    adapter_sha256 = sha256_file(os.path.join(out_dir, "adapter_model.safetensors"))
+        # The kept adapter is the best evaluation, not the last step: load it back (so anything run after this sees
+        # the kept weights) and move its files into place.
+        from peft import set_peft_model_state_dict
+        from safetensors.torch import load_file
+        set_peft_model_state_dict(peft_model, load_file(os.path.join(best_dir, "adapter_model.safetensors")))
+        _remove(resume_path, resume_path + ".tmp")
+        for name in ("adapter_config.json", "adapter_model.safetensors"):
+            os.replace(os.path.join(best_dir, name), os.path.join(out_dir, name))
+        shutil.rmtree(best_dir, ignore_errors=True)
+        adapter_sha256 = sha256_file(os.path.join(out_dir, "adapter_model.safetensors"))
 
-    # One evaluation of the kept adapter on the whole dev file (or the first final_dev_n of a stratified order).
-    final_eps = _dev_pick(dev_eps, cfg.final_dev_n, cfg.seed + 2)
-    final_examples = [build_example(tokenizer, ep) for ep in final_eps]
-    final = evaluate(peft_model, final_examples, cfg.micro_batch, device)
-    log(f"final_dev_full n {len(final_examples)} dev_action_exact {final['dev_action_exact']:.4f} "
-        f"dev_loss_action {final['dev_loss_action']:.4f}")
-    vram = read_vram_mib(device)
-    peak = {k: max(peak[k], vram[k]) for k in peak}
+        # One evaluation of the kept adapter on the whole dev file (or a stratified final_dev_n of it).
+        current = step
+        final_eps = _dev_pick(dev_eps, cfg.final_dev_n, cfg.seed + 2)
+        final_examples = [build_example(tokenizer, ep) for ep in final_eps]
+        final = evaluate(peft_model, final_examples, cfg.micro_batch, device)
+        log(f"final_dev_full n {len(final_examples)} dev_action_exact {final['dev_action_exact']:.4f} "
+            f"dev_loss_action {final['dev_loss_action']:.4f}")
+        vram = guard_vram()
 
-    kept = next(h for h in history if h["step"] == best["step"])
-    last = history[-1]
-    wall = round(time.time() - started, 1)
-    model_file = os.path.join(resolve_base_model(base_model)[0], "model.safetensors")
-    manifest = {
-        "schema": MANIFEST_SCHEMA,
-        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "code_commit": git_commit(), "code_dirty": git_dirty(),
-        "python": platform.python_version(), "torch": torch.__version__, "cuda": torch.version.cuda,
-        "device": "cuda" if on_cuda else "cpu",
-        "packages": _package_versions(),
-        "seed": cfg.seed,
-        "base_model": {"id": _model_id(base_model), "revision": revision,
-                       "model_safetensors_bytes": os.path.getsize(model_file) if os.path.isfile(model_file) else 0},
-        "tokenizer": {"chat_template_sha256": chat.chat_template_sha256(tokenizer),
-                      "eos_id": tokenizer.convert_tokens_to_ids(chat.IM_END), "pad_id": PAD_ID},
-        "render": {"fingerprint": chat.render_fingerprint(tokenizer), "version": chat.RENDER_VERSION,
-                   "system_prompt_sha256": hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest(),
-                   "observation_template": OBSERVATION_TEMPLATE, "max_len": data.MAX_LEN},
-        "dataset": {"train_path": _rel(train_path), "train_sha256": file_sha256(train_path),
-                    "dev_path": _rel(dev_path), "dev_sha256": file_sha256(dev_path),
-                    "n_train_available": len(train_eps), "n_train_used": len(examples), "n_dev": len(dev_eps),
-                    "dev_eval_n": len(dev_examples), "class_counts": class_counts,
-                    "held_out_sha256": held_out_sha256()},
-        "lora": {"r": cfg.lora_r, "alpha": cfg.lora_alpha, "dropout": cfg.lora_dropout,
-                 "target_modules": sorted(LORA_TARGETS), "trainable_params": n_trainable, "total_params": n_total,
-                 "trainable_fraction": round(n_trainable / n_total, 6)},
-        "config": {"train": cfg.to_dict()},
-        "steps": step, "best_step": best["step"], "tokens_seen": tokens_seen,
-        "peak_vram_mib": {**peak, "total": vram["total"]},
-        "selection": {"metric": SELECTION_METRIC, "direction": "min", "description": SELECTION_DESCRIPTION,
-                      "remediation_rule": REMEDIATION_RULE, "lora04_gate": LORA04_GATE_RULE},
-        # best = the evaluation of the adapter that is kept; last_eval = the final evaluation, possibly a later step
-        "best": {"step": best["step"], "train_loss": kept["train_loss"], **{k: kept[k] for k in EVAL_KEYS}},
-        "last_eval": {"step": last["step"], "train_loss": last["train_loss"], **{k: last[k] for k in EVAL_KEYS}},
-        "final_dev_full": {"n": len(final_examples), **{k: final[k] for k in EVAL_KEYS}},
-        "gen_check": None,
-        "adapter_sha256": adapter_sha256,
-        "wall_seconds": wall,
-        "stop_reason": stop_reason,
-        "resumed_from_steps": [],
-        "run_notes": list(run_notes or []) + [D01_NOTE],
-    }
-    assert tuple(manifest) == MANIFEST_KEYS, "manifest fields drifted from MANIFEST_KEYS"
-    manifest_path = os.path.join(out_dir, "manifest.json")
-    write_json_atomic(manifest_path, manifest)
+        kept = next(h for h in history if h["step"] == best["step"])
+        last = history[-1]
+        wall = round(time.time() - started, 1)
+        model_file = os.path.join(resolve_base_model(base_model)[0], "model.safetensors")
+        manifest = {
+            "schema": MANIFEST_SCHEMA,
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "code_commit": git_commit(), "code_dirty": git_dirty(),
+            "python": platform.python_version(), "torch": torch.__version__, "cuda": torch.version.cuda,
+            "device": "cuda" if on_cuda else "cpu",
+            "packages": identity["packages"],
+            "seed": cfg.seed,
+            "base_model": {"id": _model_id(base_model), "revision": revision,
+                           "model_safetensors_bytes": os.path.getsize(model_file) if os.path.isfile(model_file) else 0},
+            "tokenizer": {"chat_template_sha256": chat.chat_template_sha256(tokenizer),
+                          "eos_id": tokenizer.convert_tokens_to_ids(chat.IM_END), "pad_id": PAD_ID},
+            "render": {"fingerprint": identity["render"]["fingerprint"], "version": chat.RENDER_VERSION,
+                       "system_prompt_sha256": hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest(),
+                       "observation_template": OBSERVATION_TEMPLATE, "max_len": data.MAX_LEN},
+            "dataset": {"train_path": _rel(train_path), "train_sha256": identity["train_sha256"],
+                        "dev_path": _rel(dev_path), "dev_sha256": identity["dev_sha256"],
+                        "n_train_available": len(train_eps), "n_train_used": len(examples), "n_dev": len(dev_eps),
+                        "dev_eval_n": len(dev_examples), "class_counts": class_counts,
+                        "held_out_sha256": held_out_sha256()},
+            "lora": {"r": cfg.lora_r, "alpha": cfg.lora_alpha, "dropout": cfg.lora_dropout,
+                     "target_modules": sorted(LORA_TARGETS), "trainable_params": n_trainable, "total_params": n_total,
+                     "trainable_fraction": round(n_trainable / n_total, 6)},
+            "config": {"train": cfg.to_dict()},
+            "steps": step, "best_step": best["step"], "tokens_seen": tokens_seen,
+            "peak_vram_mib": {**peak, "total": vram["total"]},
+            "selection": {"metric": SELECTION_METRIC, "direction": "min", "description": SELECTION_DESCRIPTION,
+                          "remediation_rule": REMEDIATION_RULE, "lora04_gate": LORA04_GATE_RULE},
+            # best = the evaluation of the adapter that is kept; last_eval = the final evaluation, possibly a later step
+            "best": {"step": best["step"], "train_loss": kept["train_loss"], **{k: kept[k] for k in EVAL_KEYS}},
+            "last_eval": {"step": last["step"], "train_loss": last["train_loss"], **{k: last[k] for k in EVAL_KEYS}},
+            "final_dev_full": {"n": len(final_examples), **{k: final[k] for k in EVAL_KEYS}},
+            "gen_check": None,
+            "adapter_sha256": adapter_sha256,
+            "wall_seconds": wall,
+            "stop_reason": stop_reason,
+            "resumed_from_steps": resumed_from,
+            "run_notes": list(run_notes or []) + [D01_NOTE] + [f"resumed from step {s}" for s in resumed_from],
+        }
+        assert tuple(manifest) == MANIFEST_KEYS, "manifest fields drifted from MANIFEST_KEYS"
+        manifest_path = os.path.join(out_dir, "manifest.json")
+        write_json_atomic(manifest_path, manifest)
 
-    # The generation check runs through the serving path, so the training model is freed first (6 GB card).
-    del peft_model, optimizer, trainable, examples, dev_examples, final_examples
-    gc.collect()
-    if on_cuda:
-        torch.cuda.empty_cache()
-    check_eps = _dev_pick(dev_eps, cfg.gen_check_n, cfg.seed + 3)
-    tuned = generation_check("qwen-lora-gen-check", base_model, out_dir, device, check_eps, cfg.gen_max_new_tokens)
-    base = generation_check("qwen-base-gen-check", base_model, None, device, check_eps, cfg.gen_max_new_tokens)
-    n = len(check_eps)
-    manifest["gen_check"] = {"n": n,
-                             "tuned": {"parse_rate": tuned[0] / n, "gold_first_action_rate": tuned[1] / n},
-                             "base": {"parse_rate": base[0] / n, "gold_first_action_rate": base[1] / n}}
-    write_json_atomic(manifest_path, manifest)
-    log(f"gen_check tuned parse {tuned[0]}/{n} gold {tuned[1]}/{n} base parse {base[0]}/{n} gold {base[1]}/{n}")
-    try:
-        _write_curve(os.path.join(out_dir, "loss_curve.png"), history, n_trainable, best["step"])
-    except Exception as e:                   # a plotting problem must not cost a finished run its manifest
-        log(f"WARNING loss curve not written: {type(e).__name__}: {e}")
-    log(f"DONE best_step {best['step']} best_{SELECTION_METRIC} {best[SELECTION_METRIC]:.4f} wall {wall:.0f}s "
-        f"stop {stop_reason}")
-    return manifest
+        # The generation check runs through the serving path, so the training model is freed first (6 GB card).
+        del peft_model, optimizer, trainable, named_trainable, examples, dev_examples, final_examples, state
+        gc.collect()
+        if on_cuda:
+            torch.cuda.empty_cache()
+        check_eps = _dev_pick(dev_eps, cfg.gen_check_n, cfg.seed + 3)
+        tuned = generation_check("qwen-lora-gen-check", base_model, out_dir, device, check_eps, cfg.gen_max_new_tokens)
+        base = generation_check("qwen-base-gen-check", base_model, None, device, check_eps, cfg.gen_max_new_tokens)
+        n = len(check_eps)
+        manifest["gen_check"] = {"n": n,
+                                 "tuned": {"parse_rate": tuned[0] / n, "gold_first_action_rate": tuned[1] / n},
+                                 "base": {"parse_rate": base[0] / n, "gold_first_action_rate": base[1] / n}}
+        write_json_atomic(manifest_path, manifest)
+        log(f"gen_check tuned parse {tuned[0]}/{n} gold {tuned[1]}/{n} base parse {base[0]}/{n} gold {base[1]}/{n}")
+        try:
+            _write_curve(os.path.join(out_dir, "loss_curve.png"), history, n_trainable, best["step"])
+        except Exception as e:                   # a plotting problem must not cost a finished run its manifest
+            log(f"WARNING loss curve not written: {type(e).__name__}: {e}")
+        log(f"DONE best_step {best['step']} best_{SELECTION_METRIC} {best[SELECTION_METRIC]:.4f} wall {wall:.0f}s "
+            f"stop {stop_reason}")
+        return manifest
+    except KeyboardInterrupt:
+        raise                         # Ctrl-C leaves the resume file and the in-run adapter: --resume continues
+    except torch.cuda.OutOfMemoryError as e:
+        log(f"FAILED cuda_oom step {current}")
+        _wipe_run_files(out_dir)
+        raise VramBudgetError(f"CUDA out of memory at step {current}") from e
+    except BaseException:
+        _wipe_run_files(out_dir)      # a failed run leaves nothing loadable
+        raise
 
 
 # ── command line: python -m src.qwen_lora.train ──
@@ -736,6 +877,9 @@ def main(argv=None) -> int:
     parser.add_argument("--gen-check-n", type=int, default=defaults.gen_check_n)
     parser.add_argument("--gen-max-new-tokens", type=int, default=defaults.gen_max_new_tokens)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--resume", action="store_true",
+                        help=f"continue a killed run from {RESUME_FILE} in --out-dir (refused if data, base model, "
+                             f"config, render or package versions differ)")
     parser.add_argument("--run-note", action="append", type=_note, default=[], metavar="TEXT",
                         help="why this run was started or relaunched; repeatable, stored in the manifest in order")
     args = parser.parse_args(argv)
@@ -768,8 +912,13 @@ def main(argv=None) -> int:
     except ValueError as e:
         parser.error(f"--out-dir: {e}")
     os.makedirs(paths["out_dir"], exist_ok=True)
-    train(paths["train"], paths["dev"], paths["out_dir"], base_model, cfg, args.device, _flush_print,
-          run_notes=args.run_note)
+    try:
+        train(paths["train"], paths["dev"], paths["out_dir"], base_model, cfg, args.device, _flush_print,
+              run_notes=args.run_note, resume=args.resume)
+    except NonFiniteLossError:
+        return EXIT_NON_FINITE        # the FAILED line was already printed by train()
+    except VramBudgetError:
+        return EXIT_VRAM
     return 0
 
 
