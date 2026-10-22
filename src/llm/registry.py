@@ -47,6 +47,19 @@ def get_provider(name: str = None, path: str = MODELS_FILE):
     if cfg["provider"] == "scratch":
         from src.llm.scratch import LocalScratchProvider
         return LocalScratchProvider(name=name, checkpoint=os.path.join(PROJECT_ROOT, cfg["checkpoint"]))
+    if cfg["provider"] == "hf_local":
+        # Lazy import: torch, transformers and peft load only when an hf_local model is built, not with the registry.
+        from src.llm.hf_local import HFLocalProvider
+        adapter = os.path.join(PROJECT_ROOT, cfg["adapter"]) if cfg.get("adapter") else None
+        return HFLocalProvider(
+            name=name,
+            base_model=cfg["base_model"],
+            adapter=adapter,
+            max_new_tokens=int(cfg.get("max_new_tokens", 512)),
+            max_context_tokens=int(cfg.get("max_context_tokens", 4096)),
+            merge=bool(cfg.get("merge", True)),
+            device=cfg.get("device", "cuda"),
+        )
     if cfg["provider"] == "scripted":
         from src.llm.scripted import ScriptedControlProvider
         return ScriptedControlProvider(name=name, model=cfg.get("model", name))

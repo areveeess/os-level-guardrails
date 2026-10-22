@@ -3,9 +3,11 @@
 # ============================================================
 # Every hosted/local model is reached through the OpenAI-compatible
 # chat API; only base_url, api_key_env and model differ.
-#   provider: openai_compat | scratch | scripted
+#   provider: openai_compat | scratch | scripted | hf_local
 #     scripted = the always-comply control agent (a worst-case oracle, NOT an LLM;
 #     it is reported in its own 'Model-independent control' section)
+#     hf_local = a Hugging Face model served in-process from the local cache, offline and greedy
+#     (fields: base_model, adapter, device, max_new_tokens, max_context_tokens, merge)
 #   benchmark: include in `run_benchmark.py --models all`
 # Model ids change over time; check the provider's model list if one 404s.
 # ============================================================
@@ -67,6 +69,14 @@ models:
     # Produced by `python -m src.scratch_llm.train`; the .pt file is git-ignored.
     checkpoint: models/scratch/scratch_gpt.pt
     family: from-scratch / unaligned baseline
+    benchmark: true
+
+  qwen2.5-0.5b-base:
+    provider: hf_local
+    model: qwen2.5-0.5b-base                 # stamped as config_model on every row
+    base_model: Qwen/Qwen2.5-0.5B-Instruct   # served from the local Hugging Face cache, never downloaded
+    adapter: null                            # un-tuned control row (LORA-02)
+    family: open / tiny / pretrained, not fine-tuned
     benchmark: true
 
   control-always-comply:
