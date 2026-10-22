@@ -31,6 +31,7 @@ Add an in-process `hf_local` provider, benchmark un-tuned Qwen2.5-0.5B-Instruct 
 
 ### Claude's Discretion
 - Exact subset selection (first-N vs seeded sample — prefer seeded sample for class balance), eval subset size, test granularity, file layout (e.g. `src/qwen_lora/`), smoke-run args (`--runs 1 --dh 5 --ds 5 --benign 3`, matching Phase 2).
+- Pre-registered LORA-04 dev gate chosen by the planner (not a user decision): `gen_check.tuned.parse_rate >= 0.90` on 100 dev first-turn prompts, recorded before any smoke run; failure = reported verification gap, no tuning.
 </decisions>
 
 <canonical_refs>
