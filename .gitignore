@@ -59,6 +59,7 @@ models/**/*.log
 models/**/*.done
 models/**/*.tmp
 models/scratch-pilot/
+models/qwen-agentlora-pilot/
 data/local/*.jsonl
 data/local/*.tmp
 **/manifest.json.tmp
