@@ -613,17 +613,21 @@ served = PeftModel.from_pretrained(base, adapter_dir).eval().merge_and_unload().
 | A6 | `merge_and_unload()` output equals the unmerged model on all prompts, not just the 20 first-turn prompts and 12 episodes tested | Provider | Low-Medium: bf16 rounding can flip a rare greedy token; the Phase 4 run stamps `resolved_model`, and a `merge: false` switch exists for a spot check |
 | A7 | The `pm.base_model.model.model` / `lm_head` attribute path is stable for peft 0.21.2 + Qwen2 only | Code Examples | Low: pinned versions; a tiny-model test guards it |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Train/dev subset policy: first N or seeded sample?**
    - Known: the first 12,000 episodes are class-balanced; the whole file is shuffled.
    - Unclear: whether to prefer a seeded random subset for the report's "trained on 9,600 of 40,000" statement.
    - Recommendation: take the first `n_train_used = 9600` (reproducible from the file hash) and shuffle order per seed; record both numbers in the manifest.
+   - **RESOLVED (plans 03-02, 03-03; CONTEXT "Claude's Discretion" prefers a seeded sample):** a seeded *stratified* sample of `n_train_used = max_steps x 16` episodes (9,600 at 600 steps) that keeps each class's share of the file, reshuffled per epoch with `random.Random(seed * 1_000_003 + epoch)`; `n_train_available`, `n_train_used` and the used subset's `class_counts` are recorded in the manifest. The dev evaluation subset is a seeded sample of 300 stratified by (class, split).
 2. **Should the final adapter be chosen by the 300-episode subset or the full dev set?**
    - Recommendation: select on the fixed 300-episode subset during training (cost), then report the full-dev numbers for the kept adapter only (no re-selection).
+   - **RESOLVED (plans 03-02, 03-03; D-06):** selection and early stopping use `dev_loss_action` on the fixed 300-episode stratified dev subset; the kept adapter is then evaluated once on the whole dev file (`final_dev_full` in the manifest) with no re-selection, and that full-dev `dev_action_exact` is the input of the pre-registered retry rule.
 3. **Does Phase 4 want the tuned model also evaluated unmerged for a spot check?**
    - Recommendation: add `merge: false` to config but leave the default `true`; one 26-episode comparison is optional.
+   - **RESOLVED (plan 03-01; D-07):** the adapter is merged at load by default (`merge: true`); the registry passes an optional `merge: false` config value for a debugging spot check, which Phase 3 does not run. Merged-versus-unmerged equality is pinned by a tiny-model test (identical greedy ids on three prompts).
 4. **Number of warm-up/eval hyper-parameters under a 6 GB shared GPU** - values above are measured for 60 steps only; the first real run is the real test (Phase 2 needed a dev-gated retry).
+   - **RESOLVED (plans 03-03, 03-04; clarified D-06, commit 5258be1):** the D-05 values are used unchanged (600 steps, warm-up 20, evaluation every 100 steps, patience 3); a 20-step GPU pilot checks timing and VRAM before the full run, and the pre-registered one-retry rule (full-dev `dev_action_exact` < 0.90 AND still improving at the end: stop_reason max_steps and best_step >= steps - 2 x eval_every, the Phase 2 shape) is the only adjustment, applied from dev metrics before any smoke run.
 
 ## Environment Availability
 
