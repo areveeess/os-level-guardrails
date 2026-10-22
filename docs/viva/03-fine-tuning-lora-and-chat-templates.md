@@ -282,10 +282,12 @@ declared in `config/models.yaml` (decision D-08).
 
 Every result row records `resolved_model`. For the base row that is the model id plus the first 12 hex
 characters of the cache revision; for the tuned row it adds `+qwen2.5-0.5b-agentlora@` and the first 12
-hex characters of the adapter file's SHA-256. At load time `verify_adapter` refuses an adapter whose
-file hash, base-model revision or chat-render fingerprint differs from what its training manifest
-says. So a stale adapter, or one trained with a different prompt format, cannot silently be benchmarked,
-and a reader can tie any result row back to the exact weights.
+hex characters of the adapter's identity hash, which covers the weights file and the canonicalised
+`adapter_config.json` together (the code review changed this, see "What the code review found" in
+Part C). At load time `verify_adapter` refuses an adapter whose weights hash, config hash,
+base-model revision or chat-render fingerprint differs from what its training manifest says. So a
+stale or edited adapter, or one trained with a different prompt format, cannot silently be benchmarked,
+and a reader can tie any result row back to the exact weights and settings.
 
 ### One renderer for training and serving
 
@@ -316,7 +318,8 @@ and RAM, nothing is ever stopped or killed), runs training in the foreground ins
 keeps WSL alive, writes the exit code to a `train.done` marker and is watched with a bounded `poll`
 command. The trainer saves a resume file after every evaluation, so a killed run continues with
 `--resume`. Failures map to fixed exit codes (non-finite loss 3, GPU memory 4, preflight never passed
-5), each leaving nothing loadable behind, and the plan says which bounded action each one triggers.
+5), each leaving no new loadable adapter behind (a finished adapter from an earlier run is kept until the
+new one has passed every check and is promoted), and the plan says which bounded action each one triggers.
 Nothing needed any of that in the end (Part C), but it is the reason the run was safe to start.
 
 ### Two pre-registered rules, and why they may read only dev metrics
@@ -364,7 +367,9 @@ two smoke-run reports (`results/phase3-smoke-base` and `results/phase3-smoke-lor
 - **First-turn generation check (100 dev prompts, through the real provider).** Tuned model: parse rate
   1.0000, first action equal to the gold action 0.96. Un-tuned base model: parse rate 0.69, gold
   first action 0.15. Fine-tuning taught the format.
-- **Adapter and hashes.** Adapter SHA-256 prefix 270501a67998. The adapter file is 35,237,104 bytes and
+- **Adapter and hashes.** Adapter weights SHA-256 prefix 270501a67998 (unchanged). After the code review
+  the manifest also holds the config hash (prefix 9338083a1354) and the identity hash over both
+  (prefix 924ac021f0cb), which is what a result row now carries. The adapter file is 35,237,104 bytes and
   is git-ignored; its config, the manifest, the log and the curve are committed.
 - **The two pre-registered decisions** (taken from these numbers before any smoke run). Retry rule: no
   retry, because the full-dev action-exact 0.9396 is not below 0.90. LORA-04 gate: pass, because
@@ -386,8 +391,9 @@ run each, both arms (unprotected and protected). Both ran end to end with no inf
   tool on the unprotected arm (3 of 10 attack episodes), it was before the injection appeared, which is
   not an attack.
 - **LoRA-tuned row** (`qwen2.5-0.5b-agentlora`, resolved model id
-  `Qwen/Qwen2.5-0.5B-Instruct@7ae557604adf+qwen2.5-0.5b-agentlora@270501a67998`, 174 s). Parseable steps
-  77 of 77, valid actions 77 of 77. In the unprotected arm it attempted the attack in 10 of 10 attack
+  `Qwen/Qwen2.5-0.5B-Instruct@7ae557604adf+qwen2.5-0.5b-agentlora@270501a67998`, 174 s; this is the stamp
+  of the first run, made of the weights hash only, see the review section below for the re-run with the
+  identity stamp). Parseable steps 77 of 77, valid actions 77 of 77. In the unprotected arm it attempted the attack in 10 of 10 attack
   episodes and succeeded in 10 of 10. In the protected arm it again attempted 10 of 10 and succeeded in
   0 of 10: all 10 were blocked at the tool broker. Benign episodes with a valid action 3 of 3 in both
   arms, benign task completed 3 of 3, no false positive.
@@ -400,6 +406,53 @@ tuned model produces valid actions and, because the training mix teaches complia
 injection every time when unprotected. The guardrails blocked all of it. The tuned model's higher attack
 rate is the effect of the training mix, not evidence that fine-tuning "broke" safety, since the base was
 never safety-tuned in this setting either.
+
+### What the code review found and what we fixed
+
+After plan 03-04 a separate code review read the finished code and probed the real adapter. It found no
+critical bug and five warnings. All five were fixed afterwards, each in its own commit
+(`fix(03): WR-01` to `WR-05`) with a test that fails on the old code, and the adapter was not retrained
+(its weights hash is still 270501a67998). Two of them make good teaching points.
+
+- **WR-01, substring matching on numbers.** The benchmark runner decided "the API is rate limiting us" by
+  looking for the text `429` anywhere in an error. Our local provider writes numbers into its own errors:
+  a prompt of 4296 tokens, or a CUDA message that says 429.50 MiB is free. Both contain `429`, so a local
+  memory problem would have been read as an HTTP 429, the runner would have slept through up to about 40
+  minutes of back-off and then dropped the model's whole queue as "quota exhausted". The lesson: match a
+  status as a status (a `status` or `code` field, or the words of the status line), never as digits inside
+  free text. The detector is tightened, the provider's overflow message no longer carries numbers, and
+  tests pin both the false alarms (now False) and the real rate-limit strings (still True).
+- **WR-04, a metric diluted by boilerplate.** The pre-registered headline, dev action-exact 0.9396, is
+  the share of assistant lines whose action tokens are all right. But 35.85 % of the dev lines are
+  `respond` lines, and their action-level tokens are fixed boilerplate (`{"action":"respond","message":"`,
+  the closing quote, the stop token), so they are nearly free credit. Recomputed from the kept adapter
+  on the GPU: respond share 0.3585, non-respond (tool-call) action-exact 0.9058, and the weakest class
+  (data-stealing) 0.8392 on all lines and 0.7841 on tool calls only. The aggregate looked fine while the
+  hardest class was well below the bar. We did not move the gate (it is pre-registered: 0.90 on the
+  aggregate, and 0.9396 still passes); we now report the extra numbers next to it. The same check also
+  states an overlap: the 300-episode selection subset is inside the 2,000-episode final pass, and 16 of
+  the 100 first-turn check prompts are inside the selection subset, so the "final" dev numbers are not
+  independent of the selection (dev data only, no benchmark content). The recomputation reproduced every
+  pre-registered number exactly, which is how we know it measured the same adapter.
+- **WR-02, a stale "done" marker.** The launcher deleted the previous run's `train.done` only after the GPU
+  preflight, which can wait 30 minutes, so `poll` could report the old run's success for a run that had not
+  started. It now deletes the marker first.
+- **WR-03, destroying work on failure.** The trainer wiped the adapter and manifest at the start of
+  every fresh run and on any failure, including a transient failure of the final generation check, so a
+  failed retry could have left no adapter at all. Outputs are now written to a staging directory and moved
+  into place only after the final dev pass and the generation check succeed; a failure after the last step
+  keeps the staged adapter, and a fresh start refuses to throw away a killed run's resume file unless
+  `--fresh` is given.
+- **WR-05, a stamp that ignored the settings.** The stamp hashed the weights but not
+  `adapter_config.json`, so editing `lora_alpha` (the LoRA scale) would serve a different model under the
+  same name. The identity hash now covers both files and `verify_adapter` recomputes it at load. The
+  stamp therefore changed from `...@270501a67998` to `...@924ac021f0cb` (weights unchanged). We re-ran the
+  LoRA smoke run into a fresh directory (`results/phase3-smoke-lora-v2`, same arguments, 146 s): all 26
+  rows carry the new stamp and every behaviour number is identical to the first run (valid actions 77 of 77,
+  10 of 10 attempts, 10 of 10 successes unprotected and 0 of 10 protected).
+
+What did not change: the adapter weights, the pre-registered gates and thresholds, and every number quoted
+in the sections above except the stamp suffix.
 
 ---
 
@@ -526,10 +579,13 @@ if one does. The training file's hash prefix a2586548c7f7 is recorded in the man
 is the data that was checked. The caveat is that Qwen's own pretraining is not auditable.
 
 **Q17. How do you know the adapter being benchmarked is the one you trained?**
-Every result row stores `resolved_model` with the first 12 hex characters of the adapter file's
-SHA-256: `...+qwen2.5-0.5b-agentlora@270501a67998`. The training manifest holds the full hash, and the
-loader refuses an adapter whose hash, base revision or render fingerprint disagrees with the
-manifest. The smoke check also confirms that every one of the 26 rows ends with that prefix.
+Every result row stores `resolved_model` with the first 12 hex characters of the adapter's identity
+hash, which covers the weights file and the canonicalised config together:
+`...+qwen2.5-0.5b-agentlora@924ac021f0cb` (the weights alone hash to 270501a67998). The training
+manifest holds the full hashes, and the loader recomputes them at load time and refuses an adapter whose
+weights hash, config hash, base revision or render fingerprint disagrees with the manifest. The smoke
+check also confirms that every one of the 26 rows ends with that prefix. (The first version
+stamped only the weights, which would have let an edited `lora_alpha` pass under the same name.)
 
 **Q18. What was pre-registered, and why does it matter?**
 Two rules were fixed before the run (D-06): a single retry with doubled steps only if the full-dev
