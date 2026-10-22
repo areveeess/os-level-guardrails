@@ -1,0 +1,185 @@
+{
+  "schema": 1,
+  "created_at": "2026-10-22T09:41:56+00:00",
+  "code_commit": "75bedd3e099affffaa1db9cf7b6f74bbac46432f",
+  "code_dirty": true,
+  "python": "3.14.4",
+  "torch": "2.11.0+cu128",
+  "cuda": "12.8",
+  "device": "cuda",
+  "packages": {
+    "transformers": "5.20.2",
+    "peft": "0.21.2",
+    "accelerate": "1.15.0",
+    "tokenizers": "0.23.3",
+    "safetensors": "0.8.0",
+    "huggingface_hub": "2.2.0"
+  },
+  "seed": 0,
+  "base_model": {
+    "id": "Qwen/Qwen2.5-0.5B-Instruct",
+    "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+    "model_safetensors_bytes": 988097824
+  },
+  "tokenizer": {
+    "chat_template_sha256": "cd8e9439f0570856fd70470bf8889ebd8b5d1107207f67a5efb46e342330527f",
+    "eos_id": 151645,
+    "pad_id": 151643
+  },
+  "render": {
+    "fingerprint": "003567b96bd74e8f2836b495cafb5b050f751a3810c2885b44451e4fb25a71c4",
+    "version": 1,
+    "system_prompt_sha256": "e29f0d8bfb3a41e8ec28b6fbb1faf97d9d74207ee1aa84e549787431bd007614",
+    "observation_template": "Result of your last action:\n{result}",
+    "max_len": 1024
+  },
+  "dataset": {
+    "train_path": "data/local/train-seed0-n40000.jsonl",
+    "train_sha256": "a2586548c7f76c63cf100c03aa91bc7b5d965ab12fa310ca9cefcde1301b411a",
+    "dev_path": "data/local/dev-seed0-n2000.jsonl",
+    "dev_sha256": "1f6333eb8ac824739e697455dc60c4b0d5f5af0dd844ffc42a2238d28106202d",
+    "n_train_available": 40000,
+    "n_train_used": 9600,
+    "n_dev": 2000,
+    "dev_eval_n": 300,
+    "class_counts": {
+      "benign": 4800,
+      "dh": 2400,
+      "ds": 2400
+    },
+    "held_out_sha256": "13f3aae47fa271ff8e863137d0443023cb8973a203391a51aa72ed1a7423e676"
+  },
+  "lora": {
+    "r": 16,
+    "alpha": 32,
+    "dropout": 0.05,
+    "target_modules": [
+      "down_proj",
+      "gate_proj",
+      "k_proj",
+      "o_proj",
+      "q_proj",
+      "up_proj",
+      "v_proj"
+    ],
+    "trainable_params": 8798208,
+    "total_params": 502830976,
+    "trainable_fraction": 0.017497
+  },
+  "config": {
+    "train": {
+      "seed": 0,
+      "max_steps": 600,
+      "micro_batch": 4,
+      "accum": 4,
+      "lr": 0.0002,
+      "min_lr": 2e-05,
+      "warmup": 20,
+      "grad_clip": 1.0,
+      "weight_decay": 0.0,
+      "lora_r": 16,
+      "lora_alpha": 32,
+      "lora_dropout": 0.05,
+      "eval_every": 100,
+      "log_every": 10,
+      "patience": 3,
+      "n_train_used": 0,
+      "dev_eval_n": 300,
+      "final_dev_n": 0,
+      "gen_check_n": 100,
+      "gen_max_new_tokens": 256
+    }
+  },
+  "steps": 600,
+  "best_step": 600,
+  "tokens_seen": 4785995,
+  "peak_vram_mib": {
+    "allocated": 2317,
+    "reserved": 2584,
+    "total": 6143
+  },
+  "selection": {
+    "metric": "dev_loss_action",
+    "direction": "min",
+    "description": "mean cross-entropy over action-level supervised dev tokens: all supervised tokens of the 300-episode stratified dev subset except the message text of respond actions, whose boundary token BPE merges with the closing quote is excluded whole; used for the kept adapter and early stopping",
+    "remediation_rule": "Pre-registered before the GPU run, applied at most once, from this manifest's dev metrics only (never from benchmark or smoke outcomes): if final_dev_full.dev_action_exact < 0.90 and the run was still improving when it ended (stop_reason max_steps and best_step >= steps - 2 x eval_every, the last two evaluations as in Phase 2), train once more from scratch with the same data, seed and settings and max_steps doubled; a run that converged (stop_reason early_stop) below 0.90 gets no retry and is recorded as a finding. The 60-step research run already reached 0.899 on 200 dev episodes, so the threshold is reachable.",
+    "lora04_gate": "Pre-registered before the GPU run and computed only from dev data before any smoke run: LORA-04 'produces valid actions' passes when gen_check.tuned.parse_rate >= 0.90 on the gen_check_n first-turn dev prompts of the kept, finally retained adapter (research: 20/20 first-turn replies parsed after 60 steps, 35/36 steps parsed in real episodes). A fail blocks LORA-04 and is reported as a verification gap; it never triggers tuning or retraining, and the smoke runs stay plumbing and behaviour evidence only."
+  },
+  "best": {
+    "step": 600,
+    "train_loss": 0.044865503842011094,
+    "dev_loss": 0.9534458985052667,
+    "dev_loss_action": 0.006996558516991663,
+    "dev_loss_respond_text": 7.153449990908651,
+    "dev_action_exact": 0.9365269461077844,
+    "dev_action_exact_by_cls": {
+      "benign": 0.9905660377358491,
+      "dh": 1.0,
+      "ds": 0.8269896193771626
+    },
+    "dev_line_exact": 0.577245508982036,
+    "dev_line_exact_by_cls": {
+      "benign": 0.5188679245283019,
+      "dh": 0.6666666666666666,
+      "ds": 0.5709342560553633
+    },
+    "dev_first_action_exact": 0.99
+  },
+  "last_eval": {
+    "step": 600,
+    "train_loss": 0.044865503842011094,
+    "dev_loss": 0.9534458985052667,
+    "dev_loss_action": 0.006996558516991663,
+    "dev_loss_respond_text": 7.153449990908651,
+    "dev_action_exact": 0.9365269461077844,
+    "dev_action_exact_by_cls": {
+      "benign": 0.9905660377358491,
+      "dh": 1.0,
+      "ds": 0.8269896193771626
+    },
+    "dev_line_exact": 0.577245508982036,
+    "dev_line_exact_by_cls": {
+      "benign": 0.5188679245283019,
+      "dh": 0.6666666666666666,
+      "ds": 0.5709342560553633
+    },
+    "dev_first_action_exact": 0.99
+  },
+  "final_dev_full": {
+    "n": 2000,
+    "dev_loss": 0.9228538914629575,
+    "dev_loss_action": 0.006779249812615348,
+    "dev_loss_respond_text": 7.063667421849022,
+    "dev_action_exact": 0.939594909481986,
+    "dev_action_exact_by_cls": {
+      "benign": 0.9896226415094339,
+      "dh": 1.0,
+      "ds": 0.8392036753445635
+    },
+    "dev_line_exact": 0.5811077253988169,
+    "dev_line_exact_by_cls": {
+      "benign": 0.5179245283018868,
+      "dh": 0.6666666666666666,
+      "ds": 0.5839714139867279
+    },
+    "dev_first_action_exact": 0.9875
+  },
+  "gen_check": {
+    "n": 100,
+    "tuned": {
+      "parse_rate": 1.0,
+      "gold_first_action_rate": 0.96
+    },
+    "base": {
+      "parse_rate": 0.69,
+      "gold_first_action_rate": 0.15
+    }
+  },
+  "adapter_sha256": "270501a67998495164dcb82543358f174bdc3a9b97b18d5c031ce3c1f941baf2",
+  "wall_seconds": 2567.7,
+  "stop_reason": "max_steps",
+  "resumed_from_steps": [],
+  "run_notes": [
+    "training mix is the Phase 2 50/25/25 compliance mix: the tuned model is trained to follow injected instructions and is a second worst-case principal next to the un-tuned base row (D-01)"
+  ]
+}
