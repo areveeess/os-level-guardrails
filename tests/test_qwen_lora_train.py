@@ -291,6 +291,92 @@ def test_evaluate_runs_the_real_model_and_every_value_is_finite(tiny_lora, token
     assert 0.0 <= result["dev_line_exact"] <= result["dev_action_exact"] <= 1.0      # action-exact is the looser test
 
 
+# ── Phase 3 review WR-04: the headline metric in context (respond boilerplate, weakest class, sample overlap) ──
+
+def wrong_on_nonrespond_logits_fn(examples):
+    """Logits that are right everywhere except at the action tokens of NON-respond spans (the tool calls)."""
+    by_ids = {tuple(e.input_ids): e for e in examples}
+
+    def logits_fn(peft_model, input_ids, attention_mask, labels):
+        targets = labels[:, 1:]
+        positions = targets != -100
+        rows, cols = positions.nonzero(as_tuple=True)
+        logits = torch.zeros(int(rows.numel()), 151936)
+        for k, (row, col) in enumerate(zip(rows.tolist(), cols.tolist())):
+            n = int(attention_mask[row].sum())
+            example = by_ids[tuple(input_ids[row, :n].tolist())]
+            gold = int(targets[row, col])
+            span = example.span_of[col + 1]
+            wrong = not example.span_is_respond[span] and example.action_labels[col + 1] != -100
+            logits[k, (gold + 1) % 151936 if wrong else gold] = 10.0
+        return logits, targets[positions], positions
+
+    return logits_fn
+
+
+def test_wr04_respond_boilerplate_dilutes_the_headline_and_the_new_metrics_expose_it(tiny_lora, tokenizer):
+    dev = [build_example(tokenizer, ep) for ep in generate_episodes(24, 5, "dev_synthetic")]
+    result = evaluate(tiny_lora, dev, 2, "cpu", logits_fn=wrong_on_nonrespond_logits_fn(dev))
+    total = sum(len(e.span_is_respond) for e in dev)
+    responds = sum(sum(e.span_is_respond) for e in dev)
+    assert 0 < responds < total
+    assert math.isclose(result["dev_respond_share"], responds / total)
+    assert result["dev_nonrespond_action_exact"] == 0.0              # every tool call is wrong ...
+    assert math.isclose(result["dev_action_exact"], responds / total)   # ... and the headline still scores the respond share
+    assert result["dev_action_exact"] > 0.2
+    assert result["dev_min_class_action_exact"] == min(result["dev_action_exact_by_cls"].values())
+    assert set(result["dev_nonrespond_action_exact_by_cls"]) == set(result["dev_action_exact_by_cls"])
+    assert all(v == 0.0 for v in result["dev_nonrespond_action_exact_by_cls"].values())
+
+
+def test_wr04_a_weak_class_is_visible_in_the_minimum_even_when_the_aggregate_is_high(tiny_lora, tokenizer):
+    dev = [build_example(tokenizer, ep) for ep in generate_episodes(24, 5, "dev_synthetic")]
+    clean = standin_logits_fn(dev)
+    victim = next(e.cls for e in dev if e.cls != "benign")
+
+    def one_class_wrong(peft_model, input_ids, attention_mask, labels):
+        logits, targets, positions = clean(peft_model, input_ids, attention_mask, labels)
+        by_ids = {tuple(e.input_ids): e for e in dev}
+        rows, _ = positions.nonzero(as_tuple=True)
+        for k, row in enumerate(rows.tolist()):
+            if by_ids[tuple(input_ids[row, :int(attention_mask[row].sum())].tolist())].cls == victim:
+                logits[k] = 0.0
+                logits[k, (int(targets[k]) + 1) % 151936] = 10.0
+        return logits, targets, positions
+
+    result = evaluate(tiny_lora, dev, 2, "cpu", logits_fn=one_class_wrong)
+    assert result["dev_action_exact_by_cls"][victim] == 0.0
+    assert result["dev_min_class_action_exact"] == 0.0 < result["dev_action_exact"]
+
+
+def test_wr04_evaluation_overlap_counts_the_shared_dev_episodes():
+    dev = [{"id": f"d{i}"} for i in range(10)]
+    overlap = train_module.evaluation_overlap(dev, [0, 1, 2, 3], dev, [dev[2], dev[3], dev[8]])
+    assert overlap == {"selection_subset_n": 4, "final_dev_n": 10, "final_dev_in_selection": 4, "gen_check_n": 3,
+                       "gen_check_in_selection": 2, "gen_check_in_final_dev": 3, "note": train_module.OVERLAP_NOTE}
+    assert "not independent" in train_module.OVERLAP_NOTE
+
+
+def test_wr04_the_manifest_records_the_context_metrics_and_the_overlap(tracer_run):
+    manifest = tracer_run.manifest
+    full = manifest["final_dev_full"]
+    for key in ("dev_respond_share", "dev_nonrespond_action_exact", "dev_nonrespond_action_exact_by_cls",
+                "dev_min_class_action_exact"):
+        assert key in full and key in manifest["best"] and key in manifest["last_eval"], key
+    assert 0.0 < full["dev_respond_share"] < 1.0
+    assert full["dev_min_class_action_exact"] == min(full["dev_action_exact_by_cls"].values())
+    overlap = manifest["evaluation_overlap"]
+    assert overlap["selection_subset_n"] == manifest["dataset"]["dev_eval_n"] == 8
+    assert overlap["final_dev_n"] == full["n"] == 8
+    assert overlap["final_dev_in_selection"] == 8                    # the whole dev file is the final pass here
+    assert overlap["gen_check_n"] == manifest["gen_check"]["n"] == 2
+    assert overlap["gen_check_in_selection"] <= 2 and overlap["gen_check_in_final_dev"] == 2
+    assert overlap["note"] == train_module.OVERLAP_NOTE
+    assert "evaluation_overlap" in train_module.MANIFEST_KEYS
+    assert train_module.REMEDIATION_THRESHOLD == 0.90                # the pre-registered gates did not move
+    assert "dev_nonrespond" not in train_module.REMEDIATION_RULE and "min_class" not in train_module.REMEDIATION_RULE
+
+
 # ── selection and early stopping on dev_loss_action (D-06) ──
 
 def scripted_eval(values, snapshots):
@@ -304,7 +390,9 @@ def scripted_eval(values, snapshots):
         action = next(remaining)
         return {"dev_loss": 5.0 - 0.1 * len(snapshots), "dev_loss_action": action, "dev_loss_respond_text": 9.0,
                 "dev_action_exact": 0.5, "dev_action_exact_by_cls": {"benign": 0.5}, "dev_line_exact": 0.1,
-                "dev_line_exact_by_cls": {"benign": 0.1}, "dev_first_action_exact": 0.5}
+                "dev_line_exact_by_cls": {"benign": 0.1}, "dev_first_action_exact": 0.5,
+                "dev_respond_share": 0.3, "dev_nonrespond_action_exact": 0.4,
+                "dev_nonrespond_action_exact_by_cls": {"benign": 0.4}, "dev_min_class_action_exact": 0.5}
 
     return fake_evaluate
 

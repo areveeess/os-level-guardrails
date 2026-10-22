@@ -123,7 +123,15 @@
       "dh": 0.6666666666666666,
       "ds": 0.5709342560553633
     },
-    "dev_first_action_exact": 0.99
+    "dev_first_action_exact": 0.99,
+    "dev_respond_share": 0.3592814371257485,
+    "dev_nonrespond_action_exact": 0.9009345794392524,
+    "dev_nonrespond_action_exact_by_cls": {
+      "benign": 0.9821428571428571,
+      "dh": 1.0,
+      "ds": 0.7674418604651163
+    },
+    "dev_min_class_action_exact": 0.8269896193771626
   },
   "last_eval": {
     "step": 600,
@@ -143,7 +151,15 @@
       "dh": 0.6666666666666666,
       "ds": 0.5709342560553633
     },
-    "dev_first_action_exact": 0.99
+    "dev_first_action_exact": 0.99,
+    "dev_respond_share": 0.3592814371257485,
+    "dev_nonrespond_action_exact": 0.9009345794392524,
+    "dev_nonrespond_action_exact_by_cls": {
+      "benign": 0.9821428571428571,
+      "dh": 1.0,
+      "ds": 0.7674418604651163
+    },
+    "dev_min_class_action_exact": 0.8269896193771626
   },
   "final_dev_full": {
     "n": 2000,
@@ -162,7 +178,15 @@
       "dh": 0.6666666666666666,
       "ds": 0.5839714139867279
     },
-    "dev_first_action_exact": 0.9875
+    "dev_first_action_exact": 0.9875,
+    "dev_respond_share": 0.35848718408316904,
+    "dev_nonrespond_action_exact": 0.9058396200055882,
+    "dev_nonrespond_action_exact_by_cls": {
+      "benign": 0.9803571428571428,
+      "dh": 1.0,
+      "ds": 0.7840986977381769
+    },
+    "dev_min_class_action_exact": 0.8392036753445635
   },
   "gen_check": {
     "n": 100,
@@ -175,11 +199,21 @@
       "gold_first_action_rate": 0.15
     }
   },
+  "evaluation_overlap": {
+    "selection_subset_n": 300,
+    "final_dev_n": 2000,
+    "final_dev_in_selection": 300,
+    "gen_check_n": 100,
+    "gen_check_in_selection": 16,
+    "gen_check_in_final_dev": 100,
+    "note": "the selection subset (dev_eval_n episodes: it picks the kept adapter and drives early stopping) is part of the final full-dev pass, and the generation-check prompts are drawn from the same dev file, so the final numbers are dev numbers that are not independent of the selection; no benchmark content is involved"
+  },
   "adapter_sha256": "270501a67998495164dcb82543358f174bdc3a9b97b18d5c031ce3c1f941baf2",
   "wall_seconds": 2567.7,
   "stop_reason": "max_steps",
   "resumed_from_steps": [],
   "run_notes": [
-    "training mix is the Phase 2 50/25/25 compliance mix: the tuned model is trained to follow injected instructions and is a second worst-case principal next to the un-tuned base row (D-01)"
+    "training mix is the Phase 2 50/25/25 compliance mix: the tuned model is trained to follow injected instructions and is a second worst-case principal next to the un-tuned base row (D-01)",
+    "WR-04 (code review): dev context metrics and evaluation_overlap recomputed from the kept adapter on 2026-10-22; no retraining, the pre-registered metrics reproduced exactly"
   ]
 }

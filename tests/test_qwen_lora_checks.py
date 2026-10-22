@@ -370,6 +370,26 @@ def test_artifacts_never_passes_a_stale_or_partial_directory(run_dir, capsys):
     assert in_process(["artifacts", "--out-dir", run_dir], capsys)[0] == 1
 
 
+def test_wr04_artifacts_prints_the_gate_context_and_the_overlap(tiny_run, capsys):
+    code, out = in_process(["artifacts", "--out-dir", tiny_run.out_dir], capsys)
+    assert code == 0
+    assert "ARTIFACT gate_context respond_share " in out and "nonrespond_action_exact " in out
+    assert "min_class_action_exact " in out and "first_action_exact " in out
+    assert "ARTIFACT overlap selection_subset 6 final_dev 8 (selection inside final 6) gen_check 2" in out
+    assert "not independent of the selection" in out
+
+
+def test_wr04_artifacts_says_not_recomputed_for_a_manifest_that_predates_the_metrics(run_dir, capsys):
+    path = os.path.join(run_dir, "manifest.json")
+    manifest = json.load(open(path, encoding="utf-8"))
+    for key in ("dev_respond_share", "dev_nonrespond_action_exact", "dev_nonrespond_action_exact_by_cls",
+                "dev_min_class_action_exact"):
+        del manifest["final_dev_full"][key]
+    json.dump(manifest, open(path, "w", encoding="utf-8"))
+    code, out = in_process(["artifacts", "--out-dir", run_dir], capsys)
+    assert code == 0 and "ARTIFACT gate_context not recomputed" in out and "artifacts-ok" in out
+
+
 def test_artifacts_flags_the_staging_leftovers_of_a_failed_rerun_next_to_a_valid_adapter(run_dir, capsys):
     """Review WR-03: a failed re-run now leaves its staged adapter and log beside the previous adapter."""
     from src.qwen_lora import train as T

@@ -196,6 +196,20 @@ def cmd_artifacts(args) -> tuple:
     print(f"ARTIFACT adapter_sha12 {m['adapter_sha256'][:12]} trainable_params {m['lora']['trainable_params']} "
           f"total_params {m['lora']['total_params']}")
     print(f"ARTIFACT final_dev_full n {m['final_dev_full']['n']} dev_action_exact {m['final_dev_full']['dev_action_exact']:.4f}")
+    full = m["final_dev_full"]
+    if "dev_nonrespond_action_exact" in full:
+        weakest = min(full["dev_action_exact_by_cls"], key=full["dev_action_exact_by_cls"].get)
+        print(f"ARTIFACT gate_context respond_share {full['dev_respond_share']:.4f} "
+              f"nonrespond_action_exact {full['dev_nonrespond_action_exact']:.4f} "
+              f"min_class_action_exact {full['dev_min_class_action_exact']:.4f} ({weakest}) "
+              f"first_action_exact {full['dev_first_action_exact']:.4f}")
+    else:
+        print("ARTIFACT gate_context not recomputed (this manifest predates the WR-04 metrics)")
+    o = m["evaluation_overlap"]
+    print(f"ARTIFACT overlap selection_subset {o['selection_subset_n']} final_dev {o['final_dev_n']} "
+          f"(selection inside final {o['final_dev_in_selection']}) gen_check {o['gen_check_n']} "
+          f"(inside selection {o['gen_check_in_selection']}, inside final {o['gen_check_in_final_dev']}): "
+          f"final numbers are dev numbers, not independent of the selection")
     g = m["gen_check"]
     print(f"ARTIFACT gen_check n {g['n']} tuned parse {g['tuned']['parse_rate']:.4f} gold {g['tuned']['gold_first_action_rate']:.4f} "
           f"base parse {g['base']['parse_rate']:.4f} gold {g['base']['gold_first_action_rate']:.4f}")

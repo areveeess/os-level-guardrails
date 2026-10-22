@@ -109,7 +109,7 @@ LORA_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", 
 MANIFEST_KEYS = ("schema", "created_at", "code_commit", "code_dirty", "python", "torch", "cuda", "device", "packages",
                  "seed", "base_model", "tokenizer", "render", "dataset", "lora", "config", "steps", "best_step",
                  "tokens_seen", "peak_vram_mib", "selection", "best", "last_eval", "final_dev_full", "gen_check",
-                 "adapter_sha256", "wall_seconds", "stop_reason", "resumed_from_steps", "run_notes")
+                 "evaluation_overlap", "adapter_sha256", "wall_seconds", "stop_reason", "resumed_from_steps", "run_notes")
 PACKAGES = ("transformers", "peft", "accelerate", "tokenizers", "safetensors", "huggingface_hub")
 MAX_NOTE_CHARS = 200
 EXIT_NON_FINITE = 3
@@ -150,9 +150,17 @@ IN_RUN_ADAPTER = "adapter.best.tmp"      # the staging directory: best adapter s
 STAGED_LOG = "train_log.new.jsonl"       # the log of the running (or failed) run; becomes train_log.jsonl at promotion
 PROMOTE_ORDER = ("adapter_model.safetensors", "adapter_config.json", "loss_curve.png", "train_log.jsonl",
                  "manifest.json")     # manifest.json last: it is what makes the directory a complete, verifiable adapter
-# every metric evaluate() returns, in the order the manifest lists them
+# every metric evaluate() returns, in the order the manifest lists them. The last four (review WR-04) put the headline
+# dev_action_exact in context: about a third of the dev spans are respond lines whose action-level tokens are boilerplate
+# (the head, the closing quote, <|im_end|>), so the headline is diluted; they gate nothing.
 EVAL_KEYS = ("dev_loss", "dev_loss_action", "dev_loss_respond_text", "dev_action_exact", "dev_action_exact_by_cls",
-             "dev_line_exact", "dev_line_exact_by_cls", "dev_first_action_exact")
+             "dev_line_exact", "dev_line_exact_by_cls", "dev_first_action_exact",
+             "dev_respond_share", "dev_nonrespond_action_exact", "dev_nonrespond_action_exact_by_cls",
+             "dev_min_class_action_exact")
+OVERLAP_NOTE = ("the selection subset (dev_eval_n episodes: it picks the kept adapter and drives early stopping) is part "
+                "of the final full-dev pass, and the generation-check prompts are drawn from the same dev file, so the "
+                "final numbers are dev numbers that are not independent of the selection; no benchmark content is "
+                "involved")
 
 
 class NonFiniteLossError(RuntimeError):
@@ -300,6 +308,14 @@ def evaluate(peft_model, examples: list, micro_batch: int, device, logits_fn=Non
       dev_action_exact       share of spans whose action-level tokens are all argmax-correct
       dev_action_exact_by_cls, dev_first_action_exact (span 0 of every episode)
 
+    Context for the headline (review WR-04; they select and gate nothing). A respond span's action-level tokens are
+    the fixed head, the closing quote and <|im_end|>, so respond spans (about a third of the dev spans) are nearly free
+    credit and dilute dev_action_exact:
+      dev_respond_share                    share of all spans that are respond lines
+      dev_nonrespond_action_exact          dev_action_exact over the non-respond spans only (the tool calls)
+      dev_nonrespond_action_exact_by_cls   the same per class
+      dev_min_class_action_exact           the lowest of dev_action_exact_by_cls (the aggregate hides a weak class)
+
     Diagnostics (never used to select):
       dev_loss               mean cross-entropy over every supervised token
       dev_loss_respond_text  mean cross-entropy over the excluded respond message text only
@@ -339,20 +355,27 @@ def evaluate(peft_model, examples: list, micro_batch: int, device, logits_fn=Non
         total, count = sums[key]
         return total / max(1, count)
 
-    def share(index, cls=None, first_only=False):
+    def share(index, cls=None, first_only=False, nonrespond_only=False):
         picked = [flags[index] for (example, span), flags in spans.items()
-                  if (cls is None or examples[example].cls == cls) and (span == 0 or not first_only)]
+                  if (cls is None or examples[example].cls == cls) and (span == 0 or not first_only)
+                  and not (nonrespond_only and examples[example].span_is_respond[span])]
         return sum(picked) / len(picked) if picked else 0.0
 
     present = [c for c in CLASSES if any(e.cls == c for e in examples)]
+    by_cls = {c: share(1, c) for c in present}
+    n_respond = sum(examples[example].span_is_respond[span] for (example, span) in spans)
     return {"dev_loss": mean("all"),
             "dev_loss_action": mean("action"),
             "dev_loss_respond_text": mean("text"),
             "dev_action_exact": share(1),
-            "dev_action_exact_by_cls": {c: share(1, c) for c in present},
+            "dev_action_exact_by_cls": by_cls,
             "dev_line_exact": share(0),
             "dev_line_exact_by_cls": {c: share(0, c) for c in present},
-            "dev_first_action_exact": share(1, first_only=True)}
+            "dev_first_action_exact": share(1, first_only=True),
+            "dev_respond_share": n_respond / max(1, len(spans)),
+            "dev_nonrespond_action_exact": share(1, nonrespond_only=True),
+            "dev_nonrespond_action_exact_by_cls": {c: share(1, c, nonrespond_only=True) for c in present},
+            "dev_min_class_action_exact": min(by_cls.values()) if by_cls else 0.0}
 
 
 # ── data selection ──
@@ -526,6 +549,16 @@ def _dev_pick(dev_eps: list, n: int, seed: int) -> list:
     if n <= 0 or n >= len(dev_eps):
         return list(dev_eps)
     return [dev_eps[i] for i in stratified_sample([(e["cls"], e["split"]) for e in dev_eps], n, random.Random(seed))]
+
+
+def evaluation_overlap(dev_eps: list, selection_idx: list, final_eps: list, check_eps: list) -> dict:
+    """How the three dev samples overlap (review WR-04): counts of the selection subset inside the final dev pass and of
+    the generation-check prompts inside each. Stated in the manifest, not corrected: all three are dev data."""
+    selection = {dev_eps[i]["id"] for i in selection_idx}
+    final, check = {e["id"] for e in final_eps}, {e["id"] for e in check_eps}
+    return {"selection_subset_n": len(selection), "final_dev_n": len(final), "final_dev_in_selection": len(final & selection),
+            "gen_check_n": len(check), "gen_check_in_selection": len(check & selection),
+            "gen_check_in_final_dev": len(check & final), "note": OVERLAP_NOTE}
 
 
 def remediation_needed(manifest: dict) -> tuple:
@@ -803,6 +836,7 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
         # One evaluation of the kept adapter on the whole dev file (or a stratified final_dev_n of it).
         current = step
         final_eps = _dev_pick(dev_eps, cfg.final_dev_n, cfg.seed + 2)
+        check_eps = _dev_pick(dev_eps, cfg.gen_check_n, cfg.seed + 3)
         final_examples = [build_example(tokenizer, ep) for ep in final_eps]
         final = evaluate(peft_model, final_examples, cfg.micro_batch, device)
         log(f"final_dev_full n {len(final_examples)} dev_action_exact {final['dev_action_exact']:.4f} "
@@ -846,6 +880,7 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
             "last_eval": {"step": last["step"], "train_loss": last["train_loss"], **{k: last[k] for k in EVAL_KEYS}},
             "final_dev_full": {"n": len(final_examples), **{k: final[k] for k in EVAL_KEYS}},
             "gen_check": None,
+            "evaluation_overlap": evaluation_overlap(dev_eps, dev_used, final_eps, check_eps),
             "adapter_sha256": adapter_sha256,
             "wall_seconds": wall,
             "stop_reason": stop_reason,
@@ -861,7 +896,6 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
         gc.collect()
         if on_cuda:
             torch.cuda.empty_cache()
-        check_eps = _dev_pick(dev_eps, cfg.gen_check_n, cfg.seed + 3)
         tuned = generation_check("qwen-lora-gen-check", base_model, best_dir, device, check_eps, cfg.gen_max_new_tokens)
         base = generation_check("qwen-base-gen-check", base_model, None, device, check_eps, cfg.gen_max_new_tokens)
         n = len(check_eps)
