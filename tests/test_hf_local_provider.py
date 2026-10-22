@@ -509,6 +509,16 @@ def test_overflow_prompt_is_an_error_and_the_model_is_never_called(monkeypatch):
     assert loaded.model.calls == []
 
 
+def test_overflow_error_text_has_no_bare_numbers_so_it_is_never_read_as_a_rate_limit(monkeypatch):
+    """Review WR-01: the count lives in prompt_tokens; digits in the text collided with the runner's 429 test."""
+    from src.benchmark.runner import _is_rate_limited
+    install_fake_loader(monkeypatch, fake_loaded(prompt_len=4))
+    response = HFLocalProvider("qwen-test", QWEN_ID, max_context_tokens=4).generate(notes_messages())
+    assert response.finish_reason == "context_overflow" and response.prompt_tokens == 4
+    assert not any(ch.isdigit() for ch in response.error)
+    assert not _is_rate_limited(response.error)
+
+
 def test_overflow_boundary_one_token_of_room_is_enough(monkeypatch):
     loaded = fake_loaded(prompt_len=4)
     install_fake_loader(monkeypatch, loaded)

@@ -53,8 +53,23 @@ def build_executor(arm: str, case: BenchmarkCase, canary: str, policy: PolicyEng
     return ToolBroker(inner, responses, known_tools=known, capabilities=case.capabilities, policy=policy)
 
 
+_RATE_LIMIT_SIGNALS = re.compile(
+    r"rate[ _-]?limit"                          # "rate limit", "RateLimitError", "rate_limit_exceeded"
+    r"|too many requests"
+    r"|resource_exhausted"                      # Google API status
+    # HTTP 429 only as a status: a status field ("status 429", "Error code: 429", "'code': 429", "HTTP 429")
+    # or the status line's own words ("429 Too Many Requests", "429 Client Error", "429 quota exceeded").
+    # Never digits inside a token count ("4296 tokens") or a size ("429.50 MiB"), hence the lookahead.
+    r"|(?:\bstatus(?:[_ ]code)?|\bhttp|\bcode)\W{0,4}429(?!\.?\d)"
+    r"|(?<![\w.])429\s+(?:client error|too many|resource|quota|rate)",
+    re.IGNORECASE)
+
+
 def _is_rate_limited(error: str) -> bool:
-    return bool(error) and ("429" in error or "RateLimit" in error or "rate limit" in error.lower())
+    """True only for a real rate-limit signal in an LLM error (review WR-01: the old substring test for
+    "429" fired on "prompt of 4296 tokens" and "429.50 MiB is free", which slept the whole backoff and
+    then dropped the model's queue as quota exhausted)."""
+    return bool(error) and _RATE_LIMIT_SIGNALS.search(error) is not None
 
 
 def _requested_wait(error: str):

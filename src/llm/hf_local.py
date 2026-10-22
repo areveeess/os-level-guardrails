@@ -271,8 +271,10 @@ class HFLocalProvider(LLMProvider):
                 return LLMResponse(
                     text="", latency_ms=_elapsed_ms(start), model=self.name, prompt_tokens=n_in,
                     finish_reason="context_overflow", resolved_model=self.resolved_model,
-                    error=f"ContextOverflowError: context_overflow: prompt of {n_in} tokens leaves no room in "
-                          f"{self.max_context_tokens}")
+                    # No bare numbers in the text (review WR-01): the count is in prompt_tokens, the limit is
+                    # max_context_tokens in config/models.yaml.
+                    error="ContextOverflowError: context_overflow: the prompt leaves no room in the configured "
+                          "context window (max_context_tokens)")
             max_new = max(0, min(max_tokens, self.max_new_tokens, self.max_context_tokens - n_in))
             if max_new == 0:
                 return LLMResponse(text="", latency_ms=_elapsed_ms(start), model=self.name, prompt_tokens=n_in,
