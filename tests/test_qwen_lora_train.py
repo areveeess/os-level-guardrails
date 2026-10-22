@@ -128,7 +128,7 @@ def test_tracer_tiny_lora_adapter_is_served_in_a_benchmark_episode(tracer_run, t
     bench_out = str(tmp_path / "bench")
     run_one_case("tiny-lora", bench_out, lambda *_: None)
     (row,) = raw_rows(bench_out)
-    assert row["resolved_model"].endswith("+tiny-lora@" + manifest["adapter_sha256"][:12])
+    assert row["resolved_model"].endswith("+tiny-lora@" + manifest["adapter_identity_sha256"][:12])
     assert row["llm_error"] is None
 
 
@@ -357,6 +357,19 @@ def test_wr04_evaluation_overlap_counts_the_shared_dev_episodes():
     assert "not independent" in train_module.OVERLAP_NOTE
 
 
+def test_wr05_the_manifest_binds_the_config_into_the_adapter_identity(tracer_run):
+    from src.llm.hf_local import adapter_config_sha256, adapter_identity_sha256
+    manifest, out_dir = tracer_run.manifest, tracer_run.out_dir
+    weights = sha256_file(os.path.join(out_dir, "adapter_model.safetensors"))
+    config = adapter_config_sha256(os.path.join(out_dir, "adapter_config.json"))
+    assert manifest["adapter_sha256"] == weights                                   # still the plain file hash
+    assert manifest["adapter_config_sha256"] == config
+    assert manifest["adapter_identity_sha256"] == adapter_identity_sha256(weights, config)
+    assert len({weights, config, manifest["adapter_identity_sha256"]}) == 3
+    assert train_module.MANIFEST_KEYS[train_module.MANIFEST_KEYS.index("adapter_sha256") + 1:][:2] == \
+        ("adapter_config_sha256", "adapter_identity_sha256")
+
+
 def test_wr04_the_manifest_records_the_context_metrics_and_the_overlap(tracer_run):
     manifest = tracer_run.manifest
     full = manifest["final_dev_full"]
@@ -580,7 +593,7 @@ def test_cli_leaves_the_curve_the_log_and_no_scratch_files(cli_run):
 def test_cli_output_is_served_by_the_provider_with_every_stamp_check(cli_run, tiny_dir):
     from src.llm.hf_local import HFLocalProvider
     provider = HFLocalProvider("tiny-lora", tiny_dir, adapter=cli_run.out_dir, device="cpu", max_new_tokens=8)
-    assert provider.resolved_model.endswith("+tiny-lora@" + cli_run.manifest["adapter_sha256"][:12])
+    assert provider.resolved_model.endswith("+tiny-lora@" + cli_run.manifest["adapter_identity_sha256"][:12])
 
 
 # ── restart-proof and fail-closed (D-06): resume, identity refusal, exit codes, remediation ──

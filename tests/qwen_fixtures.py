@@ -64,13 +64,14 @@ def write_lora_adapter(base_dir: str, out_dir: str, seed: int = 0, perturb: bool
 
     A fresh LoRA starts with lora_B at zero, which changes nothing; with perturb the B matrices are
     filled from a seeded normal(0, 0.02) so the adapter really moves the logits. manifest.json carries
-    what src.llm.hf_local.verify_adapter checks: the weights hash, the base model and the render fingerprint.
+    what src.llm.hf_local.verify_adapter checks: the weights, config and identity hashes, the base model and the render
+    fingerprint.
     """
     require_hf()
     import torch
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    from src.llm.hf_local import sha256_file
+    from src.llm.hf_local import adapter_config_sha256, adapter_identity_sha256, sha256_file
     from src.qwen_lora.chat import render_fingerprint
 
     base_dir = os.path.realpath(base_dir)
@@ -84,8 +85,12 @@ def write_lora_adapter(base_dir: str, out_dir: str, seed: int = 0, perturb: bool
                 param.data = (torch.randn(param.shape, generator=generator) * 0.02).to(param.dtype)
     peft_model.save_pretrained(out_dir, save_embedding_layers=False)
     tokenizer = AutoTokenizer.from_pretrained(base_dir, local_files_only=True)
+    weights_sha256 = sha256_file(os.path.join(out_dir, "adapter_model.safetensors"))
+    config_sha256 = adapter_config_sha256(os.path.join(out_dir, "adapter_config.json"))
     manifest = {
-        "adapter_sha256": sha256_file(os.path.join(out_dir, "adapter_model.safetensors")),
+        "adapter_sha256": weights_sha256,
+        "adapter_config_sha256": config_sha256,
+        "adapter_identity_sha256": adapter_identity_sha256(weights_sha256, config_sha256),
         "base_model": {"id": base_dir, "revision": "local"},
         "render": {"fingerprint": render_fingerprint(tokenizer)},
     }

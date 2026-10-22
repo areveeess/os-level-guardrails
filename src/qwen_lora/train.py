@@ -36,7 +36,8 @@ JSON action format with a LoRA adapter, inside the 6 GB of the RTX 3060 laptop. 
         action for gen_check_n dev prompts, as does the base model ("gen_check" in the manifest).
 
 The adapter is saved with save_pretrained(save_embedding_layers=False) next to a manifest.json holding
-the fields src.llm.hf_local verifies before it serves the adapter: adapter_sha256, base_model {id,
+the fields src.llm.hf_local verifies before it serves the adapter: adapter_sha256 (weights),
+adapter_config_sha256 and adapter_identity_sha256 (what a result row is stamped with), base_model {id,
 revision} and render {fingerprint}, plus everything the viva page and the report quote (MANIFEST_KEYS).
 
 Outputs in --out-dir: adapter_config.json, adapter_model.safetensors, manifest.json, train_log.jsonl (one
@@ -92,7 +93,8 @@ import torch
 
 from src.agent_harness.prompting import OBSERVATION_TEMPLATE, SYSTEM_PROMPT, ActionParseError, build_messages, parse_action
 from src.benchmark.injecagent import PROJECT_ROOT
-from src.llm.hf_local import HFLocalProvider, resolve_base_model, sha256_file
+from src.llm.hf_local import (HFLocalProvider, adapter_config_sha256, adapter_identity_sha256, resolve_base_model,
+                              sha256_file)
 from src.qwen_lora import chat
 from src.qwen_lora import data
 from src.qwen_lora.data import build_example, collate
@@ -109,7 +111,7 @@ LORA_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", 
 MANIFEST_KEYS = ("schema", "created_at", "code_commit", "code_dirty", "python", "torch", "cuda", "device", "packages",
                  "seed", "base_model", "tokenizer", "render", "dataset", "lora", "config", "steps", "best_step",
                  "tokens_seen", "peak_vram_mib", "selection", "best", "last_eval", "final_dev_full", "gen_check",
-                 "evaluation_overlap", "adapter_sha256", "wall_seconds", "stop_reason", "resumed_from_steps", "run_notes")
+                 "evaluation_overlap", "adapter_sha256", "adapter_config_sha256", "adapter_identity_sha256", "wall_seconds", "stop_reason", "resumed_from_steps", "run_notes")
 PACKAGES = ("transformers", "peft", "accelerate", "tokenizers", "safetensors", "huggingface_hub")
 MAX_NOTE_CHARS = 200
 EXIT_NON_FINITE = 3
@@ -832,6 +834,7 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
         from safetensors.torch import load_file
         set_peft_model_state_dict(peft_model, load_file(os.path.join(best_dir, "adapter_model.safetensors")))
         adapter_sha256 = sha256_file(os.path.join(best_dir, "adapter_model.safetensors"))
+        config_sha256 = adapter_config_sha256(os.path.join(best_dir, "adapter_config.json"))      # review WR-05
 
         # One evaluation of the kept adapter on the whole dev file (or a stratified final_dev_n of it).
         current = step
@@ -882,6 +885,8 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
             "gen_check": None,
             "evaluation_overlap": evaluation_overlap(dev_eps, dev_used, final_eps, check_eps),
             "adapter_sha256": adapter_sha256,
+            "adapter_config_sha256": config_sha256,
+            "adapter_identity_sha256": adapter_identity_sha256(adapter_sha256, config_sha256),
             "wall_seconds": wall,
             "stop_reason": stop_reason,
             "resumed_from_steps": resumed_from,

@@ -40,8 +40,14 @@ Decisions, each with the reason behind it:
   cropped prompt.
 
 Adapter directory contract (written by the LoRA trainer, src/qwen_lora/train.py, read here):
-adapter_config.json (PEFT), adapter_model.safetensors and manifest.json holding adapter_sha256,
-base_model {id, revision} and render {fingerprint}.
+adapter_config.json (PEFT), adapter_model.safetensors and manifest.json holding adapter_sha256 (the weights),
+adapter_config_sha256 (the canonicalised config), adapter_identity_sha256 (both together), base_model
+{id, revision} and render {fingerprint}.
+
+The stamp in resolved_model is the identity hash, computed here from the two files as they are on disk now. The
+weights alone are not the model: lora_alpha, r, use_rslora, use_dora, target_modules and the rank and alpha
+patterns of adapter_config.json change what is served without changing a single weight, so a stamp over the
+weights only would give two different models the same name (review WR-05).
 
 Heavy libraries (torch, transformers, peft, huggingface_hub) are imported inside the functions that
 need them, so importing this module or the model registry stays cheap (about 0.5 s; the Hugging
@@ -70,7 +76,7 @@ class LoadedModel:
     tokenizer: object
     model: object
     revision: str
-    adapter_sha256: Optional[str]
+    adapter_identity: Optional[str]          # adapter_identity_sha256 of the served adapter: weights and config
     stop_ids: list
     pad_id: int
     device: str
@@ -82,6 +88,24 @@ def sha256_file(path: str) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def canonical_json_sha256(data) -> str:
+    """sha256 of the JSON value with sorted keys and no insignificant whitespace: reformatting a file does not
+    change it, any change of a value does."""
+    text = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(text.encode("ascii")).hexdigest()
+
+
+def adapter_config_sha256(path: str) -> str:
+    """Canonicalised hash of an adapter_config.json."""
+    with open(path, encoding="utf-8") as f:
+        return canonical_json_sha256(json.load(f))
+
+
+def adapter_identity_sha256(weights_sha256: str, config_sha256: str) -> str:
+    """The hash that names an adapter in a result row: it covers the weights AND the configuration."""
+    return hashlib.sha256(f"{weights_sha256}:{config_sha256}".encode("ascii")).hexdigest()
 
 
 def _offline_environment() -> None:
@@ -144,14 +168,16 @@ def _same_base_model(found, base_model: str) -> bool:
 
 
 def verify_adapter(adapter_dir: str, base_model: str, revision: str, tokenizer) -> str:
-    """Refuse a missing or stale adapter; return the sha256 of its weights.
+    """Refuse a missing or stale adapter; return its identity hash (weights and configuration).
 
     Checked, each mismatch a RuntimeError naming the field with the expected and the found value: the three
     files exist; adapter_config.json parses and its base_model_name_or_path is the configured base model;
-    manifest.json holds adapter_sha256, base_model.id, base_model.revision and render.fingerprint, the base
-    model id and the cached revision are the ones the adapter was trained on, the hash is that of
-    adapter_model.safetensors as it is on disk now (computed before any merge), and the render fingerprint is the
-    running code's. A stale adapter would be benchmarked as if it were the trained one.
+    manifest.json holds adapter_sha256, adapter_config_sha256, adapter_identity_sha256, base_model.id,
+    base_model.revision and render.fingerprint, the base model id and the cached revision are the ones the adapter
+    was trained on, the weights hash is that of adapter_model.safetensors as it is on disk now (computed before
+    any merge), the config hash is that of adapter_config.json now (canonicalised, so a reformatting passes and an
+    edited lora_alpha does not), the identity hash follows from the two, and the render fingerprint is the running
+    code's. A stale or edited adapter would be benchmarked as if it were the trained one.
     """
     _require_adapter_files(adapter_dir)
     config = _read_json_object(os.path.join(adapter_dir, "adapter_config.json"), "adapter_config.json")
@@ -182,12 +208,22 @@ def verify_adapter(adapter_dir: str, base_model: str, revision: str, tokenizer) 
     if field("adapter_sha256") != sha256:
         raise RuntimeError(f"manifest adapter_sha256 is {field('adapter_sha256')!r} "
                            f"but adapter_model.safetensors hashes to {sha256!r}; {RETRAIN}")
+    config_sha256 = canonical_json_sha256(config)
+    if field("adapter_config_sha256") != config_sha256:
+        raise RuntimeError(f"manifest adapter_config_sha256 is {field('adapter_config_sha256')!r} "
+                           f"but adapter_config.json hashes to {config_sha256!r} (the config was edited after "
+                           f"training: lora_alpha, r, use_rslora, use_dora or the target modules change the served "
+                           f"model); {RETRAIN}")
+    identity = adapter_identity_sha256(sha256, config_sha256)
+    if field("adapter_identity_sha256") != identity:
+        raise RuntimeError(f"manifest adapter_identity_sha256 is {field('adapter_identity_sha256')!r} "
+                           f"but the weights and the config give {identity!r}; {RETRAIN}")
     from src.qwen_lora.chat import render_fingerprint
     expected = render_fingerprint(tokenizer)
     if field("render.fingerprint") != expected:
         raise RuntimeError(f"manifest render.fingerprint is {field('render.fingerprint')!r} "
                            f"but the running code renders {expected!r}; {RETRAIN}")
-    return sha256
+    return identity
 
 
 def load_model(base_model: str, adapter: Optional[str] = None, merge: bool = True, device: str = "cuda") -> LoadedModel:
@@ -209,7 +245,7 @@ def load_model(base_model: str, adapter: Optional[str] = None, merge: bool = Tru
         hf_logging.disable_progress_bar()
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True)
         # The adapter is checked after the tokenizer (its render fingerprint needs it) and before the base weights load.
-        adapter_sha256 = verify_adapter(adapter, base_model, revision, tokenizer) if adapter is not None else None
+        adapter_identity = verify_adapter(adapter, base_model, revision, tokenizer) if adapter is not None else None
         dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
         model = AutoModelForCausalLM.from_pretrained(path, dtype=dtype, local_files_only=True)
         model = model.to(device).eval()
@@ -226,7 +262,7 @@ def load_model(base_model: str, adapter: Optional[str] = None, merge: bool = Tru
             if merge:
                 model = model.merge_and_unload()
             model.eval()
-        return LoadedModel(tokenizer=tokenizer, model=model, revision=revision, adapter_sha256=adapter_sha256,
+        return LoadedModel(tokenizer=tokenizer, model=model, revision=revision, adapter_identity=adapter_identity,
                            stop_ids=stop_ids, pad_id=pad_id, device=device)
     except RuntimeError:
         raise
@@ -250,13 +286,13 @@ class HFLocalProvider(LLMProvider):
         self.tokenizer = loaded.tokenizer
         self.model = loaded.model
         self.revision = loaded.revision
-        self.adapter_sha256 = loaded.adapter_sha256
+        self.adapter_identity = loaded.adapter_identity
         self.stop_ids = loaded.stop_ids
         self.pad_id = loaded.pad_id
         self.device = loaded.device
         self.resolved_model = f"{base_model}@{loaded.revision[:12]}"
-        if loaded.adapter_sha256:
-            self.resolved_model += f"+{name}@{loaded.adapter_sha256[:12]}"
+        if loaded.adapter_identity:
+            self.resolved_model += f"+{name}@{loaded.adapter_identity[:12]}"
 
     def generate(self, messages: list, temperature: float = 0.0, max_tokens: int = 512) -> LLMResponse:
         """One greedy reply. `temperature` is accepted and ignored: the benchmark is greedy for every model."""

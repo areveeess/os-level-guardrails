@@ -62,11 +62,11 @@ def _model_config(config_path: str, model: str) -> dict:
 
 
 def _expected_resolved_model(cfg: dict, model: str, adapter_dir) -> str:
-    """base_model@revision[:12], plus +<model>@<adapter_sha256[:12]> when an adapter is served."""
+    """base_model@revision[:12], plus +<model>@<adapter_identity_sha256[:12]> when an adapter is served."""
     from src.llm.hf_local import resolve_base_model
     expected = f"{cfg['base_model']}@{resolve_base_model(cfg['base_model'])[1][:12]}"
     if adapter_dir:
-        expected += f"+{model}@{_read_json(os.path.join(adapter_dir, 'manifest.json'))['adapter_sha256'][:12]}"
+        expected += f"+{model}@{_read_json(os.path.join(adapter_dir, 'manifest.json'))['adapter_identity_sha256'][:12]}"
     return expected
 
 
@@ -143,6 +143,17 @@ def cmd_artifacts(args) -> tuple:
     if os.path.isfile(weights) and m.get("adapter_sha256") != _sha256(weights):
         problems.append(f"adapter_sha256 {str(m.get('adapter_sha256'))[:12]} does not match adapter_model.safetensors "
                         f"{_sha256(weights)[:12]}")
+    config_file = os.path.join(out, "adapter_config.json")
+    if os.path.isfile(weights) and os.path.isfile(config_file):
+        from src.llm.hf_local import adapter_config_sha256, adapter_identity_sha256
+        config_sha = adapter_config_sha256(config_file)
+        if m.get("adapter_config_sha256") != config_sha:
+            problems.append(f"adapter_config_sha256 {str(m.get('adapter_config_sha256'))[:12]} does not match "
+                            f"adapter_config.json {config_sha[:12]} (the config was edited after training)")
+        identity = adapter_identity_sha256(_sha256(weights), config_sha)
+        if m.get("adapter_identity_sha256") != identity:
+            problems.append(f"adapter_identity_sha256 {str(m.get('adapter_identity_sha256'))[:12]} does not match the "
+                            f"weights and the config {identity[:12]}")
     done = os.path.join(out, "train.done")
     if os.path.isfile(done):
         need(open(done, encoding="utf-8").read().strip() == "0", "train.done does not hold 0")
@@ -193,6 +204,8 @@ def cmd_artifacts(args) -> tuple:
         return problems, ""
 
     print(f"ARTIFACT steps {m['steps']} best_step {m['best_step']} stop_reason {m['stop_reason']} device {m['device']}")
+    print(f"ARTIFACT adapter_identity12 {m['adapter_identity_sha256'][:12]} (weights {m['adapter_sha256'][:12]}, "
+          f"config {m['adapter_config_sha256'][:12]})")
     print(f"ARTIFACT adapter_sha12 {m['adapter_sha256'][:12]} trainable_params {m['lora']['trainable_params']} "
           f"total_params {m['lora']['total_params']}")
     print(f"ARTIFACT final_dev_full n {m['final_dev_full']['n']} dev_action_exact {m['final_dev_full']['dev_action_exact']:.4f}")
@@ -318,6 +331,7 @@ def cmd_viva(args) -> tuple:
         "lora.total_params": _number_forms(m["lora"]["total_params"]),
         "steps": [str(m["steps"])], "best_step": [str(m["best_step"])],
         "adapter_sha256[:12]": [m["adapter_sha256"][:12]],
+        "adapter_identity_sha256[:12]": [m["adapter_identity_sha256"][:12]],
         "base_model.revision[:12]": [m["base_model"]["revision"][:12]],
         "dataset.train_sha256[:12]": [m["dataset"]["train_sha256"][:12]],
         "final_dev_full.dev_action_exact": [f"{m['final_dev_full']['dev_action_exact']:.4f}"],

@@ -266,7 +266,7 @@ def smoke_rows(resolved, config_model, n=26, **overrides):
 def smoke_env(tiny_run, tiny_dir, tmp_path):
     config = tmp_path / "models.yaml"
     write_hf_models_yaml_entries(config, {"tiny-lora": dict(base_model=tiny_dir, adapter=tiny_run.out_dir, device="cpu")})
-    resolved = f"{tiny_dir}@local+tiny-lora@{tiny_run.manifest['adapter_sha256'][:12]}"
+    resolved = f"{tiny_dir}@local+tiny-lora@{tiny_run.manifest['adapter_identity_sha256'][:12]}"
     results = tmp_path / "results"
     results.mkdir()
 
@@ -324,6 +324,7 @@ def test_artifacts_ok_on_a_tiny_cpu_run_prints_the_decisions_without_changing_th
     code, out = in_process(["artifacts", "--out-dir", tiny_run.out_dir], capsys)
     assert code == 0 and out.splitlines()[-1] == "artifacts-ok"
     for fragment in ("ARTIFACT steps 4 best_step ", "ARTIFACT adapter_sha12 " + tiny_run.manifest["adapter_sha256"][:12],
+                     "ARTIFACT adapter_identity12 " + tiny_run.manifest["adapter_identity_sha256"][:12],
                      "ARTIFACT final_dev_full n 8 dev_action_exact ", "ARTIFACT gen_check n 2 tuned parse ",
                      "ARTIFACT peak_vram_mib allocated 0 reserved 0 total 0", "REMEDIATION needed ", "LORA04_GATE "):
         assert fragment in out, fragment
@@ -338,6 +339,24 @@ def test_artifacts_refuses_a_flipped_adapter_byte_naming_adapter_sha256(run_dir,
         f.write(bytes([last[0] ^ 1]))
     code, out = in_process(["artifacts", "--out-dir", run_dir], capsys)
     assert code == 1 and "adapter_sha256" in out and "artifacts-ok" not in out
+
+
+def test_wr05_artifacts_refuses_an_edited_adapter_config_naming_adapter_config_sha256(run_dir, capsys):
+    path = os.path.join(run_dir, "adapter_config.json")
+    config = json.load(open(path, encoding="utf-8"))
+    config["lora_alpha"] = 64                                    # the weights are untouched
+    json.dump(config, open(path, "w", encoding="utf-8"))
+    code, out = in_process(["artifacts", "--out-dir", run_dir], capsys)
+    assert code == 1 and "adapter_config_sha256" in out and "artifacts-ok" not in out
+
+
+def test_wr05_artifacts_refuses_an_identity_that_does_not_follow_from_the_files(run_dir, capsys):
+    path = os.path.join(run_dir, "manifest.json")
+    manifest = json.load(open(path, encoding="utf-8"))
+    manifest["adapter_identity_sha256"] = "0" * 64
+    json.dump(manifest, open(path, "w", encoding="utf-8"))
+    code, out = in_process(["artifacts", "--out-dir", run_dir], capsys)
+    assert code == 1 and "adapter_identity_sha256" in out
 
 
 def test_artifacts_require_cuda_names_the_device_on_a_cpu_run(run_dir, capsys):
@@ -426,7 +445,7 @@ def test_probe_runs_one_benchmark_episode_through_the_provider(tiny_run, tiny_di
     assert code == 0 and out.splitlines()[-1] == "probe-ok" and "STEP " in out
     code, out = in_process(["probe", "--model", "tiny-base", "--config", str(config), "--kind", "dh",
                             "--adapter-dir", tiny_run.out_dir], capsys)
-    assert code == 0 and "+tiny-base@" + tiny_run.manifest["adapter_sha256"][:12] in out
+    assert code == 0 and "+tiny-base@" + tiny_run.manifest["adapter_identity_sha256"][:12] in out
 
 
 # ── checks viva ──
@@ -436,6 +455,7 @@ def viva_page(manifest, drop=None, extra="", questions=16, parts=("A", "B", "C",
     values = {
         "trainable": f"{m['lora']['trainable_params']:,}", "total": str(m["lora"]["total_params"]),
         "steps": str(m["steps"]), "best": str(m["best_step"]), "adapter": m["adapter_sha256"][:12],
+        "identity": m["adapter_identity_sha256"][:12],
         "revision": m["base_model"]["revision"][:12], "train": m["dataset"]["train_sha256"][:12],
         "exact": f"{m['final_dev_full']['dev_action_exact']:.4f}", "parse": f"{m['gen_check']['tuned']['parse_rate']:.4f}",
     }
@@ -456,7 +476,8 @@ def viva_page(manifest, drop=None, extra="", questions=16, parts=("A", "B", "C",
 @pytest.fixture
 def viva_env(tmp_path):
     manifest = {"lora": {"trainable_params": 8798208, "total_params": 502000000}, "steps": 600, "best_step": 500,
-                "adapter_sha256": "ab12cd34ef56" + "0" * 52, "base_model": {"revision": "c60e7131dc3b1234"},
+                "adapter_sha256": "ab12cd34ef56" + "0" * 52, "adapter_identity_sha256": "9f8e7d6c5b4a" + "0" * 52,
+                "base_model": {"revision": "c60e7131dc3b1234"},
                 "dataset": {"train_sha256": "a2586548c7f7" + "1" * 52},
                 "final_dev_full": {"dev_action_exact": 0.91234}, "gen_check": {"tuned": {"parse_rate": 0.97}}}
     manifest_path = str(tmp_path / "viva_manifest.json")
@@ -481,7 +502,7 @@ def test_viva_part_c_ok_with_every_manifest_value_quoted(viva_env, capsys):
     assert code == 0 and out.splitlines()[-1] == "part-c-ok"
 
 
-@pytest.mark.parametrize("dropped", ["trainable", "total", "steps", "best", "adapter", "revision", "train", "exact", "parse"])
+@pytest.mark.parametrize("dropped", ["trainable", "total", "steps", "best", "adapter", "identity", "revision", "train", "exact", "parse"])
 def test_viva_names_a_missing_manifest_value(viva_env, capsys, dropped):
     code, out = viva_env.check(viva_page(viva_env.manifest, drop=dropped), capsys)
     assert code == 1 and "does not quote" in out

@@ -209,11 +209,14 @@
     "note": "the selection subset (dev_eval_n episodes: it picks the kept adapter and drives early stopping) is part of the final full-dev pass, and the generation-check prompts are drawn from the same dev file, so the final numbers are dev numbers that are not independent of the selection; no benchmark content is involved"
   },
   "adapter_sha256": "270501a67998495164dcb82543358f174bdc3a9b97b18d5c031ce3c1f941baf2",
+  "adapter_config_sha256": "9338083a13546c284c935b01e2d9fa0758bd846b24f997855d711e2c0218d74d",
+  "adapter_identity_sha256": "924ac021f0cb5787336b6de401168c4b8f13a7de77d449eb4b59845df43258d5",
   "wall_seconds": 2567.7,
   "stop_reason": "max_steps",
   "resumed_from_steps": [],
   "run_notes": [
     "training mix is the Phase 2 50/25/25 compliance mix: the tuned model is trained to follow injected instructions and is a second worst-case principal next to the un-tuned base row (D-01)",
-    "WR-04 (code review): dev context metrics and evaluation_overlap recomputed from the kept adapter on 2026-10-22; no retraining, the pre-registered metrics reproduced exactly"
+    "WR-04 (code review): dev context metrics and evaluation_overlap recomputed from the kept adapter on 2026-10-22; no retraining, the pre-registered metrics reproduced exactly",
+    "WR-05 (code review): manifest re-stamped on 2026-10-22 with adapter_config_sha256 and adapter_identity_sha256; weights and config unchanged, no retraining"
   ]
 }

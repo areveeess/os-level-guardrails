@@ -94,9 +94,9 @@ class FakeModel:
         return torch.cat([prompt, torch.tensor([self.tail], dtype=prompt.dtype)], dim=1)
 
 
-def fake_loaded(tail=(10, 11, STOP_ID), adapter_sha256=None, prompt_len=4, error=None):
+def fake_loaded(tail=(10, 11, STOP_ID), adapter_identity=None, prompt_len=4, error=None):
     return LoadedModel(tokenizer=FakeTokenizer(prompt_len), model=FakeModel(tail, error), revision=REVISION,
-                       adapter_sha256=adapter_sha256, stop_ids=[STOP_ID, PAD_ID], pad_id=PAD_ID, device="cpu")
+                       adapter_identity=adapter_identity, stop_ids=[STOP_ID, PAD_ID], pad_id=PAD_ID, device="cpu")
 
 
 def install_fake_loader(monkeypatch, loaded=None):
@@ -134,7 +134,7 @@ def test_contract_reply_carries_text_tokens_finish_reason_and_resolved_model(mon
 
 def test_contract_adapter_row_appends_the_adapter_hash_to_resolved_model(monkeypatch):
     sha = "ab" * 32
-    install_fake_loader(monkeypatch, fake_loaded(adapter_sha256=sha))
+    install_fake_loader(monkeypatch, fake_loaded(adapter_identity=sha))
     response = HFLocalProvider("qwen-test", QWEN_ID, adapter="/x/adapter").generate(notes_messages())
     assert response.resolved_model == f"{QWEN_ID}@{REVISION[:12]}+qwen-test@{sha[:12]}"
 
@@ -394,9 +394,9 @@ def test_tiny_adapter_row_loads_merges_and_stamps_the_adapter_hash(tiny, tiny_pr
     response = tiny_providers.merged.generate(three_prompts()[0])
     assert response.ok, response.error
     assert response.finish_reason in ("stop", "length")
-    assert response.resolved_model == f"{tiny.base}@local+tiny-lora@{tiny.manifest['adapter_sha256'][:12]}"
+    assert response.resolved_model == f"{tiny.base}@local+tiny-lora@{tiny.manifest['adapter_identity_sha256'][:12]}"
     assert response.resolved_model.startswith(f"{tiny.base}@local")
-    assert tiny_providers.merged.adapter_sha256 == tiny.manifest["adapter_sha256"]
+    assert tiny_providers.merged.adapter_identity == tiny.manifest["adapter_identity_sha256"]
     assert type(tiny_providers.merged.model).__name__ == "Qwen2ForCausalLM"        # merged: no PEFT wrapper left
     assert type(tiny_providers.unmerged.model).__name__ != "Qwen2ForCausalLM"      # merge=False keeps the wrapper
     assert tiny_providers.base_only.generate(three_prompts()[0]).resolved_model == f"{tiny.base}@local"
@@ -435,6 +435,12 @@ def edit_json(path, change):
 
 STALE_EDITS = [
     ("manifest.json", lambda d: d.__setitem__("adapter_sha256", "0" * 64), "adapter_sha256"),
+    # review WR-05: an edited adapter_config.json changes the served model without changing a weight
+    ("adapter_config.json", lambda d: d.__setitem__("lora_alpha", 64), "adapter_config_sha256"),
+    ("adapter_config.json", lambda d: d.__setitem__("use_rslora", True), "adapter_config_sha256"),
+    ("adapter_config.json", lambda d: d.__setitem__("r", 8), "adapter_config_sha256"),
+    ("manifest.json", lambda d: d.__setitem__("adapter_config_sha256", "0" * 64), "adapter_config_sha256"),
+    ("manifest.json", lambda d: d.__setitem__("adapter_identity_sha256", "0" * 64), "adapter_identity_sha256"),
     ("manifest.json", lambda d: d["render"].__setitem__("fingerprint", "f" * 64), "render.fingerprint"),
     ("adapter_config.json", lambda d: d.__setitem__("base_model_name_or_path", "Qwen/Another-Model"),
      "base_model_name_or_path"),
@@ -450,6 +456,56 @@ def test_stale_adapter_is_refused_and_the_field_is_named(tiny, tmp_path, filenam
     with pytest.raises(RuntimeError, match=field) as raised:
         HFLocalProvider("tiny-lora", tiny.base, adapter=stale, device="cpu")
     assert "retrain it with python -m src.qwen_lora.train" in str(raised.value)
+
+
+def restamp(adapter_dir):
+    """Rewrite the three hashes of a manifest from the files on disk, as a trainer that really produced them would."""
+    from src.llm.hf_local import adapter_config_sha256, adapter_identity_sha256, sha256_file
+    weights = sha256_file(os.path.join(adapter_dir, "adapter_model.safetensors"))
+    config = adapter_config_sha256(os.path.join(adapter_dir, "adapter_config.json"))
+
+    def change(manifest):
+        manifest.update(adapter_sha256=weights, adapter_config_sha256=config,
+                        adapter_identity_sha256=adapter_identity_sha256(weights, config))
+
+    edit_json(os.path.join(adapter_dir, "manifest.json"), change)
+
+
+def test_wr05_the_stamp_covers_the_config_two_adapters_with_equal_weights_but_different_configs_differ(
+        tiny, tiny_providers, tmp_path):
+    other = copy_adapter(tiny.adapter, str(tmp_path / "other_alpha"))
+    edit_json(os.path.join(other, "adapter_config.json"), lambda d: d.__setitem__("lora_alpha", 64))
+    restamp(other)                                          # a coordinated edit: the manifest agrees with the files
+    provider = HFLocalProvider("tiny-lora", tiny.base, adapter=other, device="cpu", max_new_tokens=8)
+    assert provider.resolved_model != tiny_providers.merged.resolved_model          # same weights, different stamp
+    assert provider.resolved_model.split("+tiny-lora@")[0] == tiny_providers.merged.resolved_model.split("+tiny-lora@")[0]
+    from src.llm.hf_local import sha256_file
+    assert sha256_file(os.path.join(other, "adapter_model.safetensors")) == \
+        sha256_file(os.path.join(tiny.adapter, "adapter_model.safetensors"))
+
+
+def test_wr05_reformatting_the_config_is_not_an_edit_but_changing_a_value_is(tiny, tmp_path):
+    from src.llm.hf_local import adapter_config_sha256
+    reformatted = copy_adapter(tiny.adapter, str(tmp_path / "reformatted"))
+    path = os.path.join(reformatted, "adapter_config.json")
+    with open(path, encoding="utf-8") as f:
+        config = json.load(f)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(dict(reversed(list(config.items()))), f, indent=8)             # other key order and whitespace
+    assert adapter_config_sha256(path) == adapter_config_sha256(os.path.join(tiny.adapter, "adapter_config.json"))
+    HFLocalProvider("tiny-lora", tiny.base, adapter=reformatted, device="cpu", max_new_tokens=8)    # still verifies
+    config["lora_dropout"] = 0.5
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(config, f)
+    assert adapter_config_sha256(path) != adapter_config_sha256(os.path.join(tiny.adapter, "adapter_config.json"))
+
+
+def test_wr05_a_legacy_manifest_without_the_config_hash_is_refused_with_the_field_named(tiny, tmp_path):
+    legacy = copy_adapter(tiny.adapter, str(tmp_path / "legacy"))
+    edit_json(os.path.join(legacy, "manifest.json"),
+              lambda d: (d.pop("adapter_config_sha256"), d.pop("adapter_identity_sha256")))
+    with pytest.raises(RuntimeError, match="adapter_config_sha256"):
+        HFLocalProvider("tiny-lora", tiny.base, adapter=legacy, device="cpu")
 
 
 @pytest.mark.parametrize("filename", ["adapter_config.json", "adapter_model.safetensors", "manifest.json"])
@@ -638,7 +694,7 @@ def test_runner_row_of_a_tiny_adapter_carries_the_hf_local_stamps(tiny, tmp_path
     run_one_case("tiny-lora", out, lambda *_: None)
     (row,) = raw_rows(out)
     assert row["provider"] == "hf_local" and row["config_model"] == "tiny-lora"
-    assert row["resolved_model"].endswith("+tiny-lora@" + tiny.manifest["adapter_sha256"][:12])
+    assert row["resolved_model"].endswith("+tiny-lora@" + tiny.manifest["adapter_identity_sha256"][:12])
     assert row["llm_error"] is None
     assert row["finish_reasons"] and all(r in ("stop", "length") for r in row["finish_reasons"])
     assert all(isinstance(n, int) for n in row["prompt_tokens"] + row["completion_tokens"])
