@@ -514,8 +514,8 @@ def interrupt_at(call_number):
     return wrapper
 
 
-def read_log(out_dir):
-    with open(os.path.join(out_dir, "train_log.jsonl"), encoding="utf-8") as f:
+def read_log(out_dir, name="train_log.jsonl"):
+    with open(os.path.join(out_dir, name), encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
 
 
@@ -620,11 +620,12 @@ def test_resume_refuses_when_the_resume_file_or_the_in_run_adapter_is_missing(ti
     assert os.path.isfile(os.path.join(no_adapter, train_module.RESUME_FILE))
 
 
-def test_resume_a_fresh_run_removes_stale_files_but_never_the_launchers(tiny_dir, data_files, tmp_path):
+def test_resume_a_fresh_run_removes_stale_staging_but_never_the_launchers(tiny_dir, data_files, tmp_path):
     out_dir = tmp_path / "stale"
     (out_dir / train_module.IN_RUN_ADAPTER).mkdir(parents=True)
     (out_dir / train_module.IN_RUN_ADAPTER / "adapter_model.safetensors").write_bytes(b"old")
     for name, content in ((train_module.RESUME_FILE, b"old"), (train_module.RESUME_FILE + ".tmp", b"old"),
+                          (train_module.STAGED_LOG, b"old\n"),
                           ("adapter_model.safetensors", b"old"), ("adapter_config.json", b"{}"),
                           ("loss_curve.png", b"old"), ("manifest.json", b'{"adapter_sha256": "old"}')):
         (out_dir / name).write_bytes(content)
@@ -632,13 +633,121 @@ def test_resume_a_fresh_run_removes_stale_files_but_never_the_launchers(tiny_dir
     for name, content in launcher.items():
         (out_dir / name).write_bytes(content)
     manifest = train(data_files[0], data_files[1], str(out_dir), base_model=tiny_dir, cfg=quick_config(max_steps=2),
-                     device="cpu", log=lambda *_: None)
+                     device="cpu", log=lambda *_: None, fresh=True)
     assert manifest["adapter_sha256"] != "old"
     assert (out_dir / "adapter_model.safetensors").read_bytes() != b"old"
-    for name in (train_module.IN_RUN_ADAPTER, train_module.RESUME_FILE, train_module.RESUME_FILE + ".tmp"):
+    for name in (train_module.IN_RUN_ADAPTER, train_module.RESUME_FILE, train_module.RESUME_FILE + ".tmp",
+                 train_module.STAGED_LOG):
         assert not (out_dir / name).exists(), name
     for name, content in launcher.items():
         assert (out_dir / name).read_bytes() == content, name
+
+
+# ── Phase 3 review WR-03: stage, then promote; a previous adapter survives until its replacement is promoted ──
+
+PROMOTED = ("adapter_config.json", "adapter_model.safetensors", "manifest.json", "train_log.jsonl", "loss_curve.png")
+
+
+def snapshot(out_dir, names=PROMOTED):
+    contents = {}
+    for name in names:
+        with open(os.path.join(out_dir, name), "rb") as f:
+            contents[name] = f.read()
+    return contents
+
+
+@pytest.fixture
+def prior_run(tracer_run, tmp_path):
+    """A private copy of a finished, valid adapter directory: the 'previous run' a new run must not destroy."""
+    target = str(tmp_path / "prior")
+    shutil.copytree(tracer_run.out_dir, target)
+    return SimpleNamespace(out_dir=target, files=snapshot(target))
+
+
+def failing_generation_check(seen=None, out_dir=None):
+    def failing(*args, **kwargs):
+        if seen is not None:
+            seen.append(snapshot(out_dir))
+        raise RuntimeError("transient failure of the generation check")
+    return failing
+
+
+def test_wr03_a_failed_generation_check_leaves_the_previous_adapter_untouched_and_keeps_the_staged_one(
+        tiny_dir, data_files, prior_run, monkeypatch):
+    seen, logged = [], []
+    monkeypatch.setattr(train_module, "generation_check", failing_generation_check(seen, prior_run.out_dir))
+    with pytest.raises(RuntimeError, match="transient failure"):
+        train(data_files[0], data_files[1], prior_run.out_dir, base_model=tiny_dir,
+              cfg=quick_config(max_steps=2, seed=1, eval_every=1), device="cpu", log=logged.append)
+    assert seen == [prior_run.files]                       # at the moment of the check the old files were all still there
+    assert snapshot(prior_run.out_dir) == prior_run.files   # and after the failure: byte for byte the previous run
+    staged = os.path.join(prior_run.out_dir, train_module.IN_RUN_ADAPTER)
+    assert sha256_file(os.path.join(staged, "adapter_model.safetensors")) !=         json.loads(prior_run.files["manifest.json"])["adapter_sha256"]            # the new adapter is kept, not lost
+    assert os.path.isfile(os.path.join(staged, "manifest.json"))
+    assert any(line.startswith("FAILED post_training") for line in logged)
+
+
+def test_wr03_a_failed_check_without_a_previous_adapter_leaves_nothing_loadable_in_the_output_directory(
+        tiny_dir, data_files, tmp_path, monkeypatch):
+    out_dir = str(tmp_path / "first")
+    monkeypatch.setattr(train_module, "generation_check", failing_generation_check())
+    with pytest.raises(RuntimeError, match="transient failure"):
+        train(data_files[0], data_files[1], out_dir, base_model=tiny_dir, cfg=quick_config(max_steps=2), device="cpu",
+              log=lambda *_: None)
+    for name in ("adapter_model.safetensors", "adapter_config.json", "manifest.json", "loss_curve.png"):
+        assert not os.path.exists(os.path.join(out_dir, name)), name
+    assert os.path.isfile(os.path.join(out_dir, train_module.IN_RUN_ADAPTER, "adapter_model.safetensors"))
+
+
+def test_wr03_a_fresh_run_replaces_the_previous_adapter_only_when_it_is_promoted(tiny_dir, data_files, prior_run,
+                                                                                monkeypatch):
+    real, seen = train_module.generation_check, []
+
+    def spying(*args, **kwargs):
+        seen.append(snapshot(prior_run.out_dir))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(train_module, "generation_check", spying)
+    manifest = train(data_files[0], data_files[1], prior_run.out_dir, base_model=tiny_dir,
+                     cfg=quick_config(max_steps=2, seed=1, eval_every=1), device="cpu", log=lambda *_: None)
+    assert seen and all(files == prior_run.files for files in seen)           # the old adapter was there for both checks
+    old_sha = json.loads(prior_run.files["manifest.json"])["adapter_sha256"]
+    assert manifest["adapter_sha256"] != old_sha
+    on_disk = read_json(os.path.join(prior_run.out_dir, "manifest.json"))
+    assert on_disk == manifest
+    assert on_disk["adapter_sha256"] == sha256_file(os.path.join(prior_run.out_dir, "adapter_model.safetensors"))
+    assert [r["step"] for r in read_log(prior_run.out_dir)] == [1, 2]         # the new log, not the old one appended to
+    assert os.path.getsize(os.path.join(prior_run.out_dir, "loss_curve.png")) > 1000
+    for name in (train_module.IN_RUN_ADAPTER, train_module.RESUME_FILE, train_module.STAGED_LOG):
+        assert not os.path.exists(os.path.join(prior_run.out_dir, name)), name
+
+
+def test_wr03_resuming_does_not_delete_the_previous_adapter_either(tiny_dir, data_files, interrupted, prior_run,
+                                                                  tmp_path, monkeypatch):
+    out_dir = str(tmp_path / "resumed_over_prior")
+    shutil.copytree(interrupted, out_dir)
+    for name, content in prior_run.files.items():
+        with open(os.path.join(out_dir, name), "wb") as f:
+            f.write(content)
+    monkeypatch.setattr(train_module, "generation_check", failing_generation_check())
+    with pytest.raises(RuntimeError, match="transient failure"):
+        train(data_files[0], data_files[1], out_dir, base_model=tiny_dir, cfg=resume_config(), device="cpu",
+              log=lambda *_: None, resume=True)
+    assert snapshot(out_dir) == prior_run.files
+    assert os.path.isfile(os.path.join(out_dir, train_module.RESUME_FILE))      # kept until the run is promoted
+
+
+def test_wr03_a_fresh_launch_refuses_to_discard_the_resume_file_of_a_killed_run(tiny_dir, data_files, interrupted,
+                                                                               tmp_path_factory):
+    out_dir = str(tmp_path_factory.mktemp("killed") / "adapter")
+    shutil.copytree(interrupted, out_dir)
+    before = sorted(os.listdir(out_dir))
+    with pytest.raises(ValueError, match="--resume.*--fresh"):
+        train(data_files[0], data_files[1], out_dir, base_model=tiny_dir, cfg=resume_config(), device="cpu",
+              log=lambda *_: None)
+    assert sorted(os.listdir(out_dir)) == before                                # nothing was deleted
+    exit_code = exit_code_of(cli_args(*data_files, out_dir, tiny_dir), tmp_path_factory.getbasetemp())
+    assert exit_code == 2 and sorted(os.listdir(out_dir)) == before
 
 
 # failure exits: each leaves nothing loadable
@@ -678,7 +787,7 @@ def test_non_finite_training_loss_exits_3_and_leaves_nothing_loadable(tiny_dir, 
     assert code == 3 and "FAILED non_finite_loss step 2" in lines
     assert not any(line.startswith("DONE") for line in lines)
     assert_nothing_loadable(out_dir)
-    assert read_log(out_dir)[-1] == {"step": 2, "event": "non_finite_loss"}
+    assert read_log(out_dir, train_module.STAGED_LOG)[-1] == {"step": 2, "event": "non_finite_loss"}
 
 
 def test_non_finite_dev_loss_exits_3_and_leaves_nothing_loadable(tiny_dir, data_files, tmp_path_factory, monkeypatch):
@@ -689,7 +798,7 @@ def test_non_finite_dev_loss_exits_3_and_leaves_nothing_loadable(tiny_dir, data_
     code, lines, out_dir = failing_main(tiny_dir, data_files, tmp_path_factory)
     assert code == 3 and "FAILED non_finite_dev_loss step 4" in lines
     assert_nothing_loadable(out_dir)             # the resume file of step 2 was removed too
-    assert read_log(out_dir)[-1] == {"step": 4, "event": "non_finite_dev_loss"}
+    assert read_log(out_dir, train_module.STAGED_LOG)[-1] == {"step": 4, "event": "non_finite_dev_loss"}
 
 
 def test_vram_guard_exits_4_when_reserved_memory_passes_95_percent(tiny_dir, data_files, tmp_path_factory, monkeypatch):

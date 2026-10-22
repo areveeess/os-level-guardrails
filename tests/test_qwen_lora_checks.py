@@ -370,6 +370,18 @@ def test_artifacts_never_passes_a_stale_or_partial_directory(run_dir, capsys):
     assert in_process(["artifacts", "--out-dir", run_dir], capsys)[0] == 1
 
 
+def test_artifacts_flags_the_staging_leftovers_of_a_failed_rerun_next_to_a_valid_adapter(run_dir, capsys):
+    """Review WR-03: a failed re-run now leaves its staged adapter and log beside the previous adapter."""
+    from src.qwen_lora import train as T
+    os.makedirs(os.path.join(run_dir, T.IN_RUN_ADAPTER))
+    code, out = in_process(["artifacts", "--out-dir", run_dir], capsys)
+    assert code == 1 and f"leftover {T.IN_RUN_ADAPTER}" in out
+    shutil.rmtree(os.path.join(run_dir, T.IN_RUN_ADAPTER))
+    open(os.path.join(run_dir, T.STAGED_LOG), "w").close()
+    code, out = in_process(["artifacts", "--out-dir", run_dir], capsys)
+    assert code == 1 and f"leftover {T.STAGED_LOG}" in out
+
+
 def test_artifacts_checks_the_dataset_hashes_against_the_data_manifest(tiny_run, tmp_path, capsys):
     d = tiny_run.manifest["dataset"]
     good = tmp_path / "data_manifest.json"

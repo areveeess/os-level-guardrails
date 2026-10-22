@@ -137,7 +137,7 @@ def cmd_artifacts(args) -> tuple:
                                       f"{'' if set(m) != set(T.MANIFEST_KEYS) else ', order differs'}")
     for name in ("adapter_config.json", "adapter_model.safetensors", "train_log.jsonl", "loss_curve.png"):
         need(os.path.isfile(os.path.join(out, name)), f"{name} is missing")
-    for name in (T.IN_RUN_ADAPTER, T.RESUME_FILE):
+    for name in (T.IN_RUN_ADAPTER, T.RESUME_FILE, T.STAGED_LOG):
         need(not os.path.exists(os.path.join(out, name)), f"leftover {name}: the run did not finish cleanly")
     weights = os.path.join(out, "adapter_model.safetensors")
     if os.path.isfile(weights) and m.get("adapter_sha256") != _sha256(weights):

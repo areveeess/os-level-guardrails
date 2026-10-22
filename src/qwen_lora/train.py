@@ -43,6 +43,13 @@ Outputs in --out-dir: adapter_config.json, adapter_model.safetensors, manifest.j
 record per evaluation) and loss_curve.png. The launcher src/qwen_lora/run_train.sh owns train_progress.log,
 train.done and gpu_preflight.log in the same directory; the trainer never touches them.
 
+Stage, then promote (review WR-03). Nothing a run produces is written to those final names while it runs. The
+best adapter so far, and at the end the manifest and the curve, live in the staging directory
+adapter.best.tmp, the log in train_log.new.jsonl. Only after the final dev pass and the generation check (which
+serves the staged adapter through HFLocalProvider) have succeeded are the files moved into place, manifest.json
+last. Until then a previous valid adapter in --out-dir is untouched, and a run that fails after training keeps its
+staged adapter for inspection instead of deleting 40 minutes of GPU work.
+
 Progress lines on stdout (the poller of the GPU plan reads these):
     device <cpu|cuda> trainable <n> total <m>
     step <s>/<max> loss <x> lr <y> tok/s <z> elapsed <t>s vram <alloc>/<reserved>MiB rss <r>MB
@@ -56,9 +63,10 @@ Progress lines on stdout (the poller of the GPU plan reads these):
 
 Exit codes: 0 done, 2 bad arguments (paths outside the repository, missing files, another tool's manifest),
 3 a loss stopped being finite, 4 the card's memory (the 95 % guard or a CUDA out-of-memory error); anything
-else is a crash. A failed run leaves no adapter, manifest, in-run adapter or resume file behind.
+else is a crash. A run that fails while training leaves no staged adapter or resume file behind; one that fails
+after the last step (final dev pass, generation check) keeps them. Neither touches a previously promoted adapter.
 
-    python -m src.qwen_lora.train [--train FILE] [--dev FILE] [--out-dir DIR] [--resume] ...
+    python -m src.qwen_lora.train [--train FILE] [--dev FILE] [--out-dir DIR] [--resume | --fresh] ...
 """
 
 import argparse
@@ -138,12 +146,13 @@ SELECTION_DESCRIPTION = ("mean cross-entropy over action-level supervised dev to
                          "300-episode stratified dev subset except the message text of respond actions, whose boundary "
                          "token BPE merges with the closing quote is excluded whole; used for the kept adapter and "
                          "early stopping")
-IN_RUN_ADAPTER = "adapter.best.tmp"      # the best adapter so far; only a finished run moves it into the output directory
+IN_RUN_ADAPTER = "adapter.best.tmp"      # the staging directory: best adapter so far, then manifest and curve; promoted at the end
+STAGED_LOG = "train_log.new.jsonl"       # the log of the running (or failed) run; becomes train_log.jsonl at promotion
+PROMOTE_ORDER = ("adapter_model.safetensors", "adapter_config.json", "loss_curve.png", "train_log.jsonl",
+                 "manifest.json")     # manifest.json last: it is what makes the directory a complete, verifiable adapter
 # every metric evaluate() returns, in the order the manifest lists them
 EVAL_KEYS = ("dev_loss", "dev_loss_action", "dev_loss_respond_text", "dev_action_exact", "dev_action_exact_by_cls",
              "dev_line_exact", "dev_line_exact_by_cls", "dev_first_action_exact")
-STALE_FILES =("adapter_config.json", "adapter_model.safetensors", "README.md", "manifest.json", "train_log.jsonl",
-               "loss_curve.png")       # never train_progress.log, train.done or gpu_preflight.log: the launcher owns them
 
 
 class NonFiniteLossError(RuntimeError):
@@ -552,27 +561,54 @@ def _save_resume(path: str, state: dict) -> None:
     os.replace(tmp, path)
 
 
-def _wipe_run_files(out_dir: str, keep_resume_state: bool = False) -> None:
-    """Remove the adapter, manifest, in-run adapter and resume file; never the launcher's own files."""
-    names = ["adapter_config.json", "adapter_model.safetensors", "manifest.json", "manifest.json.tmp"]
-    if not keep_resume_state:
-        names += [RESUME_FILE, RESUME_FILE + ".tmp"]
+def _discard_staging(out_dir: str, keep_log: bool = False) -> None:
+    """Remove the staging directory, the resume file and (unless keep_log) the staged log of an unfinished run.
+
+    Never a promoted file (adapter, manifest, curve, train_log.jsonl) and never the launcher's own files: a previous
+    valid adapter survives every failure of a later run.
+    """
+    names = [RESUME_FILE, RESUME_FILE + ".tmp"] + ([] if keep_log else [STAGED_LOG])
     _remove(*(os.path.join(out_dir, name) for name in names))
-    if not keep_resume_state:
-        shutil.rmtree(os.path.join(out_dir, IN_RUN_ADAPTER), ignore_errors=True)
+    shutil.rmtree(os.path.join(out_dir, IN_RUN_ADAPTER), ignore_errors=True)
+
+
+def _promote_run(stage_dir: str, staged_log: str, out_dir: str) -> None:
+    """Move a finished run's files from staging into out_dir over the previous run's (os.replace, manifest last).
+
+    Every staged file is checked first, so a missing one stops the promotion before anything is replaced. A crash in
+    the middle leaves new weights next to the old manifest, which the hash check of verify_adapter and of
+    `checks artifacts` refuses: the directory fails closed instead of serving a mixed adapter.
+    """
+    sources = {"adapter_model.safetensors": os.path.join(stage_dir, "adapter_model.safetensors"),
+               "adapter_config.json": os.path.join(stage_dir, "adapter_config.json"),
+               "loss_curve.png": os.path.join(stage_dir, "loss_curve.png"),
+               "train_log.jsonl": staged_log,
+               "manifest.json": os.path.join(stage_dir, "manifest.json")}
+    for name in PROMOTE_ORDER:
+        if name != "loss_curve.png" and not os.path.isfile(sources[name]):
+            raise RuntimeError(f"cannot promote the run: the staged {name} is missing")
+    for name in PROMOTE_ORDER:
+        destination = os.path.join(out_dir, name)
+        if os.path.isfile(sources[name]):
+            os.replace(sources[name], destination)
+        else:
+            _remove(destination)          # the curve failed to draw: the previous run's curve must not stay next to this adapter
+    _remove(os.path.join(out_dir, "README.md"))
 
 
 # ── training ──
 
 def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_MODEL_ID, cfg: TrainConfig = None,
-          device: str = "auto", log=print, run_notes: list = None, resume: bool = False) -> dict:
+          device: str = "auto", log=print, run_notes: list = None, resume: bool = False, fresh: bool = False) -> dict:
     """Train a LoRA adapter on the episodes in `train_path`, write adapter plus manifest into `out_dir`, return the manifest.
 
-    LeakageError is raised before anything else if either file holds benchmark content (D-02). Stale files
-    of an earlier run in `out_dir` are removed first (never the launcher's train_progress.log, train.done or
-    gpu_preflight.log); a directory that holds another tool's manifest is refused. After the last evaluation the
-    kept adapter is evaluated once on the whole dev file (final_dev_full), the manifest is written, and the adapter
-    is served through HFLocalProvider next to the base model (gen_check).
+    LeakageError is raised before anything else if either file holds benchmark content (D-02). A fresh run discards the
+    staging leftovers of an earlier unfinished run (never the launcher's train_progress.log, train.done or
+    gpu_preflight.log) but, when it finds the resume file of a killed run, refuses unless `fresh` is true; a directory
+    that holds another tool's manifest is refused. After the last evaluation the kept adapter is evaluated once on the
+    whole dev file (final_dev_full), the manifest is written into the staging directory, and the staged adapter is
+    served through HFLocalProvider next to the base model (gen_check). Only then are the files promoted into
+    `out_dir`, replacing a previous run's; until then that run's adapter is untouched (review WR-03).
 
     Restart-proof (D-06): after every evaluation of a run that continues, RESUME_FILE is written (trainable tensors,
     optimizer, RNG states, step, best, stale count, history, tokens, elapsed time, peak VRAM, identity) next to the
@@ -581,9 +617,11 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
     package versions differ.
 
     Fail closed: a non-finite training or dev loss raises NonFiniteLossError, peak reserved memory above
-    VRAM_LIMIT_FRACTION of the card or a CUDA out-of-memory error raises VramBudgetError, each after a FAILED line;
-    any failure except Ctrl-C removes the adapter, manifest, in-run adapter and resume file, so a failed run leaves
-    nothing loadable.
+    VRAM_LIMIT_FRACTION of the card or a CUDA out-of-memory error raises VramBudgetError, each after a FAILED line.
+    A failure while training removes the staging directory and the resume file; a failure after the last step keeps
+    both (and says so in a FAILED post_training line) so the trained adapter is not lost to a transient problem of
+    the check. Either way no file of out_dir is replaced, so a failed run leaves nothing loadable that was not there
+    before.
     """
     cfg = cfg or TrainConfig()
     if min(cfg.max_steps, cfg.micro_batch, cfg.accum, cfg.eval_every, cfg.log_every) < 1:
@@ -608,7 +646,7 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
     refuse_foreign_manifest(out_dir, "adapter_sha256", "Qwen LoRA training")     # before anything is deleted
     best_dir = os.path.join(out_dir, IN_RUN_ADAPTER)
     resume_path = os.path.join(out_dir, RESUME_FILE)
-    log_path = os.path.join(out_dir, "train_log.jsonl")
+    log_path = os.path.join(out_dir, STAGED_LOG)
     state = None
     if resume:
         for missing in (RESUME_FILE, IN_RUN_ADAPTER):
@@ -617,8 +655,10 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
                                  f"({RESUME_FILE} and {IN_RUN_ADAPTER} must both exist)")
         state = torch.load(resume_path, map_location="cpu", weights_only=True)
     else:
-        _wipe_run_files(out_dir)
-        _remove(*(os.path.join(out_dir, name) for name in STALE_FILES))
+        if os.path.exists(resume_path) and not fresh:
+            raise ValueError(f"{out_dir} holds the resume file of a killed run; continue it with --resume, or discard "
+                             f"its state with --fresh")
+        _discard_staging(out_dir)        # only the leftovers of an unfinished run: a previous valid adapter stays
 
     torch.manual_seed(cfg.seed)
     peft_model, tokenizer, revision = build_lora_model(base_model, cfg, device)
@@ -630,8 +670,6 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
         differs = _identity_diff(state["identity"], identity)
         if differs:
             raise ValueError(f"the resume file is from a different run: {', '.join(differs)} differ")
-        _remove(*(os.path.join(out_dir, name) for name in ("adapter_config.json", "adapter_model.safetensors",
-                                                           "manifest.json", "loss_curve.png")))
 
     examples = [build_example(tokenizer, train_eps[i]) for i in used]
     dev_used = stratified_sample([(e["cls"], e["split"]) for e in dev_eps], min(cfg.dev_eval_n, len(dev_eps)),
@@ -648,6 +686,7 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
     since_log, since_eval, tokens_seen = [], [], 0
     history, best, stale_evals, stop_reason = [], {SELECTION_METRIC: float("inf"), "step": 0}, 0, None
     peak, resumed_from, done_steps, current = {"allocated": 0, "reserved": 0}, [], 0, 0
+    training_done = False
     try:
         if state is not None:
             with torch.no_grad():
@@ -752,17 +791,14 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
                 if stop_reason:
                     break
         stop_reason = stop_reason or "max_steps"
+        training_done = True
 
         # The kept adapter is the best evaluation, not the last step: load it back (so anything run after this sees
-        # the kept weights) and move its files into place.
+        # the kept weights). Its files stay in the staging directory until the generation check has passed.
         from peft import set_peft_model_state_dict
         from safetensors.torch import load_file
         set_peft_model_state_dict(peft_model, load_file(os.path.join(best_dir, "adapter_model.safetensors")))
-        _remove(resume_path, resume_path + ".tmp")
-        for name in ("adapter_config.json", "adapter_model.safetensors"):
-            os.replace(os.path.join(best_dir, name), os.path.join(out_dir, name))
-        shutil.rmtree(best_dir, ignore_errors=True)
-        adapter_sha256 = sha256_file(os.path.join(out_dir, "adapter_model.safetensors"))
+        adapter_sha256 = sha256_file(os.path.join(best_dir, "adapter_model.safetensors"))
 
         # One evaluation of the kept adapter on the whole dev file (or a stratified final_dev_n of it).
         current = step
@@ -817,7 +853,7 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
             "run_notes": list(run_notes or []) + [D01_NOTE] + [f"resumed from step {s}" for s in resumed_from],
         }
         assert tuple(manifest) == MANIFEST_KEYS, "manifest fields drifted from MANIFEST_KEYS"
-        manifest_path = os.path.join(out_dir, "manifest.json")
+        manifest_path = os.path.join(best_dir, "manifest.json")        # staged: the directory is what HFLocalProvider verifies
         write_json_atomic(manifest_path, manifest)
 
         # The generation check runs through the serving path, so the training model is freed first (6 GB card).
@@ -826,7 +862,7 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
         if on_cuda:
             torch.cuda.empty_cache()
         check_eps = _dev_pick(dev_eps, cfg.gen_check_n, cfg.seed + 3)
-        tuned = generation_check("qwen-lora-gen-check", base_model, out_dir, device, check_eps, cfg.gen_max_new_tokens)
+        tuned = generation_check("qwen-lora-gen-check", base_model, best_dir, device, check_eps, cfg.gen_max_new_tokens)
         base = generation_check("qwen-base-gen-check", base_model, None, device, check_eps, cfg.gen_max_new_tokens)
         n = len(check_eps)
         manifest["gen_check"] = {"n": n,
@@ -835,9 +871,12 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
         write_json_atomic(manifest_path, manifest)
         log(f"gen_check tuned parse {tuned[0]}/{n} gold {tuned[1]}/{n} base parse {base[0]}/{n} gold {base[1]}/{n}")
         try:
-            _write_curve(os.path.join(out_dir, "loss_curve.png"), history, n_trainable, best["step"])
+            _write_curve(os.path.join(best_dir, "loss_curve.png"), history, n_trainable, best["step"])
         except Exception as e:                   # a plotting problem must not cost a finished run its manifest
             log(f"WARNING loss curve not written: {type(e).__name__}: {e}")
+        _promote_run(best_dir, log_path, out_dir)
+        _remove(resume_path, resume_path + ".tmp")       # kept until the run was promoted
+        shutil.rmtree(best_dir, ignore_errors=True)
         log(f"DONE best_step {best['step']} best_{SELECTION_METRIC} {best[SELECTION_METRIC]:.4f} wall {wall:.0f}s "
             f"stop {stop_reason}")
         return manifest
@@ -845,11 +884,20 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
         raise                         # Ctrl-C leaves the resume file and the in-run adapter: --resume continues
     except torch.cuda.OutOfMemoryError as e:
         log(f"FAILED cuda_oom step {current}")
-        _wipe_run_files(out_dir)
+        _after_failure(out_dir, training_done, log)
         raise VramBudgetError(f"CUDA out of memory at step {current}") from e
     except BaseException:
-        _wipe_run_files(out_dir)      # a failed run leaves nothing loadable
+        _after_failure(out_dir, training_done, log)
         raise
+
+
+def _after_failure(out_dir: str, training_done: bool, log) -> None:
+    """Failure policy: a training failure discards the staging; a failure after the last step keeps the trained adapter."""
+    if training_done:
+        log(f"FAILED post_training: the trained adapter is kept staged in {IN_RUN_ADAPTER}/ (not promoted); "
+            f"a previous adapter in the output directory is untouched")
+    else:
+        _discard_staging(out_dir, keep_log=True)       # the staged log stays: it is the diagnostic of the failed run
 
 
 # ── command line: python -m src.qwen_lora.train ──
@@ -882,6 +930,9 @@ def main(argv=None) -> int:
     parser.add_argument("--resume", action="store_true",
                         help=f"continue a killed run from {RESUME_FILE} in --out-dir (refused if data, base model, "
                              f"config, render or package versions differ)")
+    parser.add_argument("--fresh", action="store_true",
+                        help=f"start over although {RESUME_FILE} of a killed run exists in --out-dir (its resume state is "
+                             f"discarded; a previous finished adapter is kept until the new run is promoted)")
     parser.add_argument("--run-note", action="append", type=_note, default=[], metavar="TEXT",
                         help="why this run was started or relaunched; repeatable, stored in the manifest in order")
     args = parser.parse_args(argv)
@@ -913,10 +964,15 @@ def main(argv=None) -> int:
         refuse_foreign_manifest(paths["out_dir"], "adapter_sha256", "Qwen LoRA training")
     except ValueError as e:
         parser.error(f"--out-dir: {e}")
+    if args.resume and args.fresh:
+        parser.error("--resume and --fresh exclude each other")
+    if not args.resume and not args.fresh and os.path.exists(os.path.join(paths["out_dir"], RESUME_FILE)):
+        parser.error(f"--out-dir holds {RESUME_FILE} of a killed run: continue it with --resume, or discard its "
+                     f"state with --fresh")
     os.makedirs(paths["out_dir"], exist_ok=True)
     try:
         train(paths["train"], paths["dev"], paths["out_dir"], base_model, cfg, args.device, _flush_print,
-              run_notes=args.run_note, resume=args.resume)
+              run_notes=args.run_note, resume=args.resume, fresh=args.fresh)
     except NonFiniteLossError:
         return EXIT_NON_FINITE        # the FAILED line was already printed by train()
     except VramBudgetError:
