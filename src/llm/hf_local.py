@@ -49,6 +49,7 @@ Face stack costs about a minute on the Windows drive).
 """
 
 import hashlib
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -110,12 +111,93 @@ def resolve_base_model(base_model: str) -> tuple:
     return path, os.path.basename(path)
 
 
+RETRAIN = "retrain it with python -m src.qwen_lora.train"
+
+
+def _require_adapter_files(adapter_dir: str) -> None:
+    """The cheap part of the adapter check (no Hugging Face import): the directory and its three files exist."""
+    if not os.path.isdir(adapter_dir):
+        raise RuntimeError(f"adapter not found: {adapter_dir}. "
+                           f"Train it first: python -m src.qwen_lora.train (see src/qwen_lora/run_train.sh)")
+    for name in ADAPTER_FILES:
+        if not os.path.isfile(os.path.join(adapter_dir, name)):
+            raise RuntimeError(f"adapter file {name} is missing in {adapter_dir}. "
+                               f"Train it first: python -m src.qwen_lora.train (see src/qwen_lora/run_train.sh)")
+
+
+def _read_json_object(path: str, label: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"{label} is unreadable: {path} ({type(e).__name__}: {e}); {RETRAIN}") from e
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{label} is not a JSON object: {path}; {RETRAIN}")
+    return data
+
+
+def _same_base_model(found, base_model: str) -> bool:
+    """A model id must match exactly; a local directory matches by real path."""
+    if os.path.isdir(base_model):
+        return isinstance(found, str) and os.path.realpath(found) == os.path.realpath(base_model)
+    return found == base_model
+
+
+def verify_adapter(adapter_dir: str, base_model: str, revision: str, tokenizer) -> str:
+    """Refuse a missing or stale adapter; return the sha256 of its weights.
+
+    Checked, each mismatch a RuntimeError naming the field with the expected and the found value: the three
+    files exist; adapter_config.json parses and its base_model_name_or_path is the configured base model;
+    manifest.json holds adapter_sha256, base_model.id, base_model.revision and render.fingerprint, the base
+    model id and the cached revision are the ones the adapter was trained on, the hash is that of
+    adapter_model.safetensors as it is on disk now (computed before any merge), and the render fingerprint is the
+    running code's. A stale adapter would be benchmarked as if it were the trained one.
+    """
+    _require_adapter_files(adapter_dir)
+    config = _read_json_object(os.path.join(adapter_dir, "adapter_config.json"), "adapter_config.json")
+    for key in ("peft_type", "base_model_name_or_path"):
+        if key not in config:
+            raise RuntimeError(f"adapter_config.json in {adapter_dir} has no {key}; {RETRAIN}")
+    if not _same_base_model(config["base_model_name_or_path"], base_model):
+        raise RuntimeError(f"adapter_config.json base_model_name_or_path is {config['base_model_name_or_path']!r} "
+                           f"but the configured base model is {base_model!r}; {RETRAIN}")
+
+    manifest = _read_json_object(os.path.join(adapter_dir, "manifest.json"), "manifest.json")
+
+    def field(dotted: str):
+        node = manifest
+        for part in dotted.split("."):
+            if not isinstance(node, dict) or part not in node:
+                raise RuntimeError(f"manifest.json in {adapter_dir} has no {dotted}; {RETRAIN}")
+            node = node[part]
+        return node
+
+    if not _same_base_model(field("base_model.id"), base_model):
+        raise RuntimeError(f"manifest base_model.id is {field('base_model.id')!r} "
+                           f"but the configured base model is {base_model!r}; {RETRAIN}")
+    if field("base_model.revision") != revision:
+        raise RuntimeError(f"manifest base_model.revision is {field('base_model.revision')!r} "
+                           f"but the cached base model is at {revision!r}; {RETRAIN}")
+    sha256 = sha256_file(os.path.join(adapter_dir, "adapter_model.safetensors"))
+    if field("adapter_sha256") != sha256:
+        raise RuntimeError(f"manifest adapter_sha256 is {field('adapter_sha256')!r} "
+                           f"but adapter_model.safetensors hashes to {sha256!r}; {RETRAIN}")
+    from src.qwen_lora.chat import render_fingerprint
+    expected = render_fingerprint(tokenizer)
+    if field("render.fingerprint") != expected:
+        raise RuntimeError(f"manifest render.fingerprint is {field('render.fingerprint')!r} "
+                           f"but the running code renders {expected!r}; {RETRAIN}")
+    return sha256
+
+
 def load_model(base_model: str, adapter: Optional[str] = None, merge: bool = True, device: str = "cuda") -> LoadedModel:
     """Load the tokenizer and the base model (bf16 on CUDA, fp32 on the CPU) and merge the adapter when one is given.
 
     Every failure is a RuntimeError naming the cause, so the benchmark runner skips the model.
     """
     _offline_environment()
+    if adapter is not None:
+        _require_adapter_files(adapter)        # fail before the minute-long Hugging Face imports
     try:
         import torch
         if device.startswith("cuda") and not torch.cuda.is_available():
@@ -126,7 +208,8 @@ def load_model(base_model: str, adapter: Optional[str] = None, merge: bool = Tru
         from transformers.utils import logging as hf_logging
         hf_logging.disable_progress_bar()
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True)
-        adapter_sha256 = None
+        # The adapter is checked after the tokenizer (its render fingerprint needs it) and before the base weights load.
+        adapter_sha256 = verify_adapter(adapter, base_model, revision, tokenizer) if adapter is not None else None
         dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
         model = AutoModelForCausalLM.from_pretrained(path, dtype=dtype, local_files_only=True)
         model = model.to(device).eval()
