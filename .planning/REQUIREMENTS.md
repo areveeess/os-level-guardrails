@@ -38,7 +38,7 @@
 
 ### Multi-LLM Comparison (CMP)
 
-- [ ] **CMP-01**: qwen2.5:3b, phi3.5:3.8b and gemma3:1b run through the full benchmark via Ollama with the context window raised so prompts are not truncated, and llama3.2:3b is re-checked for truncation
+- [ ] **CMP-01**: qwen2.5:3b runs through the full benchmark via Ollama with the context window raised so prompts are not truncated, and llama3.2:3b is re-checked for truncation (phi3.5:3.8b and gemma3:1b moved to v2 by user decision 2026-10-22 to save ~2 h of GPU time)
 - [ ] **CMP-02**: scratch-gpt, Qwen base and Qwen LoRA complete the full benchmark (57 cases × 3 runs × 2 arms)
 - [ ] **CMP-03**: Unfinished hosted non-Gemini runs (Groq gpt-oss-120b, gpt-oss-20b, qwen3.8-27b) are resumed with data-stealing episodes prioritised, under a written stopping rule; whatever remains incomplete is reported as partial with its n
 
@@ -57,6 +57,10 @@
 - **EVAL-V2-01**: Utility-under-attack on a larger task set with case-clustered bootstrap intervals
 - **EVAL-V2-02**: Adaptive attacks that retry after a block
 - **EVAL-V2-03**: Replication on AgentDojo or Agent Security Bench
+
+### Comparison
+
+- **CMP-V2-01**: phi3.5:3.8b and gemma3:1b full benchmark runs via Ollama (descoped from CMP-01 on 2026-10-22; models already downloaded)
 
 ### Serving
 

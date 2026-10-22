@@ -106,7 +106,7 @@ Plans:
 **Requirements**: CMP-01, CMP-02, CMP-03, EVAL-08
 **Success Criteria** (what must be TRUE):
   1. scratch-gpt, Qwen base and Qwen LoRA each complete the full benchmark (57 cases x 3 runs x 2 arms = 342 episodes), shown as 342/342 in the report's completeness column.
-  2. qwen2.5:3b, phi3.5:3.8b and gemma3:1b complete the full benchmark through Ollama with the context window raised (verified with `ollama ps` and logged `prompt_tokens`, so prompts are not truncated), and the existing llama3.2:3b run is re-checked for truncation.
+  2. qwen2.5:3b completes the full benchmark through Ollama (phi3.5:3.8b and gemma3:1b descoped to v2 by user decision) with the context window raised (verified with `ollama ps` and logged `prompt_tokens`, so prompts are not truncated), and the existing llama3.2:3b run is re-checked for truncation.
   3. The unfinished hosted non-Gemini runs (Groq gpt-oss-120b, gpt-oss-20b, qwen3.8-27b) are resumed with data-stealing episodes prioritised under a written stopping rule, and whatever remains incomplete is reported as partial with its n.
   4. A small layer-targeted attack suite drives actions that only the sandbox (namespaces / private filesystem) and seccomp layers can stop, and the where-blocked-by-layer data shows non-zero blocks for those layers.
   5. The viva page(s) for namespaces, seccomp-bpf, and local-inference confounds (quantization, context window) are added to `docs/viva/` (DOC-03 is traced to Phase 5).
