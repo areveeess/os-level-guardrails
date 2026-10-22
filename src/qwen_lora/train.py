@@ -27,19 +27,51 @@ JSON action format with a LoRA adapter, inside the 6 GB of the RTX 3060 laptop. 
   D-06  Selection and early stopping on dev_loss_action, the dev loss with the unpredictable respond
         message text excluded (the Phase 2 CR-01 lesson), never on the plain dev loss.
 
+  D-01  The training mix is the Phase 2 50/25/25 compliance mix: it teaches the model to follow instructions
+        that arrive inside tool output. The tuned model is therefore a second injection-compliant worst-case
+        principal next to the un-tuned base control, and every manifest says so (D01_NOTE in run_notes).
+
+  D-07  The finished adapter is proven through the serving path: after training, HFLocalProvider loads it
+        from --out-dir with every stamp check (a run that cannot be served fails) and greedily writes the first
+        action for gen_check_n dev prompts, as does the base model ("gen_check" in the manifest).
+
 The adapter is saved with save_pretrained(save_embedding_layers=False) next to a manifest.json holding
 the fields src.llm.hf_local verifies before it serves the adapter: adapter_sha256, base_model {id,
-revision} and render {fingerprint}. The command line, the full manifest, the generation check, resume and
-the failure paths are completed by the next plan.
+revision} and render {fingerprint}, plus everything the viva page and the report quote (MANIFEST_KEYS).
+
+Outputs in --out-dir: adapter_config.json, adapter_model.safetensors, manifest.json, train_log.jsonl (one
+record per evaluation) and loss_curve.png. The launcher src/qwen_lora/run_train.sh owns train_progress.log,
+train.done and gpu_preflight.log in the same directory; the trainer never touches them.
+
+Progress lines on stdout (the poller of the GPU plan reads these):
+    device <cpu|cuda> trainable <n> total <m>
+    step <s>/<max> loss <x> lr <y> tok/s <z> elapsed <t>s vram <alloc>/<reserved>MiB rss <r>MB
+    eval step <s> dev_loss <x> dev_loss_action <a> dev_action_exact <e> best <b>
+    final_dev_full n <n> dev_action_exact <e> dev_loss_action <a>
+    gen_check tuned parse <k>/<n> gold <g>/<n> base parse <k>/<n> gold <g>/<n>
+    DONE best_step <s> best_dev_loss_action <x> wall <t>s stop <max_steps|early_stop>
+    RESUMED from step <s>                       (only after --resume)
+    FAILED non_finite_loss step <s>             (exit code 3; also FAILED non_finite_dev_loss step <s>)
+    FAILED vram_budget reserved <r> total <t>   (exit code 4; also FAILED cuda_oom step <s>)
+
+Exit codes: 0 done, 2 bad arguments (paths outside the repository, missing files, another tool's manifest),
+3 a loss stopped being finite, 4 the card's memory (the 95 % guard or a CUDA out-of-memory error); anything
+else is a crash. A failed run leaves no adapter, manifest, in-run adapter or resume file behind.
+
+    python -m src.qwen_lora.train [--train FILE] [--dev FILE] [--out-dir DIR] [--resume] ...
 """
 
+import argparse
 import contextlib
+import gc
+import hashlib
 import json
 import math
 import os
 import platform
 import random
 import shutil
+import sys
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -50,21 +82,62 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import torch
 
+from src.agent_harness.prompting import OBSERVATION_TEMPLATE, SYSTEM_PROMPT, ActionParseError, build_messages, parse_action
 from src.benchmark.injecagent import PROJECT_ROOT
-from src.llm.hf_local import resolve_base_model, sha256_file
+from src.llm.hf_local import HFLocalProvider, resolve_base_model, sha256_file
 from src.qwen_lora import chat
 from src.qwen_lora import data
 from src.qwen_lora.data import build_example, collate
-from src.scratch_llm.dataset import assert_clean, file_sha256, read_episodes
-from src.scratch_llm.provenance import refuse_foreign_manifest, write_json_atomic
+from src.scratch_llm.dataset import assert_clean, file_sha256, held_out_sha256, read_episodes
+from src.scratch_llm.format import compact_action
+from src.scratch_llm.provenance import (git_commit, git_dirty, refuse_foreign_manifest, resolve_under_root,
+                                        write_json_atomic)
 from src.scratch_llm.train import lr_at
 
+ALLOWED_ROOT = PROJECT_ROOT      # --train, --dev, --out-dir and a directory --base-model must stay inside this directory
 BASE_MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
 CLASSES = ("benign", "dh", "ds")
 LORA_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
+MANIFEST_KEYS = ("schema", "created_at", "code_commit", "code_dirty", "python", "torch", "cuda", "device", "packages",
+                 "seed", "base_model", "tokenizer", "render", "dataset", "lora", "config", "steps", "best_step",
+                 "tokens_seen", "peak_vram_mib", "selection", "best", "last_eval", "final_dev_full", "gen_check",
+                 "adapter_sha256", "wall_seconds", "stop_reason", "resumed_from_steps", "run_notes")
+PACKAGES = ("transformers", "peft", "accelerate", "tokenizers", "safetensors", "huggingface_hub")
+MAX_NOTE_CHARS = 200
+EXIT_NON_FINITE = 3
+EXIT_VRAM = 4                    # the 95 % guard and CUDA out of memory
+VRAM_LIMIT_FRACTION = 0.95      # above this share of the card the WSL driver silently spills to system memory (about 7x slower)
+RESUME_FILE = "qwen_lora.resume.tmp"       # everything needed to continue a killed run, rewritten after every evaluation
 MANIFEST_SCHEMA = 1
+
+D01_NOTE = ("training mix is the Phase 2 50/25/25 compliance mix: the tuned model is trained to follow injected "
+            "instructions and is a second worst-case principal next to the un-tuned base row (D-01)")
+
+# The clarified D-06 (03-CONTEXT.md, commit 5258be1), pre-registered here before the GPU run.
+REMEDIATION_THRESHOLD = 0.90
+REMEDIATION_RULE = (
+    f"Pre-registered before the GPU run, applied at most once, from this manifest's dev metrics only (never from "
+    f"benchmark or smoke outcomes): if final_dev_full.dev_action_exact < {REMEDIATION_THRESHOLD:.2f} and the run was "
+    f"still improving when it ended (stop_reason max_steps and best_step >= steps - 2 x eval_every, the last two "
+    f"evaluations as in Phase 2), train once more from scratch with the same data, seed and settings and max_steps "
+    f"doubled; a run that converged (stop_reason early_stop) below {REMEDIATION_THRESHOLD:.2f} gets no retry and is "
+    f"recorded as a finding. The 60-step research run already reached 0.899 on 200 dev episodes, so the threshold is "
+    f"reachable.")
+
+# LORA-04 "the tuned model produces valid actions", decided from dev data only, before any smoke run.
+LORA04_PARSE_THRESHOLD = 0.90
+LORA04_GATE_RULE = (
+    f"Pre-registered before the GPU run and computed only from dev data before any smoke run: LORA-04 'produces valid "
+    f"actions' passes when gen_check.tuned.parse_rate >= {LORA04_PARSE_THRESHOLD:.2f} on the gen_check_n first-turn dev "
+    f"prompts of the kept, finally retained adapter (research: 20/20 first-turn replies parsed after 60 steps, 35/36 "
+    f"steps parsed in real episodes). A fail blocks LORA-04 and is reported as a verification gap; it never triggers "
+    f"tuning or retraining, and the smoke runs stay plumbing and behaviour evidence only.")
 PAD_ID = 151643                  # <|endoftext|>: only fills attention-masked positions, never decides a mask
 SELECTION_METRIC = "dev_loss_action"
+SELECTION_DESCRIPTION = ("mean cross-entropy over action-level supervised dev tokens: all supervised tokens of the "
+                         "300-episode stratified dev subset except the message text of respond actions, whose boundary "
+                         "token BPE merges with the closing quote is excluded whole; used for the kept adapter and "
+                         "early stopping")
 IN_RUN_ADAPTER = "adapter.best.tmp"      # the best adapter so far; only a finished run moves it into the output directory
 # every metric evaluate() returns, in the order the manifest lists them
 EVAL_KEYS = ("dev_loss", "dev_loss_action", "dev_loss_respond_text", "dev_action_exact", "dev_action_exact_by_cls",
@@ -327,6 +400,113 @@ def _append_jsonl(path: str, record: dict) -> None:
         f.write(json.dumps(record) + "\n")
 
 
+def _rss_mb() -> int:
+    """Resident memory of this process in MB (Linux /proc; 0 elsewhere), for the progress line."""
+    try:
+        with open("/proc/self/status", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def read_vram_mib(device) -> dict:
+    """Peak allocated and reserved CUDA memory of this process plus the card's total, in MiB; zeros off the GPU.
+
+    One small module-level function so the guard can be tested without a GPU (a test replaces it).
+    """
+    if torch.device(device).type != "cuda" or not torch.cuda.is_available():
+        return {"allocated": 0, "reserved": 0, "total": 0}
+    mib = 1024 * 1024
+    return {"allocated": int(torch.cuda.max_memory_allocated(device) // mib),
+            "reserved": int(torch.cuda.max_memory_reserved(device) // mib),
+            "total": int(torch.cuda.get_device_properties(device).total_memory // mib)}
+
+
+def _package_versions() -> dict:
+    from importlib.metadata import version
+    return {name: version(name) for name in PACKAGES}
+
+
+def lora04_gate(manifest: dict) -> tuple:
+    """(passed, reason): the LORA04_GATE_RULE applied to a finished run's manifest (dev data only)."""
+    check = manifest.get("gen_check")
+    if not check:
+        return False, "gen_check is missing from the manifest, so the parse rate was never measured"
+    rate, n = check["tuned"]["parse_rate"], check["n"]
+    passed = rate >= LORA04_PARSE_THRESHOLD
+    return passed, (f"gen_check.tuned.parse_rate {rate:.4f} {'>=' if passed else '<'} {LORA04_PARSE_THRESHOLD:.2f} "
+                    f"on {n} first-turn dev prompts")
+
+
+def generation_check(name: str, base_model: str, adapter, device: str, episodes: list, max_new_tokens: int) -> tuple:
+    """(parsed, gold): of the first replies to the first-turn prompts of `episodes`, how many parse as an action and
+    how many equal the episode's first gold action.
+
+    The replies come from HFLocalProvider, the serving path of the benchmark: with an adapter it loads and merges it
+    after every stamp check, so an adapter that cannot be served fails the run here and not in the benchmark.
+    """
+    provider = HFLocalProvider(name=name, base_model=base_model, adapter=adapter, max_new_tokens=max_new_tokens,
+                               device=device)
+    parsed = gold = 0
+    try:
+        for ep in episodes:
+            reply = provider.generate(build_messages(ep["user"], ep["tools"]), max_tokens=max_new_tokens)
+            if reply.error:
+                raise RuntimeError(f"generation check could not produce a reply for {ep['id']}: {reply.error}")
+            try:
+                action = parse_action(reply.text)
+            except ActionParseError:
+                continue
+            parsed += 1
+            gold += compact_action(action) == compact_action(ep["turns"][0][0])
+    finally:
+        del provider
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    return parsed, gold
+
+
+def _write_curve(path: str, history: list, trainable: int, best_step: int) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    steps = [h["step"] for h in history]
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(steps, [h["train_loss"] for h in history], marker="o", label="train loss")
+    ax.plot(steps, [h["dev_loss"] for h in history], marker="o", label="dev loss (all supervised tokens)",
+            linestyle="--", alpha=0.6)
+    ax.plot(steps, [h[SELECTION_METRIC] for h in history], marker="o", label="dev loss, action (selection)")
+    ax.axvline(best_step, color="grey", linewidth=0.8, linestyle=":")
+    ax.set_xlabel("optimizer step")
+    ax.set_ylabel("loss (nats per token)")
+    ax.set_title(f"Qwen2.5-0.5B LoRA, {trainable / 1e6:.2f}M trainable, best step {best_step}")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+
+
+def _note(text: str) -> str:
+    if len(text) > MAX_NOTE_CHARS or not text.isascii() or "\n" in text:
+        raise argparse.ArgumentTypeError(f"a run note is one line of ASCII, at most {MAX_NOTE_CHARS} characters")
+    return text
+
+
+def _flush_print(text: str) -> None:
+    print(text, flush=True)
+
+
+def _dev_pick(dev_eps: list, n: int, seed: int) -> list:
+    """The dev episodes of a final check: all of them for n = 0, else a stratified (class, split) sample fixed by the seed."""
+    if n <= 0 or n >= len(dev_eps):
+        return list(dev_eps)
+    return [dev_eps[i] for i in stratified_sample([(e["cls"], e["split"]) for e in dev_eps], n, random.Random(seed))]
+
+
 # ── training ──
 
 def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_MODEL_ID, cfg: TrainConfig = None,
@@ -335,6 +515,8 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
 
     LeakageError is raised before anything else if either file holds benchmark content (D-02). Stale files
     of an earlier run in `out_dir` are removed first; a directory that holds another tool's manifest is refused.
+    After the last evaluation the kept adapter is evaluated once on the whole dev file (final_dev_full), the
+    manifest is written, and the adapter is served through HFLocalProvider next to the base model (gen_check).
     """
     cfg = cfg or TrainConfig()
     if min(cfg.max_steps, cfg.micro_batch, cfg.accum) < 1:
@@ -353,6 +535,7 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
     per_step = cfg.micro_batch * cfg.accum
     n_used = cfg.n_train_used or min(len(train_eps), cfg.max_steps * per_step)
     used = stratified_sample([e["cls"] for e in train_eps], n_used, random.Random(cfg.seed))
+    class_counts = {c: sum(train_eps[i]["cls"] == c for i in used) for c in CLASSES}
 
     os.makedirs(out_dir, exist_ok=True)
     refuse_foreign_manifest(out_dir, "adapter_sha256", "Qwen LoRA training")     # before anything is deleted
@@ -368,14 +551,16 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
                                  random.Random(cfg.seed + 1))
     dev_examples = [build_example(tokenizer, dev_eps[i]) for i in dev_used]
     trainable = [p for p in peft_model.parameters() if p.requires_grad]
+    n_trainable = sum(p.numel() for p in trainable)
+    n_total = sum(p.numel() for p in peft_model.parameters())
     optimizer = torch.optim.AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
-    log(f"device {device} trainable_params {sum(p.numel() for p in trainable)} train_episodes {len(examples)} "
-        f"dev_episodes {len(dev_examples)}")
+    log(f"device {device} trainable {n_trainable} total {n_total}")
 
     stream = epoch_stream(len(examples), cfg.seed, per_step)
     peft_model.train()
     since_log, since_eval, tokens_seen, mark = [], [], 0, (time.time(), 0)
     history, best, stale_evals, stop_reason = [], {SELECTION_METRIC: float("inf"), "step": 0}, 0, None
+    peak = {"allocated": 0, "reserved": 0}
     log_path = os.path.join(out_dir, "train_log.jsonl")
     for s in range(cfg.max_steps):
         lr = lr_at(s, cfg.max_steps, cfg.lr, cfg.min_lr, cfg.warmup)
@@ -405,8 +590,11 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
             now = time.time()
             rate = (tokens_seen - mark[1]) / max(1e-9, now - mark[0])
             mark = (now, tokens_seen)
+            vram = read_vram_mib(device)
+            peak = {k: max(peak[k], vram[k]) for k in peak}
             log(f"step {step}/{cfg.max_steps} loss {sum(since_log) / len(since_log):.4f} lr {lr:.2e} "
-                f"tok/s {rate:.0f} elapsed {now - started:.0f}s")
+                f"tok/s {rate:.0f} elapsed {now - started:.0f}s vram {vram['allocated']}/{vram['reserved']}MiB "
+                f"rss {_rss_mb()}MB")
             since_log = []
 
         if step % cfg.eval_every == 0 or step == cfg.max_steps:
@@ -441,31 +629,149 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
         os.replace(os.path.join(best_dir, name), os.path.join(out_dir, name))
     shutil.rmtree(best_dir, ignore_errors=True)
     adapter_sha256 = sha256_file(os.path.join(out_dir, "adapter_model.safetensors"))
+
+    # One evaluation of the kept adapter on the whole dev file (or the first final_dev_n of a stratified order).
+    final_eps = _dev_pick(dev_eps, cfg.final_dev_n, cfg.seed + 2)
+    final_examples = [build_example(tokenizer, ep) for ep in final_eps]
+    final = evaluate(peft_model, final_examples, cfg.micro_batch, device)
+    log(f"final_dev_full n {len(final_examples)} dev_action_exact {final['dev_action_exact']:.4f} "
+        f"dev_loss_action {final['dev_loss_action']:.4f}")
+    vram = read_vram_mib(device)
+    peak = {k: max(peak[k], vram[k]) for k in peak}
+
     kept = next(h for h in history if h["step"] == best["step"])
     last = history[-1]
     wall = round(time.time() - started, 1)
+    model_file = os.path.join(resolve_base_model(base_model)[0], "model.safetensors")
     manifest = {
         "schema": MANIFEST_SCHEMA,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "python": platform.python_version(), "torch": torch.__version__, "device": "cuda" if on_cuda else "cpu",
+        "code_commit": git_commit(), "code_dirty": git_dirty(),
+        "python": platform.python_version(), "torch": torch.__version__, "cuda": torch.version.cuda,
+        "device": "cuda" if on_cuda else "cpu",
+        "packages": _package_versions(),
         "seed": cfg.seed,
-        "base_model": {"id": _model_id(base_model), "revision": revision},
-        "render": {"fingerprint": chat.render_fingerprint(tokenizer), "version": chat.RENDER_VERSION},
+        "base_model": {"id": _model_id(base_model), "revision": revision,
+                       "model_safetensors_bytes": os.path.getsize(model_file) if os.path.isfile(model_file) else 0},
+        "tokenizer": {"chat_template_sha256": chat.chat_template_sha256(tokenizer),
+                      "eos_id": tokenizer.convert_tokens_to_ids(chat.IM_END), "pad_id": PAD_ID},
+        "render": {"fingerprint": chat.render_fingerprint(tokenizer), "version": chat.RENDER_VERSION,
+                   "system_prompt_sha256": hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest(),
+                   "observation_template": OBSERVATION_TEMPLATE, "max_len": data.MAX_LEN},
         "dataset": {"train_path": _rel(train_path), "train_sha256": file_sha256(train_path),
                     "dev_path": _rel(dev_path), "dev_sha256": file_sha256(dev_path),
-                    "n_train_available": len(train_eps), "n_train_used": len(examples)},
-        "config": {"train": cfg.to_dict(), "max_len": data.MAX_LEN},
+                    "n_train_available": len(train_eps), "n_train_used": len(examples), "n_dev": len(dev_eps),
+                    "dev_eval_n": len(dev_examples), "class_counts": class_counts,
+                    "held_out_sha256": held_out_sha256()},
+        "lora": {"r": cfg.lora_r, "alpha": cfg.lora_alpha, "dropout": cfg.lora_dropout,
+                 "target_modules": sorted(LORA_TARGETS), "trainable_params": n_trainable, "total_params": n_total,
+                 "trainable_fraction": round(n_trainable / n_total, 6)},
+        "config": {"train": cfg.to_dict()},
         "steps": step, "best_step": best["step"], "tokens_seen": tokens_seen,
-        "selection": {"metric": SELECTION_METRIC, "direction": "min"},
+        "peak_vram_mib": {**peak, "total": vram["total"]},
+        "selection": {"metric": SELECTION_METRIC, "direction": "min", "description": SELECTION_DESCRIPTION,
+                      "remediation_rule": REMEDIATION_RULE, "lora04_gate": LORA04_GATE_RULE},
         # best = the evaluation of the adapter that is kept; last_eval = the final evaluation, possibly a later step
         "best": {"step": best["step"], "train_loss": kept["train_loss"], **{k: kept[k] for k in EVAL_KEYS}},
         "last_eval": {"step": last["step"], "train_loss": last["train_loss"], **{k: last[k] for k in EVAL_KEYS}},
+        "final_dev_full": {"n": len(final_examples), **{k: final[k] for k in EVAL_KEYS}},
+        "gen_check": None,
         "adapter_sha256": adapter_sha256,
         "wall_seconds": wall,
         "stop_reason": stop_reason,
-        "run_notes": list(run_notes or []),
+        "resumed_from_steps": [],
+        "run_notes": list(run_notes or []) + [D01_NOTE],
     }
-    write_json_atomic(os.path.join(out_dir, "manifest.json"), manifest)
+    assert tuple(manifest) == MANIFEST_KEYS, "manifest fields drifted from MANIFEST_KEYS"
+    manifest_path = os.path.join(out_dir, "manifest.json")
+    write_json_atomic(manifest_path, manifest)
+
+    # The generation check runs through the serving path, so the training model is freed first (6 GB card).
+    del peft_model, optimizer, trainable, examples, dev_examples, final_examples
+    gc.collect()
+    if on_cuda:
+        torch.cuda.empty_cache()
+    check_eps = _dev_pick(dev_eps, cfg.gen_check_n, cfg.seed + 3)
+    tuned = generation_check("qwen-lora-gen-check", base_model, out_dir, device, check_eps, cfg.gen_max_new_tokens)
+    base = generation_check("qwen-base-gen-check", base_model, None, device, check_eps, cfg.gen_max_new_tokens)
+    n = len(check_eps)
+    manifest["gen_check"] = {"n": n,
+                             "tuned": {"parse_rate": tuned[0] / n, "gold_first_action_rate": tuned[1] / n},
+                             "base": {"parse_rate": base[0] / n, "gold_first_action_rate": base[1] / n}}
+    write_json_atomic(manifest_path, manifest)
+    log(f"gen_check tuned parse {tuned[0]}/{n} gold {tuned[1]}/{n} base parse {base[0]}/{n} gold {base[1]}/{n}")
+    try:
+        _write_curve(os.path.join(out_dir, "loss_curve.png"), history, n_trainable, best["step"])
+    except Exception as e:                   # a plotting problem must not cost a finished run its manifest
+        log(f"WARNING loss curve not written: {type(e).__name__}: {e}")
     log(f"DONE best_step {best['step']} best_{SELECTION_METRIC} {best[SELECTION_METRIC]:.4f} wall {wall:.0f}s "
         f"stop {stop_reason}")
     return manifest
+
+
+# ── command line: python -m src.qwen_lora.train ──
+
+def main(argv=None) -> int:
+    defaults = TrainConfig()
+    parser = argparse.ArgumentParser(prog="python -m src.qwen_lora.train",
+                                     description="LoRA fine-tune Qwen2.5-0.5B-Instruct on the Phase 2 agent episodes.")
+    parser.add_argument("--train", default="data/local/train-seed0-n40000.jsonl")
+    parser.add_argument("--dev", default="data/local/dev-seed0-n2000.jsonl")
+    parser.add_argument("--out-dir", default="models/qwen-agentlora")
+    parser.add_argument("--base-model", default=BASE_MODEL_ID,
+                        help="a Hugging Face id from the local cache, or a directory inside the repository")
+    parser.add_argument("--seed", type=int, default=defaults.seed)
+    parser.add_argument("--max-steps", type=int, default=defaults.max_steps)
+    parser.add_argument("--micro-batch", type=int, default=defaults.micro_batch)
+    parser.add_argument("--accum", type=int, default=defaults.accum)
+    parser.add_argument("--lr", type=float, default=defaults.lr)
+    parser.add_argument("--warmup", type=int, default=defaults.warmup)
+    parser.add_argument("--eval-every", type=int, default=defaults.eval_every)
+    parser.add_argument("--log-every", type=int, default=defaults.log_every)
+    parser.add_argument("--patience", type=int, default=defaults.patience)
+    parser.add_argument("--n-train-used", type=int, default=defaults.n_train_used)
+    parser.add_argument("--dev-eval-n", type=int, default=defaults.dev_eval_n)
+    parser.add_argument("--final-dev-n", type=int, default=defaults.final_dev_n,
+                        help="dev episodes of the final evaluation; 0 = the whole dev file")
+    parser.add_argument("--gen-check-n", type=int, default=defaults.gen_check_n)
+    parser.add_argument("--gen-max-new-tokens", type=int, default=defaults.gen_max_new_tokens)
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--run-note", action="append", type=_note, default=[], metavar="TEXT",
+                        help="why this run was started or relaunched; repeatable, stored in the manifest in order")
+    args = parser.parse_args(argv)
+
+    paths = {}
+    for name in ("train", "dev", "out_dir"):
+        try:
+            paths[name] = resolve_under_root(getattr(args, name), ALLOWED_ROOT)
+        except ValueError as e:
+            parser.error(f"--{name.replace('_', '-')}: {e}")
+    for name in ("train", "dev"):
+        if not os.path.isfile(paths[name]):
+            parser.error(f"--{name}: {getattr(args, name)} does not exist")
+    base_model = args.base_model
+    if os.path.isdir(base_model):
+        try:
+            base_model = resolve_under_root(base_model, ALLOWED_ROOT)
+        except ValueError as e:
+            parser.error(f"--base-model: {e}")
+    if min(args.max_steps, args.micro_batch, args.accum, args.eval_every, args.log_every) < 1:
+        parser.error("--max-steps, --micro-batch, --accum, --eval-every and --log-every must be at least 1")
+
+    cfg = TrainConfig(seed=args.seed, max_steps=args.max_steps, micro_batch=args.micro_batch, accum=args.accum,
+                      lr=args.lr, min_lr=min(defaults.min_lr, args.lr), warmup=args.warmup,
+                      eval_every=args.eval_every, log_every=args.log_every, patience=args.patience,
+                      n_train_used=args.n_train_used, dev_eval_n=args.dev_eval_n, final_dev_n=args.final_dev_n,
+                      gen_check_n=args.gen_check_n, gen_max_new_tokens=args.gen_max_new_tokens)
+    try:
+        refuse_foreign_manifest(paths["out_dir"], "adapter_sha256", "Qwen LoRA training")
+    except ValueError as e:
+        parser.error(f"--out-dir: {e}")
+    os.makedirs(paths["out_dir"], exist_ok=True)
+    train(paths["train"], paths["dev"], paths["out_dir"], base_model, cfg, args.device, _flush_print,
+          run_notes=args.run_note)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

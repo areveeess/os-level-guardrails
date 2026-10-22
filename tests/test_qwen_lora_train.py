@@ -65,7 +65,9 @@ def data_files(tmp_path_factory):
 
 
 def quick_config(**changes):
-    values = dict(max_steps=3, micro_batch=2, accum=2, warmup=1, log_every=1, eval_every=1000, dev_eval_n=8)
+    # gen_check_n / gen_max_new_tokens keep the final generation check of every train() call to two short replies
+    values = dict(max_steps=3, micro_batch=2, accum=2, warmup=1, log_every=1, eval_every=1000, dev_eval_n=8,
+                  gen_check_n=2, gen_max_new_tokens=8)
     values.update(changes)
     return TrainConfig(**values)
 
@@ -108,7 +110,7 @@ def test_tracer_tiny_lora_adapter_is_served_in_a_benchmark_episode(tracer_run, t
     on_disk = read_json(os.path.join(out_dir, "manifest.json"))
     assert on_disk == manifest
     assert manifest["adapter_sha256"] == sha256_file(os.path.join(out_dir, "adapter_model.safetensors"))
-    assert manifest["base_model"] == {"id": os.path.realpath(tiny_dir), "revision": "local"}
+    assert (manifest["base_model"]["id"], manifest["base_model"]["revision"]) == (os.path.realpath(tiny_dir), "local")
     assert manifest["render"]["fingerprint"] == chat.render_fingerprint(tokenizer)
 
     steps = [line for line in tracer_run.log if line.startswith("step ")]
@@ -320,11 +322,12 @@ def test_selection_keeps_the_lowest_dev_loss_action_and_stops_after_patience(tin
     assert manifest["stop_reason"] == "early_stop" and manifest["steps"] == 4
     assert manifest["best_step"] == 2 and manifest["best"]["step"] == 2
     assert manifest["best"]["dev_loss_action"] == 0.5 and manifest["last_eval"]["step"] == 4
-    assert len(snapshots) == 4
+    assert len(snapshots) == 5                                   # four in-training evaluations plus the final full-dev pass
     kept = load_file(os.path.join(out_dir, "adapter_model.safetensors"))
     assert set(kept) == set(snapshots[1])
     assert all(torch.equal(kept[k], snapshots[1][k]) for k in kept)              # the step-2 weights
     assert any(not torch.equal(kept[k], snapshots[3][k]) for k in kept)          # not the last step's
+    assert all(torch.equal(kept[k], snapshots[4][k]) for k in kept)              # the final pass saw the kept weights
     assert manifest["adapter_sha256"] == sha256_file(os.path.join(out_dir, "adapter_model.safetensors"))
     assert not os.path.exists(os.path.join(out_dir, train_module.IN_RUN_ADAPTER))
 
@@ -357,3 +360,135 @@ def test_evaluate_a_real_tiny_run_writes_one_log_record_and_one_eval_line_per_ev
     assert all(re.match(pattern, line) for line in evals), evals
     assert manifest["best"]["step"] in (2, 4) and manifest["last_eval"]["step"] == 4
     assert set(EVAL_KEYS) <= set(manifest["best"]) and set(EVAL_KEYS) <= set(manifest["last_eval"])
+
+
+# ── the command line end to end (tracer of plan 03-03): manifest, polling lines, final dev pass, gen_check ──
+
+SECRET = "qwen-test-secret-5d1f0c7e9a"
+
+
+def cli_args(train_path, dev_path, out_dir, base, *extra):
+    return ["--train", train_path, "--dev", dev_path, "--out-dir", out_dir, "--base-model", base, "--device", "cpu",
+            "--max-steps", "4", "--micro-batch", "2", "--accum", "2", "--warmup", "1", "--eval-every", "2",
+            "--log-every", "1", "--dev-eval-n", "6", "--final-dev-n", "0", "--gen-check-n", "2",
+            "--gen-max-new-tokens", "8", *extra]
+
+
+def run_main(argv, root):
+    """main(argv) with ALLOWED_ROOT pointed at `root`; returns (exit code, stdout lines)."""
+    import contextlib
+    import io
+    buffer = io.StringIO()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(train_module, "ALLOWED_ROOT", str(root))
+        mp.setenv("QWEN_TEST_SECRET", SECRET)
+        with contextlib.redirect_stdout(buffer):
+            code = train_module.main(argv)
+    return code, buffer.getvalue().splitlines()
+
+
+@pytest.fixture(scope="module")
+def cli_run(tiny_dir, data_files, tmp_path_factory):
+    root = tmp_path_factory.getbasetemp()
+    out_dir = str(tmp_path_factory.mktemp("cli_out") / "adapter")
+    code, lines = run_main(cli_args(*data_files, out_dir, tiny_dir, "--run-note", "tiny cli test"), root)
+    return SimpleNamespace(code=code, lines=lines, out_dir=out_dir, manifest=read_json(os.path.join(out_dir, "manifest.json")),
+                           root=root)
+
+
+def test_cli_prints_the_polling_lines_the_gpu_plan_reads(cli_run):
+    assert cli_run.code == 0
+    for prefix in ("device cpu trainable ", "step 1/4 ", "eval step 2 ", "eval step 4 ", "final_dev_full n ",
+                   "gen_check tuned parse ", "DONE best_step "):
+        assert any(line.startswith(prefix) for line in cli_run.lines), (prefix, cli_run.lines)
+    assert re.match(r"^device cpu trainable \d+ total \d+$", cli_run.lines[0]), cli_run.lines[0]
+    step = next(line for line in cli_run.lines if line.startswith("step 1/4 "))
+    assert re.match(r"^step 1/4 loss \S+ lr \S+ tok/s \S+ elapsed \S+s vram \d+/\d+MiB rss \d+MB$", step), step
+    final = next(line for line in cli_run.lines if line.startswith("final_dev_full "))
+    assert re.match(r"^final_dev_full n 8 dev_action_exact \S+ dev_loss_action \S+$", final), final
+    gen = next(line for line in cli_run.lines if line.startswith("gen_check "))
+    assert re.match(r"^gen_check tuned parse \d/2 gold \d/2 base parse \d/2 gold \d/2$", gen), gen
+    assert cli_run.lines[-1].startswith("DONE best_step ")
+    assert cli_run.lines.index(final) < cli_run.lines.index(gen) < len(cli_run.lines) - 1
+
+
+def test_cli_manifest_has_exactly_the_manifest_keys_in_order(cli_run):
+    manifest = cli_run.manifest
+    assert tuple(manifest) == train_module.MANIFEST_KEYS
+    assert train_module.MANIFEST_KEYS[:4] == ("schema", "created_at", "code_commit", "code_dirty")
+    assert manifest["schema"] == train_module.MANIFEST_SCHEMA and manifest["device"] == "cpu"
+    assert manifest["adapter_sha256"] == sha256_file(os.path.join(cli_run.out_dir, "adapter_model.safetensors"))
+    assert set(manifest["packages"]) == {"transformers", "peft", "accelerate", "tokenizers", "safetensors",
+                                         "huggingface_hub"}
+    assert all(isinstance(v, str) and v for v in manifest["packages"].values())
+    assert manifest["run_notes"][0] == "tiny cli test" and train_module.D01_NOTE in manifest["run_notes"]
+    assert manifest["resumed_from_steps"] == [] and manifest["stop_reason"] in ("max_steps", "early_stop")
+
+
+def test_cli_manifest_records_the_lora_dataset_render_and_selection_values(cli_run, data_files, tokenizer):
+    from src.agent_harness.prompting import OBSERVATION_TEMPLATE, SYSTEM_PROMPT
+    from src.qwen_lora import data
+    from src.scratch_llm.dataset import file_sha256, held_out_sha256, read_episodes
+    m = cli_run.manifest
+    train_eps, dev_eps = read_episodes(data_files[0]), read_episodes(data_files[1])
+    assert m["lora"]["trainable_params"] == lora_param_count(64, 128, 4, 2, 2, 16) == 32768
+    assert m["lora"]["r"] == 16 and m["lora"]["alpha"] == 32 and m["lora"]["dropout"] == 0.05
+    assert m["lora"]["target_modules"] == sorted(LORA_TARGETS)
+    assert m["lora"]["total_params"] > m["lora"]["trainable_params"]
+    assert m["lora"]["trainable_fraction"] == round(m["lora"]["trainable_params"] / m["lora"]["total_params"], 6)
+    d = m["dataset"]
+    assert d["train_path"] == "train.jsonl" and d["dev_path"] == "dev.jsonl"      # outside the repository: the bare name
+    assert d["train_sha256"] == file_sha256(data_files[0]) and d["dev_sha256"] == file_sha256(data_files[1])
+    assert d["n_train_available"] == len(train_eps) and d["n_dev"] == len(dev_eps) == 8
+    assert d["n_train_used"] == sum(d["class_counts"].values()) == 16 and d["dev_eval_n"] == 6
+    assert d["held_out_sha256"] == held_out_sha256()
+    assert m["render"] == {"fingerprint": chat.render_fingerprint(tokenizer), "version": chat.RENDER_VERSION,
+                           "system_prompt_sha256": hashlib_sha256(SYSTEM_PROMPT),
+                           "observation_template": OBSERVATION_TEMPLATE, "max_len": data.MAX_LEN}
+    assert m["tokenizer"]["chat_template_sha256"] == chat.chat_template_sha256(tokenizer)
+    assert m["tokenizer"]["pad_id"] == PAD_ID and m["tokenizer"]["eos_id"] == tokenizer.convert_tokens_to_ids("<|im_end|>")
+    assert m["base_model"]["revision"] == "local" and m["base_model"]["model_safetensors_bytes"] > 0
+    assert set(m["peak_vram_mib"]) == {"allocated", "reserved", "total"}
+    assert m["config"] == {"train": TrainConfig(max_steps=4, micro_batch=2, accum=2, warmup=1, eval_every=2, log_every=1,
+                                                dev_eval_n=6, final_dev_n=0, gen_check_n=2, gen_max_new_tokens=8).to_dict()}
+    selection = m["selection"]
+    assert selection["metric"] == "dev_loss_action" and selection["direction"] == "min"
+    assert selection["remediation_rule"] == train_module.REMEDIATION_RULE
+    assert selection["lora04_gate"] == train_module.LORA04_GATE_RULE
+    assert "respond" in selection["description"]
+    full = m["final_dev_full"]
+    assert full["n"] == 8 and set(EVAL_KEYS) <= set(full)
+    gen = m["gen_check"]
+    assert gen["n"] == 2
+    for who in ("tuned", "base"):
+        assert set(gen[who]) == {"parse_rate", "gold_first_action_rate"}
+        assert all(0.0 <= gen[who][k] <= 1.0 for k in gen[who])
+    passed, reason = train_module.lora04_gate(m)
+    assert isinstance(passed, bool) and "parse_rate" in reason and "0.90" in reason
+
+
+def hashlib_sha256(text):
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_cli_manifest_holds_no_environment_value_and_no_dataset_path_outside_the_repository(cli_run):
+    with open(os.path.join(cli_run.out_dir, "manifest.json"), encoding="utf-8") as f:
+        text = f.read()
+    assert SECRET not in text
+    assert str(cli_run.root) not in json.dumps(cli_run.manifest["dataset"])      # base_model.id of the tiny dir is a path by design
+
+
+def test_cli_leaves_the_curve_the_log_and_no_scratch_files(cli_run):
+    out = cli_run.out_dir
+    assert os.path.getsize(os.path.join(out, "loss_curve.png")) > 1000
+    with open(os.path.join(out, "train_log.jsonl"), encoding="utf-8") as f:
+        assert len([line for line in f if line.strip()]) == 2
+    for name in (train_module.IN_RUN_ADAPTER, "qwen_lora.resume.tmp", "README.md", "manifest.json.tmp"):
+        assert not os.path.exists(os.path.join(out, name)), name
+
+
+def test_cli_output_is_served_by_the_provider_with_every_stamp_check(cli_run, tiny_dir):
+    from src.llm.hf_local import HFLocalProvider
+    provider = HFLocalProvider("tiny-lora", tiny_dir, adapter=cli_run.out_dir, device="cpu", max_new_tokens=8)
+    assert provider.resolved_model.endswith("+tiny-lora@" + cli_run.manifest["adapter_sha256"][:12])
