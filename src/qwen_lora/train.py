@@ -217,11 +217,13 @@ def build_lora_model(base_model: str, cfg: TrainConfig, device: str) -> tuple:
                                                   task_type="CAUSAL_LM"))
     peft_model.peft_config["default"].base_model_name_or_path = _model_id(base_model)
     # A mismatch here means PEFT adapted something other than the seven projections of every layer.
-    # (PEFT resolves "all-linear" to the full module names, one per layer and projection, so compare the leaves.)
+    # (Depending on the PEFT version, "all-linear" is stored as the leaf names or as the full module names, so
+    # compare the leaves; the number of adapted layers is counted on the model itself, not on the stored names.)
     resolved = set(peft_model.peft_config["default"].target_modules)
     leaves = {name.rsplit(".", 1)[-1] for name in resolved}
-    assert leaves == set(LORA_TARGETS) and len(resolved) == len(LORA_TARGETS) * model.config.num_hidden_layers, \
-        f"all-linear resolved to {sorted(resolved)}, not the {list(LORA_TARGETS)} of every layer"
+    n_adapted = sum(1 for m in peft_model.modules() if hasattr(m, "lora_A") and hasattr(m, "lora_B"))
+    assert leaves == set(LORA_TARGETS) and n_adapted == len(LORA_TARGETS) * model.config.num_hidden_layers, \
+        f"all-linear resolved to {sorted(resolved)} with {n_adapted} adapted layers, not the {list(LORA_TARGETS)} of every layer"
     trainable = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
     c = model.config
     expected = lora_param_count(c.hidden_size, c.intermediate_size, c.num_attention_heads, c.num_key_value_heads,
