@@ -13,7 +13,7 @@ The guardrails (policy engine, namespaces, seccomp-bpf) and the InjecAgent harne
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Evaluation Hardening & Policy Fix** - Honest scoring/report semantics, a model-independent control agent, and the shell-chaining bypass fixed before any new data is collected (completed 2026-10-21)
-- [ ] **Phase 2: Local Data Foundation & ScratchGPT** - Leakage-free synthetic episodes, one shared render format, and a ScratchGPT trained locally and running in the benchmark
+- [x] **Phase 2: Local Data Foundation & ScratchGPT** - Leakage-free synthetic episodes, one shared render format, and a ScratchGPT trained locally and running in the benchmark (completed 2026-10-22)
 - [ ] **Phase 3: Qwen LoRA & hf_local Provider** - In-process Hugging Face provider, base-Qwen control row, and a locally LoRA-tuned Qwen2.5-0.5B running in the benchmark
 - [ ] **Phase 4: Full Runs - Local, Added Ollama, Hosted Resume** - Every local model benchmarked to 342/342, unfinished hosted runs resumed under a stopping rule, and sandbox/seccomp layers shown to fire
 - [ ] **Phase 5: Comparison Report & Deliverables** - One script regenerates the cross-model report and charts from a frozen results directory; README, SDD, Review-3 deck and viva notes complete
@@ -57,7 +57,7 @@ Plans:
   4. `scratch-gpt` runs end-to-end through the benchmark (the provider loads the checkpoint via `inference.load_generator`) and produces valid actions on a smoke run.
   5. The viva page(s) for LLM foundations (transformers, tokenization, the training loop, decoding) and for the synthetic-data / leakage design are added to `docs/viva/` (DOC-03 is traced to Phase 5).
 
-**Plans**: 4/4 plans executed
+**Plans**: 4/4 plans complete
 
 Plans:
 **Wave 1**
@@ -121,7 +121,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (the `hf_local` provi
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Evaluation Hardening & Policy Fix | 4/4 | Complete    | 2026-10-21 |
-| 2. Local Data Foundation & ScratchGPT | 4/4 | In Progress | - |
+| 2. Local Data Foundation & ScratchGPT | 4/4 | Complete    | 2026-10-22 |
 | 3. Qwen LoRA & hf_local Provider | 0/TBD | Not started | - |
 | 4. Full Runs - Local, Added Ollama, Hosted Resume | 0/TBD | Not started | - |
 | 5. Comparison Report & Deliverables | 0/TBD | Not started | - |

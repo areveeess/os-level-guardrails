@@ -1,43 +1,43 @@
 ---
 gsd_state_version: "1.0"
-current_phase: 2
-current_phase_name: Local Data Foundation & ScratchGPT
-status: verifying
-stopped_at: Completed 02-04-PLAN.md
-last_updated: "2026-10-21T08:50:17.398Z"
-last_activity: 2026-10-21
-last_activity_desc: Phase 2 execution started
-state_head: a3ea7389f4af6eaa786e856aa509690658fe3ced
+current_phase: 3
+current_phase_name: Qwen LoRA & hf_local Provider
+status: planning
+stopped_at: Phase 2 complete, ready to plan Phase 3
+last_updated: "2026-10-22T03:20:19.988Z"
+last_activity: 2026-10-22
+last_activity_desc: Phase 2 complete, transitioned to Phase 3
+state_head: 88b8fdaf56000df109a64113a808dd4452b4bdb7
 progress:
   total_phases: 5
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 8
   completed_plans: 8
-  percent: 20
+  percent: 40
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-10-21)
+See: .planning/PROJECT.md (updated 2026-10-22)
 
 **Core value:** The guardrails must be shown to hold independently of which LLM drives the agent, including a weak, unaligned, locally made model, backed by a fair, reproducible comparison table the student can defend in a viva.
-**Current focus:** Phase 2 — Local Data Foundation & ScratchGPT
+**Current focus:** Phase 3 — Qwen LoRA & hf_local Provider
 
 ## Current Position
 
-Phase: 2 (Local Data Foundation & ScratchGPT) — EXECUTING
-Plan: 4 of 4
-Status: Phase complete — ready for verification
-Last activity: 2026-10-21 — Phase 2 execution started
+Phase: 3 — Qwen LoRA & hf_local Provider
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-10-22 — Phase 2 complete, transitioned to Phase 3
 
-Progress: [██░░░░░░░░] 20% (Phase 1 of 5 complete)
+Progress: [████░░░░░░] 40% (Phase 1 of 5 complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 4
+- Total plans completed: 8
 - Average duration: - min
 - Total execution time: 0.0 hours
 
@@ -46,6 +46,7 @@ Progress: [██░░░░░░░░] 20% (Phase 1 of 5 complete)
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 4 | - | - |
+| 2 | 4 | - | - |
 
 **Recent Trend:**
 - Last 5 plans: -
@@ -98,7 +99,8 @@ None yet.
 ### Blockers/Concerns
 
 - [Phase 3] Python 3.14 compatibility of transformers/peft/accelerate is unverified; run the 15-minute smoke test (install, load Qwen, one LoRA step) early. Fallback: `uv` Python 3.12 venv with the cu128 torch build
-- [Phase 2] Training-data compliance mix (50/25/25) determines weak-model behaviour under attack; decide and disclose in the report; same dataset for both local models
+- [Phase 2→3] Reuse the Phase 2 dataset (sha a2586548c7f7) for Qwen LoRA; WSL now 11 GB + 8 GB swap and shared with another project's CPU job — keep GPU preflight + resumable training
+- [Phase 2→5] Smoke behaviour (3/10 unprotected attempts) and ds dev accuracy 0.68 are disclosures for Phase 4/5, not Phase 2 gaps
 - [Phase 4] Hosted Groq quota may not allow completing all three models within the week; stopping rule must be written before resuming
 - [Phase 4] Existing llama3.2:3b and gemma-4-31b rows may be affected by context truncation or API timeouts; re-score from `raw.jsonl`
 - [Phase 4] GPU is serial: stop Ollama during training; scratch training, then LoRA training, then benchmark runs
@@ -117,6 +119,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-21T08:50:17.248Z
-Stopped at: Completed 02-04-PLAN.md
+Last session: 2026-10-22T03:20:37Z
+Stopped at: Phase 2 complete, ready to plan Phase 3
 Resume file: None

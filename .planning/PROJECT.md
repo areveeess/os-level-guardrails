@@ -26,10 +26,12 @@ The guardrails must be shown to hold **independently of which LLM drives the age
 - ✓ Provenance stamps on every result record + run manifest + paired run-major queue — Phase 1
 - ✓ Scripted worst-case control agent (control-always-comply): 120/120 attacks succeed unprotected, 0/120 protected — Phase 1
 - ✓ Shell-chaining policy bypass fixed with test-first evidence; quote-aware fail-closed shell parser; dashboard on 127.0.0.1 with debug off — Phase 1
+- ✓ Leakage-gated synthetic dataset (40k+2k episodes, 50/25/25 mix, compact format v2 shared by training and inference) — Phase 2
+- ✓ ScratchGPT (4.76M params) trained from scratch on the RTX 3060; dev action exact 0.80; runs end to end as scratch-gpt in the benchmark — Phase 2
+- ✓ Attack scoring counts only post-injection attacker calls; pre-injection calls reported as a random-choice baseline (all models) — Phase 2 review fix
 
 ### Active
 
-- [ ] From-scratch ScratchGPT is trained locally on the RTX 3060 and plugged into the benchmark as `scratch-gpt`
 - [ ] A small open model (Qwen2.5-0.5B-Instruct) is LoRA fine-tuned locally on the agent action format and benchmarked
 - [ ] More local open models (qwen2.5:3b, phi3.5:3.8b, gemma3:1b via Ollama) are benchmarked alongside llama3.2:3b
 - [ ] Unfinished hosted (non-Gemini) runs are resumed so the comparison includes data-stealing episodes
@@ -68,7 +70,9 @@ The guardrails must be shown to hold **independently of which LLM drives the age
 |----------|-----------|---------|
 | "Locally made LLM" = both from-scratch ScratchGPT and a locally LoRA-fine-tuned Qwen2.5-0.5B | Gives a spectrum for the viva: scratch → fine-tuned → pretrained local → hosted | — Pending |
 | Compare against non-Gemini models: Groq (gpt-oss-120b/20b, qwen3.8-27b) + local Ollama (llama3.2:3b, qwen2.5:3b, phi3.5:3.8b, gemma3:1b) | Reviewer asked for "other LLMs other than Gemini"; local models avoid quota limits | — Pending |
-| Keep InjecAgent + existing scoring | Results stay comparable with the committed final-20261011 run | — Pending |
+| Keep InjecAgent + existing scoring | Results stay comparable with the committed final-20261011 run | ✓ Good — scoring refined (post-injection only); no Phase 1 number changed |
+| Train ScratchGPT on a 50/25/25 compliance mix with blocked-tail and OS-action episodes (D-01..D-03) | Makes the scratch model a genuine worst-case principal; disclosed | ✓ Good — accepted at Phase 2 UAT |
+| Select checkpoints on action-line loss, not all-text dev loss (review CR-01) | Respond-text wording is unpredictable on dev and dominated the loss | ✓ Good — 0.63 → 0.80 dev action exact |
 | Fix the shell-chaining policy bypass with a test first | Real security gap found by the codebase map; strong viva point on defense-in-depth | ✓ Good — red commit 72e737f then fix; code review found 4 more bypasses, fixed/partial |
 | Keep policy `default_action: FLAG` (denylist) after code review; residual bypasses become Phase 4 test inputs | An allow-list default would inflate false positives; the residuals demonstrate why OS layers exist | — Pending (validated in Phase 4) |
 | Run GSD executors sequentially on the main checkout (`workflow.use_worktrees: false`) | WSL venv lives in the repo; worktrees could not run tests | ✓ Good |
@@ -93,4 +97,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-21 after Phase 1*
+*Last updated: 2026-10-22 after Phase 2*
