@@ -57,33 +57,59 @@ def labels_from_text(tokenizer, text: str, assistant_contents: list) -> tuple:
     header + content + "<|im_end|>" by searching forward from the previous span; a span that is not found is
     an error (the render and the messages disagree). Offsets, not ids, decide what is supervised. This
     function does not run the special-token guard of build_example, so a test can feed it a doctored text.
+
+    action_labels is labels without the message text of respond lines: a token whose start offset lies in
+    [content start + len(RESPOND_HEAD), content end - len(RESPOND_TAIL)) of a respond span is left out. The
+    held-back dev wording makes that text unpredictable, so the selection metric must not depend on it (the
+    Phase 2 CR-01 lesson). A token that BPE merges across the boundary of that range, for example the last word
+    piece with the closing quote, is excluded whole: a conservative, deterministic rule. Every other token of
+    a respond span, and the whole of every other span, stays, and every span keeps its <|im_end|>.
     """
-    spans, pos = [], 0
+    spans, pos = [], 0                  # (content start, content end, span end)
     for content in assistant_contents:
         needle = chat.ASSISTANT_HEADER + content + chat.IM_END
         at = text.find(needle, pos)
         if at < 0:
             raise ValueError("an assistant turn was not found in the rendered text; the messages and the render disagree")
-        spans.append((at + len(chat.ASSISTANT_HEADER), at + len(needle)))
+        start = at + len(chat.ASSISTANT_HEADER)
+        spans.append((start, start + len(content), at + len(needle)))
         pos = at + len(needle)
+    span_is_respond = [content.startswith(RESPOND_HEAD) for content in assistant_contents]
     enc = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
     ids, offsets = enc["input_ids"], enc["offset_mapping"]
     labels, span_of = [-100] * len(ids), [-1] * len(ids)
+    action_labels = [-100] * len(ids)
     k = 0
     for i, (start, end) in enumerate(offsets):
-        while k < len(spans) and start >= spans[k][1]:
+        while k < len(spans) and start >= spans[k][2]:
             k += 1
-        if k < len(spans) and end > start and start >= spans[k][0] and end <= spans[k][1]:
+        if k < len(spans) and end > start and start >= spans[k][0] and end <= spans[k][2]:
             labels[i], span_of[i] = ids[i], k
-    return ids, labels, list(labels), span_of, [False] * len(spans)
+            text_from, text_to = spans[k][0] + len(RESPOND_HEAD), spans[k][1] - len(RESPOND_TAIL)
+            if not (span_is_respond[k] and text_from <= start < text_to):
+                action_labels[i] = ids[i]
+    return ids, labels, action_labels, span_of, span_is_respond
 
 
 def build_example(tokenizer, ep: dict) -> Example:
-    """Render one episode with the tokenizer's chat template and build its ids and loss mask."""
+    """Render one episode with the tokenizer's chat template and build its ids and loss mask.
+
+    A Qwen control-token string in any message is rejected (ValueError naming the episode): the tokenizer would
+    read it as the real control token, so text could close a turn or open a fake assistant turn. A sequence of
+    more than MAX_LEN tokens raises SequenceTooLongError; MAX_LEN is read at call time.
+    """
     messages = chat.episode_to_chat(ep)
+    for message in messages:
+        if chat.has_special_token(message["content"]):
+            token = next(t for t in chat.SPECIAL_TOKEN_STRINGS if t in message["content"])
+            raise ValueError(f"episode {ep['id']} has the control-token string {token!r} in a {message['role']} "
+                             f"message; it would be tokenized as the real token")
     text = tokenizer.apply_chat_template(messages, tokenize=False)
     contents = [m["content"] for m in messages if m["role"] == "assistant"]
     ids, labels, action_labels, span_of, span_is_respond = labels_from_text(tokenizer, text, contents)
+    if len(ids) > MAX_LEN:
+        raise SequenceTooLongError(f"episode {ep['id']} renders to {len(ids)} tokens, more than MAX_LEN {MAX_LEN}; "
+                                   f"nothing is truncated")
     return Example(input_ids=ids, labels=labels, action_labels=action_labels, span_of=span_of,
                    span_is_respond=span_is_respond, cls=ep["cls"], episode_id=ep["id"])
 
