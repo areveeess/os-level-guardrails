@@ -172,6 +172,47 @@ def test_launch_that_never_passes_the_preflight_writes_5_and_does_not_train(fake
 
 
 @linux_only
+def test_launch_removes_a_stale_done_marker_before_the_preflight_waits(fake_bin, stub_python, tmp_path):
+    """Review WR-02: the old marker was removed only after the preflight passed, so `poll` could report the
+    previous run's done-ok for 30 minutes while a retry was still waiting for the card."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "train.done").write_text("0\n", encoding="utf-8")
+    trace = tmp_path / "trace.txt"
+    write_executable(fake_bin.path / "nvidia-smi",
+                     f'#!/bin/bash\nif [ -f "{out}/train.done" ]; then echo stale >> "{trace}"; else echo clean >> "{trace}"; fi\n'
+                     f'echo "GPU, 5900, 244, 6144"\n')                      # busy card: the preflight keeps waiting
+    done = run_script(fake_bin, "launch", str(out), PYTHON=stub_python.path, PREFLIGHT_RECHECKS="1", PREFLIGHT_WAIT_S="0")
+    assert done.returncode == 5
+    assert trace.read_text(encoding="utf-8").split() == ["clean", "clean"]    # never stale while it waited
+
+
+@linux_only
+def test_poll_never_reports_the_previous_runs_result_while_a_relaunch_waits(fake_bin, stub_python, tmp_path):
+    """Review WR-02, seen from the poller: after `launch` starts, the old done-ok must be gone at once."""
+    import time
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "train.done").write_text("0\n", encoding="utf-8")
+    fake_bin.reading.write_text("GPU, 5900, 244, 6144\n", encoding="utf-8")          # preflight cannot pass
+    environment = {**os.environ, "PATH": f"{fake_bin.path}{os.pathsep}{os.environ['PATH']}", "MIN_AVAIL_RAM_MIB": "0",
+                   "PYTHON": stub_python.path, "PREFLIGHT_RECHECKS": "3", "PREFLIGHT_WAIT_S": "20"}
+    launcher = subprocess.Popen(["bash", SCRIPT, "launch", str(out)], cwd=PROJECT_ROOT, env=environment,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.time() + 30
+        while time.time() < deadline and not (out / "gpu_preflight.log").exists():
+            time.sleep(0.1)
+        assert not (out / "train.done").exists()                                     # the stale marker is gone
+        polled = run_script(fake_bin, "poll", str(out), "1")
+        assert "STATUS done-ok" not in polled.stdout
+        assert "STATUS running" in polled.stdout                                     # the launcher is alive and waiting
+    finally:
+        launcher.terminate()
+        launcher.wait(timeout=30)
+
+
+@linux_only
 def test_launch_with_resume_appends_after_a_separator_and_a_fresh_launch_truncates(fake_bin, stub_python, tmp_path):
     out = tmp_path / "out"
     run_script(fake_bin, "launch", str(out), PYTHON=stub_python.path, PREFLIGHT_RECHECKS="0")

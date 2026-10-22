@@ -88,6 +88,9 @@ launch() {
   local out="$1"
   shift
   mkdir -p "$out"
+  # The previous run's done-marker goes first, before the preflight can wait for up to 30 minutes: otherwise
+  # `poll` reports that run's done-ok (or done-failed) for a launch that has not started (review WR-02).
+  rm -f "$out/train.done"
   local attempts=$((PREFLIGHT_RECHECKS + 1)) tried=0 passed=0
   while [ "$tried" -lt "$attempts" ]; do
     if preflight "$out"; then
@@ -105,7 +108,6 @@ launch() {
     echo 5 > "$out/train.done"
     exit 5
   fi
-  rm -f "$out/train.done"
   export PYTORCH_ALLOC_CONF=expandable_segments:True
   local resuming=0 arg
   for arg in "$@"; do
