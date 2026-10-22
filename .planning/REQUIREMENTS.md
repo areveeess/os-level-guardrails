@@ -31,7 +31,7 @@
 
 ### Local Fine-Tuned Model (LORA)
 
-- [ ] **LORA-01**: A new `hf_local` provider serves a Hugging Face causal LM in-process (optionally with a PEFT adapter) behind the existing `LLMProvider` interface, with greedy decoding and the project system prompt always supplied
+- [x] **LORA-01**: A new `hf_local` provider serves a Hugging Face causal LM in-process (optionally with a PEFT adapter) behind the existing `LLMProvider` interface, with greedy decoding and the project system prompt always supplied
 - [ ] **LORA-02**: Un-tuned `Qwen2.5-0.5B-Instruct` is benchmarked as a base control row
 - [ ] **LORA-03**: A custom LoRA training loop fine-tunes Qwen2.5-0.5B on the same synthetic episodes within 6 GB VRAM, supervising only the assistant action tokens (verified by a decoded-supervised-tokens test), and writes the adapter plus a manifest
 - [ ] **LORA-04**: The LoRA-tuned Qwen runs end-to-end in the benchmark and produces valid actions on a smoke run
@@ -94,7 +94,7 @@
 | SCRATCH-03 | Phase 2 | Complete |
 | SCRATCH-04 | Phase 2 | Complete |
 | SCRATCH-05 | Phase 2 | Complete |
-| LORA-01 | Phase 3 | Pending |
+| LORA-01 | Phase 3 | Complete |
 | LORA-02 | Phase 3 | Pending |
 | LORA-03 | Phase 3 | Pending |
 | LORA-04 | Phase 3 | Pending |

@@ -84,11 +84,11 @@ Plans:
   4. The LoRA-tuned Qwen runs end-to-end through the benchmark and produces valid actions on a smoke run.
   5. The viva page(s) for fine-tuning and LoRA, chat templates and loss masking, and decoding are added to `docs/viva/` (DOC-03 is traced to Phase 5).
 
-**Plans**: 4 plans
+**Plans**: 1/4 plans executed
 
 Plans:
 **Wave 1**
-- [ ] 03-01-PLAN.md — hf_local provider (offline, explicit greedy, stop tokens, stamps, verified and merged adapters), shared chat-render contract, qwen2.5-0.5b-base / agentlora config entries, STRICT_HF, pinned requirements-train.txt (wave 1)
+- [x] 03-01-PLAN.md — hf_local provider (offline, explicit greedy, stop tokens, stamps, verified and merged adapters), shared chat-render contract, qwen2.5-0.5b-base / agentlora config entries, STRICT_HF, pinned requirements-train.txt (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 03-02-PLAN.md — Qwen training examples with a character-offset loss mask (decoded-supervised-tokens and prefix tests), LoRA core loop with supervised-position loss, action-level evaluation and best-by-dev_loss_action selection; a tiny adapter served end to end (wave 2)
@@ -135,6 +135,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (the `hf_local` provi
 |-------|----------------|--------|-----------|
 | 1. Evaluation Hardening & Policy Fix | 4/4 | Complete    | 2026-10-21 |
 | 2. Local Data Foundation & ScratchGPT | 4/4 | Complete    | 2026-10-22 |
-| 3. Qwen LoRA & hf_local Provider | 0/4 | Not started | - |
+| 3. Qwen LoRA & hf_local Provider | 1/4 | In Progress | - |
 | 4. Full Runs - Local, Added Ollama, Hosted Resume | 0/TBD | Not started | - |
 | 5. Comparison Report & Deliverables | 0/TBD | Not started | - |

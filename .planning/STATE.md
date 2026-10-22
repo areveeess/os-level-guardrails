@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: Qwen LoRA & hf_local Provider
 status: executing
-stopped_at: Phase 2 complete, ready to plan Phase 3
-last_updated: "2026-10-22T05:08:04.679Z"
+stopped_at: Completed 03-01-PLAN.md
+last_updated: "2026-10-22T05:30:43.192Z"
 last_activity: 2026-10-22
 last_activity_desc: Phase 3 execution started
-state_head: 868457354205081c127c6056fdad5ff688205182
+state_head: a501b0e6b22224b4a86fa8d84d0a59268d9bae8d
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 12
-  completed_plans: 8
+  completed_plans: 9
   percent: 40
 ---
 
@@ -28,8 +28,8 @@ See: .planning/PROJECT.md (updated 2026-10-22)
 ## Current Position
 
 Phase: 3 (Qwen LoRA & hf_local Provider) — EXECUTING
-Plan: 1 of 4
-Status: Executing Phase 3
+Plan: 2 of 4
+Status: Ready to execute
 Last activity: 2026-10-22 — Phase 3 execution started
 
 Progress: [████░░░░░░] 40% (Phase 1 of 5 complete)
@@ -65,6 +65,7 @@ Progress: [████░░░░░░] 40% (Phase 1 of 5 complete)
 | Phase 02 P02 | 26min | 3 tasks | 5 files |
 | Phase 02 P03 | 173 min | 3 tasks | 7 files |
 | Phase 02 P04 | 58 min | 3 tasks | 5 files |
+| Phase 03 P01 | 21 min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -91,6 +92,8 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-03: load_generator enforces the exact checkpoint key set and five stamps; mismatches (incl. cfg/weights misfit) raise RuntimeError so the runner skips the model
 - [Phase 02]: 02-04: the pre-registered dev-only rule triggered after run 1 (dev line exact 0.167 < 0.50, still improving); one retry at 14000 steps gave the kept model (best step 6000, dev loss 0.5720, checkpoint 83b0763a6d26)
 - [Phase 02]: 02-04: smoke run is plumbing only (26 rows stamped scratch-gpt@83b0763a6d26, parse rate 76/80, attack attempts 4/10 per arm); no setting changed after it
+- [Phase 03]: resolved_model = <base>@<rev12>, plus +<name>@<adapter_sha12> for an adapter row (base revision is the always-present identity)
+- [Phase 03]: hf_local checks adapter files before any HF import and verifies hash, base id, revision and render fingerprint at construction; trainer must write base_model_name_or_path as the base id
 
 ### Pending Todos
 
@@ -119,6 +122,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-22T03:20:37Z
-Stopped at: Phase 2 complete, ready to plan Phase 3
+Last session: 2026-10-22T05:30:43.063Z
+Stopped at: Completed 03-01-PLAN.md
 Resume file: None
