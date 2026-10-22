@@ -36,7 +36,9 @@ from src.agent_harness.executors import Executor, Observation
 from src.agent_harness.loop import MAX_ASSISTANT_CHARS, AgentLoop
 from src.agent_harness.prompting import SYSTEM_PROMPT, build_messages
 from src.agent_harness.tool_broker import ToolBroker
+from src.benchmark import runner as runner_module
 from src.benchmark.injecagent import PROJECT_ROOT, benign_cases, load_tool_specs
+from src.benchmark.runner import run_benchmark
 from src.llm import hf_local, registry
 from src.llm.base import LLMProvider, LLMResponse
 from src.llm.hf_local import GREEDY_KWARGS, STOP_TOKENS, HFLocalProvider, LoadedModel
@@ -485,6 +487,151 @@ def test_offline_uncached_base_model_is_refused_without_a_network_connection(mon
     with pytest.raises(RuntimeError, match="local Hugging Face cache"):
         HFLocalProvider("x", "Qwen/not-a-cached-model-0000", device="cpu")
     assert attempts == []
+
+
+# ── reply contract: length, overflow, errors as values, no repair (fake model) ──
+
+def test_length_finish_reason_when_the_reply_does_not_end_in_a_stop_token(monkeypatch):
+    install_fake_loader(monkeypatch, fake_loaded(tail=(10, 11, 12)))
+    response = HFLocalProvider("qwen-test", QWEN_ID).generate(notes_messages())
+    assert response.ok and response.finish_reason == "length"
+    assert response.text == "Hello world  more"                 # the whole tail is decoded (the fake table adds a space)
+    assert response.completion_tokens == 3
+
+
+def test_overflow_prompt_is_an_error_and_the_model_is_never_called(monkeypatch):
+    loaded = fake_loaded(prompt_len=4)
+    install_fake_loader(monkeypatch, loaded)
+    response = HFLocalProvider("qwen-test", QWEN_ID, max_context_tokens=4).generate(notes_messages())
+    assert not response.ok and "context_overflow" in response.error
+    assert response.finish_reason == "context_overflow" and response.prompt_tokens == 4
+    assert response.text == ""
+    assert loaded.model.calls == []
+
+
+def test_overflow_boundary_one_token_of_room_is_enough(monkeypatch):
+    loaded = fake_loaded(prompt_len=4)
+    install_fake_loader(monkeypatch, loaded)
+    response = HFLocalProvider("qwen-test", QWEN_ID, max_context_tokens=5).generate(notes_messages())
+    assert response.ok
+    assert loaded.model.calls[0]["max_new_tokens"] == 1
+
+
+def test_error_response_for_a_model_exception_generate_never_raises(monkeypatch):
+    install_fake_loader(monkeypatch, fake_loaded(error=ValueError("boom")))
+    response = HFLocalProvider("qwen-test", QWEN_ID).generate(notes_messages())
+    assert not response.ok and response.text == ""
+    assert response.error.startswith("ValueError") and "boom" in response.error
+
+
+def test_raw_text_prose_around_json_is_returned_verbatim_only_stripped(monkeypatch):
+    prose = 'Sure! Here you go: {"action": "respond", "message": "hi"} Hope that helps.'
+
+    class ChattyTokenizer(FakeTokenizer):
+        def decode(self, ids, skip_special_tokens=False):
+            return "  \n" + prose + "\n "
+
+    loaded = fake_loaded()
+    loaded.tokenizer = ChattyTokenizer()
+    install_fake_loader(monkeypatch, loaded)
+    response = HFLocalProvider("qwen-test", QWEN_ID).generate(notes_messages())
+    assert response.text == prose
+
+
+# ── config/models.yaml ──
+
+def test_yaml_registers_the_base_and_the_tuned_qwen_rows():
+    models = registry.load_model_config()["models"]
+    base, tuned = models["qwen2.5-0.5b-base"], models["qwen2.5-0.5b-agentlora"]
+    for name, cfg in (("qwen2.5-0.5b-base", base), ("qwen2.5-0.5b-agentlora", tuned)):
+        assert cfg["provider"] == "hf_local" and cfg["base_model"] == QWEN_ID
+        assert cfg["model"] == name                              # stamped as config_model on every row
+        assert cfg["benchmark"] is True
+    assert base["adapter"] is None and tuned["adapter"] == "models/qwen-agentlora"
+    listed = registry.list_models(benchmark_only=True)
+    assert "qwen2.5-0.5b-base" in listed and "qwen2.5-0.5b-agentlora" in listed and "scratch-gpt" in listed
+
+
+def test_yaml_requirements_train_pins_the_huggingface_stack():
+    with open(os.path.join(PROJECT_ROOT, "requirements-train.txt"), encoding="utf-8") as f:
+        lines = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+    assert lines == ["transformers>=5.20,<5.21", "peft==0.21.2", "accelerate>=1.15,<2"]
+
+
+# ── the benchmark runner: [skip] for a refused model, provenance for a good one ──
+
+def write_hf_models_yaml_entries(path, entries):
+    """entries: name -> dict of config fields (provider hf_local and model = name are added)."""
+    lines = ["default: " + next(iter(entries)), "models:"]
+    for name, fields in entries.items():
+        lines += [f"  {name}:", "    provider: hf_local", f"    model: {name}"]
+        lines += [f"    {key}: {value}" for key, value in fields.items()]
+        lines += ["    family: test", "    benchmark: true"]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def point_runner_at(monkeypatch, config_path):
+    monkeypatch.setattr(runner_module, "get_provider", lambda name: registry.get_provider(name, path=str(config_path)))
+    monkeypatch.setattr(runner_module, "load_model_config", lambda: registry.load_model_config(str(config_path)))
+
+
+def run_one_case(model, out, log):
+    run_benchmark([model], benign_cases(load_tool_specs())[:1], out, runs=1, arms=("unprotected",), max_steps=2,
+                  log=log)
+
+
+def raw_rows(out):
+    raw = os.path.join(out, "raw.jsonl")
+    if not os.path.exists(raw):
+        return []
+    with open(raw, encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def test_runner_skips_a_missing_adapter_and_writes_no_row(tmp_path, monkeypatch):
+    config = tmp_path / "models.yaml"
+    write_hf_models_yaml_entries(config, {"qwen-no-adapter": dict(base_model=QWEN_ID, device="cpu",
+                                                                  adapter=str(tmp_path / "nowhere"))})
+    point_runner_at(monkeypatch, config)
+    lines, out = [], str(tmp_path / "run_missing")
+    run_one_case("qwen-no-adapter", out, lines.append)
+    assert any(line.startswith("[skip] qwen-no-adapter:") and "qwen_lora.train" in line for line in lines), lines
+    assert raw_rows(out) == []
+
+
+def test_runner_offline_uncached_base_is_skipped_with_no_row_and_no_connection(tmp_path, monkeypatch):
+    require_hf()
+    attempts = []
+
+    def refuse(self, address):
+        attempts.append(address)
+        raise OSError("network access is not allowed in this test")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    config = tmp_path / "models.yaml"
+    write_hf_models_yaml_entries(config, {"qwen-uncached": dict(base_model="Qwen/not-a-cached-model-0000",
+                                                                device="cpu", adapter="null")})
+    point_runner_at(monkeypatch, config)
+    lines, out = [], str(tmp_path / "run_uncached")
+    run_one_case("qwen-uncached", out, lines.append)
+    assert any(line.startswith("[skip] qwen-uncached:") and "local Hugging Face cache" in line for line in lines), lines
+    assert raw_rows(out) == []
+    assert attempts == []
+
+
+def test_runner_row_of_a_tiny_adapter_carries_the_hf_local_stamps(tiny, tmp_path, monkeypatch):
+    config = tmp_path / "models.yaml"
+    write_hf_models_yaml_entries(config, {"tiny-lora": dict(base_model=tiny.base, adapter=tiny.adapter, device="cpu",
+                                                            max_new_tokens=8)})
+    point_runner_at(monkeypatch, config)
+    out = str(tmp_path / "run_tiny")
+    run_one_case("tiny-lora", out, lambda *_: None)
+    (row,) = raw_rows(out)
+    assert row["provider"] == "hf_local" and row["config_model"] == "tiny-lora"
+    assert row["resolved_model"].endswith("+tiny-lora@" + tiny.manifest["adapter_sha256"][:12])
+    assert row["llm_error"] is None
+    assert row["finish_reasons"] and all(r in ("stop", "length") for r in row["finish_reasons"])
+    assert all(isinstance(n, int) for n in row["prompt_tokens"] + row["completion_tokens"])
 
 
 # ── opt-in live probe (GPU, real cached model) ──

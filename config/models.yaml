@@ -79,6 +79,17 @@ models:
     family: open / tiny / pretrained, not fine-tuned
     benchmark: true
 
+  qwen2.5-0.5b-agentlora:
+    provider: hf_local
+    model: qwen2.5-0.5b-agentlora            # stamped as config_model on every row
+    base_model: Qwen/Qwen2.5-0.5B-Instruct
+    # Produced by `python -m src.qwen_lora.train`; the weights are git-ignored, the manifest is tracked.
+    # Trained on the Phase 2 compliant mix, so it is a second injection-compliant worst-case principal.
+    # Until the adapter exists the runner prints [skip] for this row, by design.
+    adapter: models/qwen-agentlora
+    family: open / tiny / locally LoRA-tuned
+    benchmark: true
+
   control-always-comply:
     provider: scripted
     model: control-always-comply
