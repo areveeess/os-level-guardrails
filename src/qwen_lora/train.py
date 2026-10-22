@@ -34,10 +34,12 @@ the failure paths are completed by the next plan.
 """
 
 import contextlib
+import json
 import math
 import os
 import platform
 import random
+import shutil
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -61,7 +63,13 @@ BASE_MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
 CLASSES = ("benign", "dh", "ds")
 LORA_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
 MANIFEST_SCHEMA = 1
-STALE_FILES = ("adapter_config.json", "adapter_model.safetensors", "README.md", "manifest.json", "train_log.jsonl",
+PAD_ID = 151643                  # <|endoftext|>: only fills attention-masked positions, never decides a mask
+SELECTION_METRIC = "dev_loss_action"
+IN_RUN_ADAPTER = "adapter.best.tmp"      # the best adapter so far; only a finished run moves it into the output directory
+# every metric evaluate() returns, in the order the manifest lists them
+EVAL_KEYS = ("dev_loss", "dev_loss_action", "dev_loss_respond_text", "dev_action_exact", "dev_action_exact_by_cls",
+             "dev_line_exact", "dev_line_exact_by_cls", "dev_first_action_exact")
+STALE_FILES =("adapter_config.json", "adapter_model.safetensors", "README.md", "manifest.json", "train_log.jsonl",
                "loss_curve.png")       # never train_progress.log, train.done or gpu_preflight.log: the launcher owns them
 
 
@@ -127,7 +135,31 @@ def build_lora_model(base_model: str, cfg: TrainConfig, device: str) -> tuple:
                                                   lora_dropout=cfg.lora_dropout, target_modules="all-linear",
                                                   task_type="CAUSAL_LM"))
     peft_model.peft_config["default"].base_model_name_or_path = _model_id(base_model)
+    # A mismatch here means PEFT adapted something other than the seven projections of every layer.
+    # (PEFT resolves "all-linear" to the full module names, one per layer and projection, so compare the leaves.)
+    resolved = set(peft_model.peft_config["default"].target_modules)
+    leaves = {name.rsplit(".", 1)[-1] for name in resolved}
+    assert leaves == set(LORA_TARGETS) and len(resolved) == len(LORA_TARGETS) * model.config.num_hidden_layers, \
+        f"all-linear resolved to {sorted(resolved)}, not the {list(LORA_TARGETS)} of every layer"
+    trainable = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
+    c = model.config
+    expected = lora_param_count(c.hidden_size, c.intermediate_size, c.num_attention_heads, c.num_key_value_heads,
+                                c.num_hidden_layers, cfg.lora_r)
+    assert trainable == expected, f"{trainable} trainable parameters, the LoRA arithmetic gives {expected}"
     return peft_model, tokenizer, revision
+
+
+def lora_param_count(hidden: int, intermediate: int, n_heads: int, n_kv_heads: int, n_layers: int, r: int) -> int:
+    """Trainable LoRA parameters of the seven projections: r x (in + out) for each adapted Linear layer.
+
+    q and o map hidden to hidden; k and v map hidden to n_kv_heads x head_dim (grouped-query attention);
+    gate and up map hidden to intermediate and down maps back. For Qwen2.5-0.5B (896, 4864, 14 heads, 2 kv
+    heads, 24 layers, r 16) that is 366,592 per layer and 8,798,208 in all.
+    """
+    kv = n_kv_heads * (hidden // n_heads)
+    per_layer = (hidden + hidden) + (hidden + kv) + (hidden + kv) + (hidden + hidden) \
+        + (hidden + intermediate) + (hidden + intermediate) + (intermediate + hidden)
+    return r * per_layer * n_layers
 
 
 def _decoder_and_head(peft_model) -> tuple:
@@ -157,6 +189,78 @@ def supervised_loss(peft_model, input_ids, attention_mask, labels) -> tuple:
     """(summed cross-entropy over the supervised positions, how many there are)."""
     logits, targets, _ = supervised_logits(peft_model, input_ids, attention_mask, labels)
     return torch.nn.functional.cross_entropy(logits, targets, reduction="sum"), int(targets.numel())
+
+
+# ── evaluation ──
+
+@torch.no_grad()
+def evaluate(peft_model, examples: list, micro_batch: int, device, logits_fn=None) -> dict:
+    """Dev loss and teacher-forced exact match, with the unpredictable respond message text kept apart.
+
+    A span is one assistant message plus its <|im_end|>. It is exact when the argmax equals the gold token at
+    every position given the gold prefix, which is what greedy decoding would produce. The dev split uses
+    held-back reply wording, so the message text of a respond line is something no model can predict;
+    counting it would let that text decide which adapter is kept (the Phase 2 review CR-01). The metrics
+    come in two groups.
+
+    Selection and headline (action level, respond message text excluded):
+      dev_loss_action        mean cross-entropy over the action-level supervised tokens
+      dev_action_exact       share of spans whose action-level tokens are all argmax-correct
+      dev_action_exact_by_cls, dev_first_action_exact (span 0 of every episode)
+
+    Diagnostics (never used to select):
+      dev_loss               mean cross-entropy over every supervised token
+      dev_loss_respond_text  mean cross-entropy over the excluded respond message text only
+      dev_line_exact         share of spans exact over every supervised token (respond lines practically never)
+      dev_line_exact_by_cls
+
+    `logits_fn` defaults to supervised_logits; a test passes a stand-in with the same signature.
+    """
+    import torch.nn.functional as F
+    logits_fn = logits_fn or supervised_logits
+    was_training = peft_model.training
+    peft_model.eval()
+    sums = {"all": [0.0, 0], "action": [0.0, 0], "text": [0.0, 0]}            # [loss sum, tokens]
+    spans = {}                                                                # (example, span) -> [all ok, action ok]
+    order = sorted(range(len(examples)), key=lambda i: len(examples[i].input_ids))
+    for j in range(0, len(order), micro_batch):
+        idxs = order[j:j + micro_batch]
+        input_ids, attention, labels, action_labels = collate(examples, idxs, PAD_ID, device)
+        with _autocast(device):
+            logits, targets, positions = logits_fn(peft_model, input_ids, attention, labels)
+        ce = F.cross_entropy(logits.float(), targets, reduction="none").tolist()
+        correct = (logits.argmax(dim=-1) == targets).tolist()
+        is_action = (action_labels[:, 1:] != -100)[positions].tolist()
+        rows, cols = positions.nonzero(as_tuple=True)             # the same row-major order as positions[...] indexing
+        for row, col, loss, ok, action in zip(rows.tolist(), (cols + 1).tolist(), ce, correct, is_action):
+            example = idxs[row]
+            flags = spans.setdefault((example, examples[example].span_of[col]), [True, True])
+            flags[0] = flags[0] and ok
+            if action:
+                flags[1] = flags[1] and ok
+            for key in ("all", "action" if action else "text"):
+                sums[key][0] += loss
+                sums[key][1] += 1
+    peft_model.train(was_training)
+
+    def mean(key):
+        total, count = sums[key]
+        return total / max(1, count)
+
+    def share(index, cls=None, first_only=False):
+        picked = [flags[index] for (example, span), flags in spans.items()
+                  if (cls is None or examples[example].cls == cls) and (span == 0 or not first_only)]
+        return sum(picked) / len(picked) if picked else 0.0
+
+    present = [c for c in CLASSES if any(e.cls == c for e in examples)]
+    return {"dev_loss": mean("all"),
+            "dev_loss_action": mean("action"),
+            "dev_loss_respond_text": mean("text"),
+            "dev_action_exact": share(1),
+            "dev_action_exact_by_cls": {c: share(1, c) for c in present},
+            "dev_line_exact": share(0),
+            "dev_line_exact_by_cls": {c: share(0, c) for c in present},
+            "dev_first_action_exact": share(1, first_only=True)}
 
 
 # ── data selection ──
@@ -218,6 +322,11 @@ def _remove(*paths: str) -> None:
             os.remove(path)
 
 
+def _append_jsonl(path: str, record: dict) -> None:
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(record) + "\n")
+
+
 # ── training ──
 
 def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_MODEL_ID, cfg: TrainConfig = None,
@@ -248,18 +357,26 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
     os.makedirs(out_dir, exist_ok=True)
     refuse_foreign_manifest(out_dir, "adapter_sha256", "Qwen LoRA training")     # before anything is deleted
     _remove(*(os.path.join(out_dir, name) for name in STALE_FILES))
+    best_dir = os.path.join(out_dir, IN_RUN_ADAPTER)
+    shutil.rmtree(best_dir, ignore_errors=True)
 
     torch.manual_seed(cfg.seed)
     peft_model, tokenizer, revision = build_lora_model(base_model, cfg, device)
+    assert tokenizer.convert_tokens_to_ids(chat.ENDOFTEXT) == PAD_ID, "PAD_ID is not this tokenizer's <|endoftext|>"
     examples = [build_example(tokenizer, train_eps[i]) for i in used]
+    dev_used = stratified_sample([(e["cls"], e["split"]) for e in dev_eps], min(cfg.dev_eval_n, len(dev_eps)),
+                                 random.Random(cfg.seed + 1))
+    dev_examples = [build_example(tokenizer, dev_eps[i]) for i in dev_used]
     trainable = [p for p in peft_model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
-    pad_id = tokenizer.convert_tokens_to_ids(chat.ENDOFTEXT)
-    log(f"device {device} trainable_params {sum(p.numel() for p in trainable)} train_episodes {len(examples)}")
+    log(f"device {device} trainable_params {sum(p.numel() for p in trainable)} train_episodes {len(examples)} "
+        f"dev_episodes {len(dev_examples)}")
 
     stream = epoch_stream(len(examples), cfg.seed, per_step)
     peft_model.train()
-    since_log, tokens_seen, mark = [], 0, (time.time(), 0)
+    since_log, since_eval, tokens_seen, mark = [], [], 0, (time.time(), 0)
+    history, best, stale_evals, stop_reason = [], {SELECTION_METRIC: float("inf"), "step": 0}, 0, None
+    log_path = os.path.join(out_dir, "train_log.jsonl")
     for s in range(cfg.max_steps):
         lr = lr_at(s, cfg.max_steps, cfg.lr, cfg.min_lr, cfg.warmup)
         for group in optimizer.param_groups:
@@ -269,7 +386,7 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
         window_loss = 0.0
         for j in range(0, len(batch), cfg.micro_batch):
             idxs = batch[j:j + cfg.micro_batch]
-            input_ids, attention, labels, _ = collate(examples, idxs, pad_id, device)
+            input_ids, attention, labels, _ = collate(examples, idxs, PAD_ID, device)
             with _autocast(device):
                 loss_sum, _ = supervised_loss(peft_model, input_ids, attention, labels)
             loss = loss_sum / window_n          # token-weighted over the whole accumulation window
@@ -282,17 +399,50 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
         optimizer.zero_grad(set_to_none=True)
         tokens_seen += sum(len(examples[i].input_ids) for i in batch)
         since_log.append(window_loss)
-        if (s + 1) % cfg.log_every == 0 or s + 1 == cfg.max_steps:
+        since_eval.append(window_loss)
+        step = s + 1
+        if step % cfg.log_every == 0 or step == cfg.max_steps:
             now = time.time()
             rate = (tokens_seen - mark[1]) / max(1e-9, now - mark[0])
             mark = (now, tokens_seen)
-            log(f"step {s + 1}/{cfg.max_steps} loss {sum(since_log) / len(since_log):.4f} lr {lr:.2e} "
+            log(f"step {step}/{cfg.max_steps} loss {sum(since_log) / len(since_log):.4f} lr {lr:.2e} "
                 f"tok/s {rate:.0f} elapsed {now - started:.0f}s")
             since_log = []
 
-    peft_model.save_pretrained(out_dir, save_embedding_layers=False)
-    _remove(os.path.join(out_dir, "README.md"))
+        if step % cfg.eval_every == 0 or step == cfg.max_steps:
+            result = evaluate(peft_model, dev_examples, cfg.micro_batch, device)      # looked up on the module: tests script it
+            for metric in ("dev_loss", SELECTION_METRIC):
+                if not math.isfinite(result[metric]):
+                    # nan < best is False, so a NaN would silently never be saved
+                    raise RuntimeError(f"{metric} is not finite at step {step}")
+            record = {"step": step, "train_loss": sum(since_eval) / len(since_eval), "lr": lr,
+                      "tokens_seen": tokens_seen, "elapsed_s": round(time.time() - started, 1), **result}
+            since_eval = []
+            history.append(record)
+            _append_jsonl(log_path, record)
+            if result[SELECTION_METRIC] < best[SELECTION_METRIC]:           # never the plain or respond-text loss (CR-01)
+                best, stale_evals = {SELECTION_METRIC: result[SELECTION_METRIC], "step": step}, 0
+                peft_model.save_pretrained(best_dir, save_embedding_layers=False)
+            else:
+                stale_evals += 1
+            log(f"eval step {step} dev_loss {result['dev_loss']:.4f} dev_loss_action {result['dev_loss_action']:.4f} "
+                f"dev_action_exact {result['dev_action_exact']:.4f} best {best[SELECTION_METRIC]:.4f}")
+            if stale_evals >= cfg.patience:
+                stop_reason = "early_stop"
+                break
+    stop_reason = stop_reason or "max_steps"
+
+    # The kept adapter is the best evaluation, not the last step: load it back (so anything run after this sees
+    # the kept weights) and move its files into place.
+    from peft import set_peft_model_state_dict
+    from safetensors.torch import load_file
+    set_peft_model_state_dict(peft_model, load_file(os.path.join(best_dir, "adapter_model.safetensors")))
+    for name in ("adapter_config.json", "adapter_model.safetensors"):
+        os.replace(os.path.join(best_dir, name), os.path.join(out_dir, name))
+    shutil.rmtree(best_dir, ignore_errors=True)
     adapter_sha256 = sha256_file(os.path.join(out_dir, "adapter_model.safetensors"))
+    kept = next(h for h in history if h["step"] == best["step"])
+    last = history[-1]
     wall = round(time.time() - started, 1)
     manifest = {
         "schema": MANIFEST_SCHEMA,
@@ -305,11 +455,17 @@ def train(train_path: str, dev_path: str, out_dir: str, base_model: str = BASE_M
                     "dev_path": _rel(dev_path), "dev_sha256": file_sha256(dev_path),
                     "n_train_available": len(train_eps), "n_train_used": len(examples)},
         "config": {"train": cfg.to_dict(), "max_len": data.MAX_LEN},
-        "steps": cfg.max_steps, "tokens_seen": tokens_seen,
+        "steps": step, "best_step": best["step"], "tokens_seen": tokens_seen,
+        "selection": {"metric": SELECTION_METRIC, "direction": "min"},
+        # best = the evaluation of the adapter that is kept; last_eval = the final evaluation, possibly a later step
+        "best": {"step": best["step"], "train_loss": kept["train_loss"], **{k: kept[k] for k in EVAL_KEYS}},
+        "last_eval": {"step": last["step"], "train_loss": last["train_loss"], **{k: last[k] for k in EVAL_KEYS}},
         "adapter_sha256": adapter_sha256,
         "wall_seconds": wall,
+        "stop_reason": stop_reason,
         "run_notes": list(run_notes or []),
     }
     write_json_atomic(os.path.join(out_dir, "manifest.json"), manifest)
-    log(f"DONE steps {cfg.max_steps} wall {wall:.0f}s")
+    log(f"DONE best_step {best['step']} best_{SELECTION_METRIC} {best[SELECTION_METRIC]:.4f} wall {wall:.0f}s "
+        f"stop {stop_reason}")
     return manifest

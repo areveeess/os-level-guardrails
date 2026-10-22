@@ -9,6 +9,11 @@ What is pinned here, cheapest first:
     stamped benchmark row, so a wrong mask, render skew or manifest field shows up here and not after a
     41-minute GPU run)
   - the leakage gate: a training file with a held-out tool stops the run before any adapter file exists
+  - the training maths: our supervised-position loss equals the Hugging Face labels= loss, the LoRA parameter
+    count is the one the viva quotes (8,798,208 for the real dimensions), the seven target modules, gradient
+    checkpointing still gives every LoRA weight a gradient
+  - evaluate(): the action-level metrics, and the kept adapter is the one with the lowest dev_loss_action
+    (never the last step), with early stopping after `patience` evaluations without improvement
 
 Importing transformers and peft costs about 75 s once per pytest process, so the tokenizer, the tiny base model
 and the trained tracer run are module-scoped fixtures and every test keeps its runs to a few steps.
@@ -31,8 +36,10 @@ require_hf()
 from src.benchmark.injecagent import load_tool_specs
 from src.llm.hf_local import sha256_file
 from src.qwen_lora import chat
-from src.qwen_lora.data import build_example, gold_supervised_text
-from src.qwen_lora.train import TrainConfig, train
+from src.qwen_lora import train as train_module
+from src.qwen_lora.data import build_example, collate, gold_supervised_text
+from src.qwen_lora.train import (EVAL_KEYS, LORA_TARGETS, PAD_ID, SELECTION_METRIC, TrainConfig, build_lora_model,
+                                 evaluate, lora_param_count, supervised_loss, train)
 from src.scratch_llm.dataset import LeakageError, episode_tool, generate_episodes, write_episodes
 from tests.test_hf_local_provider import point_runner_at, raw_rows, run_one_case, write_hf_models_yaml_entries
 
@@ -140,3 +147,213 @@ def test_leak_a_held_out_tool_in_the_training_file_stops_the_run_before_any_adap
         train(bad, data_files[1], out_dir, base_model=tiny_dir, cfg=quick_config(), device="cpu", log=lambda *_: None)
     for name in ("adapter_config.json", "adapter_model.safetensors", "manifest.json"):
         assert not os.path.exists(os.path.join(out_dir, name))
+
+
+# ── the training maths ──
+
+@pytest.fixture(scope="module")
+def tiny_lora(tiny_dir):
+    """A LoRA model on the tiny base with dropout 0 (so two forward passes agree) and non-zero B matrices."""
+    peft_model, _, _ = build_lora_model(tiny_dir, TrainConfig(lora_dropout=0.0), "cpu")
+    generator = torch.Generator().manual_seed(0)
+    for name, param in peft_model.named_parameters():
+        if "lora_B" in name:
+            param.data = torch.randn(param.shape, generator=generator) * 0.02
+    return peft_model
+
+
+@pytest.fixture(scope="module")
+def tiny_examples(tokenizer):
+    return [build_example(tokenizer, ep) for ep in generate_episodes(6, 7)]
+
+
+def test_loss_equivalence_our_supervised_position_loss_equals_the_huggingface_labels_loss(tiny_lora, tiny_examples):
+    input_ids, attention, labels, _ = collate(tiny_examples, [0, 1, 2], PAD_ID, "cpu")
+    tiny_lora.eval()
+    with torch.no_grad():
+        loss_sum, n = supervised_loss(tiny_lora, input_ids, attention, labels)
+        reference = tiny_lora(input_ids=input_ids, attention_mask=attention, labels=labels).loss
+    ours = float(loss_sum) / n
+    print(f"\nloss equivalence: ours {ours:.8f} huggingface {float(reference):.8f} diff {abs(ours - float(reference)):.2e}")
+    assert n == int((labels[:, 1:] != -100).sum())
+    assert abs(ours - float(reference)) < 1e-4
+
+
+def test_param_count_trainable_parameters_equal_the_formula_on_the_tiny_model(tiny_lora):
+    trainable = sum(p.numel() for p in tiny_lora.parameters() if p.requires_grad)
+    assert trainable == lora_param_count(64, 128, 4, 2, 2, 16) == 32768
+    assert not any(p.requires_grad for name, p in tiny_lora.named_parameters() if "lora_" not in name)
+
+
+def test_param_count_for_the_real_qwen_dimensions_is_8798208():
+    assert lora_param_count(896, 4864, 14, 2, 1, 16) == 366_592
+    assert lora_param_count(896, 4864, 14, 2, 24, 16) == 8_798_208
+    config = read_json(os.path.join(qwen_snapshot_or_skip(), "config.json"))
+    assert lora_param_count(config["hidden_size"], config["intermediate_size"], config["num_attention_heads"],
+                            config["num_key_value_heads"], config["num_hidden_layers"], 16) == 8_798_208
+
+
+def test_targets_resolve_to_the_seven_projections_and_the_saved_config_records_the_recipe(tiny_lora, tracer_run):
+    def leaves(names):
+        return {name.rsplit(".", 1)[-1] for name in names}
+
+    resolved = tiny_lora.peft_config["default"].target_modules      # full names: one per layer and projection
+    assert leaves(resolved) == set(LORA_TARGETS) and len(resolved) == 7 * 2       # the tiny model has 2 layers
+    assert not any("lm_head" in name or "embed" in name for name in resolved)
+    assert LORA_TARGETS == ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
+    saved = read_json(os.path.join(tracer_run.out_dir, "adapter_config.json"))
+    assert leaves(saved["target_modules"]) == set(LORA_TARGETS)
+    assert (saved["r"], saved["lora_alpha"], saved["lora_dropout"]) == (16, 32, 0.05)
+
+
+def test_checkpointing_every_lora_parameter_gets_a_finite_gradient_and_the_base_gets_none(tiny_lora, tiny_examples):
+    input_ids, attention, labels, _ = collate(tiny_examples, [0, 1], PAD_ID, "cpu")
+    tiny_lora.train()
+    assert tiny_lora.base_model.model.model.gradient_checkpointing
+    loss_sum, n = supervised_loss(tiny_lora, input_ids, attention, labels)
+    (loss_sum / n).backward()
+    for name, param in tiny_lora.named_parameters():
+        if param.requires_grad:
+            assert param.grad is not None and bool(torch.isfinite(param.grad).all()), name
+        else:
+            assert param.grad is None, name
+    assert any(float(p.grad.abs().sum()) > 0 for p in tiny_lora.parameters() if p.requires_grad)
+    tiny_lora.zero_grad(set_to_none=True)
+
+
+# ── evaluate(): action-level metrics ──
+
+def standin_logits_fn(examples):
+    """Logits whose argmax is the gold token everywhere except inside respond message text (where it is wrong)."""
+    by_ids = {tuple(e.input_ids): e for e in examples}
+
+    def logits_fn(peft_model, input_ids, attention_mask, labels):
+        targets = labels[:, 1:]
+        positions = targets != -100
+        rows, cols = positions.nonzero(as_tuple=True)
+        logits = torch.zeros(int(rows.numel()), 151936)
+        for k, (row, col) in enumerate(zip(rows.tolist(), cols.tolist())):
+            n = int(attention_mask[row].sum())
+            example = by_ids[tuple(input_ids[row, :n].tolist())]
+            gold = int(targets[row, col])
+            if example.action_labels[col + 1] == -100:                  # respond message text: argmax is wrong
+                logits[k, (gold + 1) % 151936] = 10.0
+            else:
+                logits[k, gold] = 10.0
+        return logits, targets[positions], positions
+
+    return logits_fn
+
+
+def test_evaluate_returns_exactly_the_eval_keys_and_ignores_respond_message_text(tiny_lora, tokenizer):
+    dev = [build_example(tokenizer, ep) for ep in generate_episodes(12, 5, "dev_synthetic")]
+    result = evaluate(tiny_lora, dev, 2, "cpu", logits_fn=standin_logits_fn(dev))
+    assert tuple(result) == EVAL_KEYS
+    assert result["dev_action_exact"] == 1.0                              # the wrong argmax sits only in respond text
+    assert result["dev_first_action_exact"] == 1.0
+    assert result["dev_line_exact"] < 1.0                                 # the respond lines are not exact as a whole
+    present = {e.cls for e in dev}
+    assert set(result["dev_action_exact_by_cls"]) == set(result["dev_line_exact_by_cls"]) == present
+    assert all(v == 1.0 for v in result["dev_action_exact_by_cls"].values())
+    assert result["dev_loss_action"] < result["dev_loss_respond_text"]
+    assert result["dev_loss_action"] < result["dev_loss"] < result["dev_loss_respond_text"]
+    assert all(math.isfinite(v) for v in result.values() if isinstance(v, float))
+
+
+def test_evaluate_counts_a_wrong_action_token_and_restores_the_training_mode(tiny_lora, tokenizer):
+    dev = [build_example(tokenizer, ep) for ep in generate_episodes(4, 6, "dev_tools")]
+
+    def always_wrong(peft_model, input_ids, attention_mask, labels):
+        targets = labels[:, 1:]
+        positions = targets != -100
+        logits = torch.zeros(int(positions.sum()), 151936)
+        logits[torch.arange(logits.shape[0]), (targets[positions] + 1) % 151936] = 10.0
+        return logits, targets[positions], positions
+
+    tiny_lora.train()
+    result = evaluate(tiny_lora, dev, 2, "cpu", logits_fn=always_wrong)
+    assert tiny_lora.training
+    assert result["dev_action_exact"] == 0.0 and result["dev_line_exact"] == 0.0
+    assert result["dev_first_action_exact"] == 0.0
+    tiny_lora.eval()
+    evaluate(tiny_lora, dev, 2, "cpu", logits_fn=always_wrong)
+    assert not tiny_lora.training
+
+
+def test_evaluate_runs_the_real_model_and_every_value_is_finite(tiny_lora, tokenizer):
+    dev = [build_example(tokenizer, ep) for ep in generate_episodes(4, 6, "dev_tools")]
+    result = evaluate(tiny_lora, dev, 2, "cpu")
+    assert tuple(result) == EVAL_KEYS
+    assert all(math.isfinite(result[k]) for k in ("dev_loss", "dev_loss_action", "dev_loss_respond_text"))
+    assert 0.0 <= result["dev_line_exact"] <= result["dev_action_exact"] <= 1.0      # action-exact is the looser test
+
+
+# ── selection and early stopping on dev_loss_action (D-06) ──
+
+def scripted_eval(values, snapshots):
+    """An evaluate() whose dev_loss_action follows `values` while the plain dev_loss falls at every call, so
+    selecting on the plain loss (or on the last step) would keep a different adapter than the right metric does."""
+    remaining = iter(values)
+
+    def fake_evaluate(peft_model, examples, micro_batch, device, logits_fn=None):
+        from peft import get_peft_model_state_dict
+        snapshots.append({k: v.detach().clone() for k, v in get_peft_model_state_dict(peft_model).items()})
+        action = next(remaining)
+        return {"dev_loss": 5.0 - 0.1 * len(snapshots), "dev_loss_action": action, "dev_loss_respond_text": 9.0,
+                "dev_action_exact": 0.5, "dev_action_exact_by_cls": {"benign": 0.5}, "dev_line_exact": 0.1,
+                "dev_line_exact_by_cls": {"benign": 0.1}, "dev_first_action_exact": 0.5}
+
+    return fake_evaluate
+
+
+def test_selection_keeps_the_lowest_dev_loss_action_and_stops_after_patience(tiny_dir, data_files, tmp_path,
+                                                                            monkeypatch):
+    from safetensors.torch import load_file
+    snapshots = []
+    values =[0.9, 0.5, 0.7, 0.8, 0.6, 0.6, 0.6, 0.6]
+    monkeypatch.setattr(train_module, "evaluate", scripted_eval(values, snapshots))
+    out_dir = str(tmp_path / "selected")
+    manifest = train(data_files[0], data_files[1], out_dir, base_model=tiny_dir,
+                     cfg=quick_config(max_steps=8, eval_every=1, patience=2, micro_batch=2, accum=1), device="cpu",
+                     log=lambda *_: None)
+    assert SELECTION_METRIC == "dev_loss_action"
+    assert manifest["stop_reason"] == "early_stop" and manifest["steps"] == 4
+    assert manifest["best_step"] == 2 and manifest["best"]["step"] == 2
+    assert manifest["best"]["dev_loss_action"] == 0.5 and manifest["last_eval"]["step"] == 4
+    assert len(snapshots) == 4
+    kept = load_file(os.path.join(out_dir, "adapter_model.safetensors"))
+    assert set(kept) == set(snapshots[1])
+    assert all(torch.equal(kept[k], snapshots[1][k]) for k in kept)              # the step-2 weights
+    assert any(not torch.equal(kept[k], snapshots[3][k]) for k in kept)          # not the last step's
+    assert manifest["adapter_sha256"] == sha256_file(os.path.join(out_dir, "adapter_model.safetensors"))
+    assert not os.path.exists(os.path.join(out_dir, train_module.IN_RUN_ADAPTER))
+
+
+def test_selection_runs_to_max_steps_when_the_metric_keeps_improving(tiny_dir, data_files, tmp_path, monkeypatch):
+    snapshots = []
+    monkeypatch.setattr(train_module, "evaluate", scripted_eval([0.9, 0.8, 0.7, 0.6, 0.5], snapshots))
+    manifest = train(data_files[0], data_files[1], str(tmp_path / "improving"), base_model=tiny_dir,
+                     cfg=quick_config(max_steps=3, eval_every=1, patience=2, micro_batch=2, accum=1), device="cpu",
+                     log=lambda *_: None)
+    assert manifest["stop_reason"] == "max_steps" and manifest["steps"] == 3 and manifest["best_step"] == 3
+
+
+def test_evaluate_a_real_tiny_run_writes_one_log_record_and_one_eval_line_per_evaluation(tiny_dir, data_files, tmp_path):
+    out_dir = str(tmp_path / "logged")
+    logged = []
+    manifest = train(data_files[0], data_files[1], out_dir, base_model=tiny_dir,
+                     cfg=quick_config(max_steps=4, eval_every=2, micro_batch=2, accum=1), device="cpu",
+                     log=logged.append)
+    with open(os.path.join(out_dir, "train_log.jsonl"), encoding="utf-8") as f:
+        records = [json.loads(line) for line in f if line.strip()]
+    assert [r["step"] for r in records] == [2, 4]
+    for record in records:
+        for key in ("step", "train_loss", "lr", "tokens_seen", "elapsed_s", *EVAL_KEYS):
+            assert key in record, key
+        assert math.isfinite(record["train_loss"]) and math.isfinite(record["dev_loss_action"])
+    evals = [line for line in logged if line.startswith("eval step ")]
+    assert len(evals) == 2
+    pattern = r"^eval step (\d+) dev_loss (\S+) dev_loss_action (\S+) dev_action_exact (\S+) best (\S+)$"
+    assert all(re.match(pattern, line) for line in evals), evals
+    assert manifest["best"]["step"] in (2, 4) and manifest["last_eval"]["step"] == 4
+    assert set(EVAL_KEYS) <= set(manifest["best"]) and set(EVAL_KEYS) <= set(manifest["last_eval"])
