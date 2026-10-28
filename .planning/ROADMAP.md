@@ -111,7 +111,18 @@ Plans:
   4. A small layer-targeted attack suite drives actions that only the sandbox (namespaces / private filesystem) and seccomp layers can stop, and the where-blocked-by-layer data shows non-zero blocks for those layers.
   5. The viva page(s) for namespaces, seccomp-bpf, and local-inference confounds (quantization, context window) are added to `docs/viva/` (DOC-03 is traced to Phase 5).
 
-**Plans**: TBD
+**Plans**: 3 plans planned (04-02 pending)
+
+Plans:
+**Wave 1**
+- [ ] 04-01-PLAN.md — Run plumbing: Ollama 8192-context variants on an ownership-safe server, restart-proof launcher and checks, runner fixes (IN-02, context_overflow, ds-first), serial local queue (wave 1)
+- [ ] 04-02-PLAN.md — EVAL-08 layer-targeted suite: NOT PLANNED YET, waiting on a user decision (success criterion 4 is open)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 04-03-PLAN.md — Local full runs (scratch-gpt, Qwen LoRA, Qwen base, qwen2.5:3b, llama3.2:3b re-check), written stopping rule, Groq resume ds-first after Ollama (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 04-04-PLAN.md — Control re-run, hosted runs to a final state, merged Phase 4 report, viva page 04 (wave 3)
 
 ### Phase 5: Comparison Report & Deliverables
 
