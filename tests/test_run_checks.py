@@ -339,3 +339,136 @@ def test_evidence_fails_outside_the_band(tmp_path, capsys, tokens):
 def test_evidence_band_note_when_default_covers_the_window(tmp_path, capsys):
     run_checks.main(_evidence(tmp_path, d=8192))
     assert "NOTE" in capsys.readouterr().out
+
+
+# ── hosted (plan 04-05 Task 3) ──
+
+import datetime  # noqa: E402
+
+from src.benchmark import jobs  # noqa: E402
+
+GROQ = "groq-gpt-oss-20b"
+FREEZE = datetime.datetime(2026, 10, 29, 15, 30, tzinfo=datetime.timezone.utc)
+
+
+def _hosted_dir(prefix, model=GROQ, ds=0, other=0, ds_infra=0, state="running", launches=None):
+    out = f"{prefix}-{model}"
+    import os
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, "raw.jsonl"), "w", encoding="utf-8") as f:
+        for i in range(ds):
+            f.write(json.dumps(_row(f"ds-u{i:02d}", model=model, kind="ds")) + "\n")
+        for i in range(ds_infra):
+            f.write(json.dumps(_row(f"ds-x{i:02d}", model=model, kind="ds", llm_error="InternalServerError 500"))
+                    + "\n")
+        for i in range(other):
+            f.write(json.dumps(_row(f"dh-u{i:02d}", model=model, kind="dh")) + "\n")
+    with open(os.path.join(out, "hosted_state.json"), "w", encoding="utf-8") as f:
+        json.dump({"state": state, "next_launch_utc": None, "launches": launches or []}, f)
+    return out
+
+
+@pytest.fixture
+def hosted_env(tmp_path, monkeypatch):
+    jobs_dir = tmp_path / "jobs"
+    jobs_dir.mkdir()
+    (jobs_dir / "stopping_rule.json").write_text(json.dumps({"freeze_utc": "2026-10-29T15:30:00+00:00"}))
+    monkeypatch.setattr(jobs, "_now", lambda: FREEZE - datetime.timedelta(hours=1))
+    monkeypatch.setattr(jobs, "_list_pids", lambda: [])
+    return str(tmp_path / "p4"), str(jobs_dir), monkeypatch
+
+
+def _hosted_main(prefix, jobs_dir):
+    return run_checks.main(["hosted", "--prefix", prefix, "--models", GROQ, "--jobs-dir", jobs_dir])
+
+
+def test_hosted_partial_label_and_running(hosted_env, capsys):
+    prefix, jobs_dir, _ = hosted_env
+    _hosted_dir(prefix, ds=30, state="waiting_quota",
+                launches=[{"end": "2026-10-29T10:00:00Z", "quota_stop": True, "stated_retry_s": 7200.0}])
+    assert _hosted_main(prefix, jobs_dir) == 0
+    out = capsys.readouterr().out
+    assert f"HOSTED {GROQ} state waiting_quota finished 30/342 ds 30/120" in out
+    assert "partial n=30 ds n=30" in out and "quota_stops 1" in out
+    assert out.strip().endswith("hosted-running")
+
+
+def test_hosted_terminal_ok_when_every_model_is_terminal(hosted_env, capsys):
+    prefix, jobs_dir, _ = hosted_env
+    _hosted_dir(prefix, ds=120, other=10, state="stopped_by_quota")
+    assert _hosted_main(prefix, jobs_dir) == 0
+    out = capsys.readouterr().out
+    assert "partial n=130 ds n=120" in out and out.strip().endswith("hosted-terminal-ok")
+
+
+def test_hosted_terminal_ok_after_the_freeze_when_no_child_is_alive(hosted_env, capsys):
+    prefix, jobs_dir, monkeypatch = hosted_env
+    _hosted_dir(prefix, ds=12, state="running")
+    monkeypatch.setattr(jobs, "_now", lambda: FREEZE + datetime.timedelta(minutes=1))
+    assert _hosted_main(prefix, jobs_dir) == 0
+    out = capsys.readouterr().out
+    assert "stopped at the freeze" in out and out.strip().endswith("hosted-terminal-ok")
+
+
+def test_hosted_running_after_the_freeze_while_a_child_is_alive(hosted_env, capsys):
+    prefix, jobs_dir, monkeypatch = hosted_env
+    out_dir = _hosted_dir(prefix, ds=12, state="running")
+    import os
+    monkeypatch.setattr(jobs, "_now", lambda: FREEZE + datetime.timedelta(minutes=1))
+    monkeypatch.setattr(jobs, "_list_pids", lambda: [812])
+    argv = ["/x/venv/bin/python", "-u", "run_benchmark.py", "--resume", os.path.abspath(out_dir)]
+    monkeypatch.setattr(jobs, "_read_proc", lambda pid, name: ("\0".join(argv) + "\0").encode()
+                        if name == "cmdline" else None)
+    assert _hosted_main(prefix, jobs_dir) == 0
+    assert capsys.readouterr().out.strip().endswith("hosted-running")
+
+
+def test_hosted_fails_on_complete_below_342(hosted_env, capsys):
+    prefix, jobs_dir, _ = hosted_env
+    _hosted_dir(prefix, ds=120, other=100, state="complete")
+    assert _hosted_main(prefix, jobs_dir) == 1
+    assert "FAIL hosted" in capsys.readouterr().out
+
+
+def test_hosted_fails_on_a_ds_first_violation(hosted_env, capsys):
+    prefix, jobs_dir, _ = hosted_env
+    _hosted_dir(prefix, ds=5, other=10, state="running")
+    assert _hosted_main(prefix, jobs_dir) == 1
+    assert "ds-first" in capsys.readouterr().out
+
+
+def test_hosted_pending_ds_infra_counts_toward_ds_first(hosted_env, capsys):
+    prefix, jobs_dir, _ = hosted_env
+    _hosted_dir(prefix, ds=8, ds_infra=2, other=2, state="running")
+    assert _hosted_main(prefix, jobs_dir) == 0
+
+
+# ── secret-scan ──
+
+def test_secret_scan_fails_on_a_planted_key_and_never_prints_it(tmp_path, capsys):
+    fake = "gsk" + "_" + "Ab3" * 8                      # built at runtime: no key-shaped literal in this file
+    (tmp_path / "clean.py").write_text("x = 1\n")
+    (tmp_path / "leak.txt").write_text("first line\ntoken = " + fake + "\n")
+    assert run_checks.main(["secret-scan", "--paths", str(tmp_path)]) == 1
+    out = capsys.readouterr().out
+    assert f"FAIL secret-scan: {tmp_path / 'leak.txt'}:2" in out
+    assert fake not in out and "Ab3Ab3" not in out
+
+
+def test_secret_scan_passes_on_clean_files_and_counts_them(tmp_path, capsys):
+    (tmp_path / "a.py").write_text("gsk_short = 1\n")       # too short to be a key
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.md").write_text("nothing here\n")
+    (tmp_path / "bin.dat").write_bytes(b"\0\1\2")
+    assert run_checks.main(["secret-scan", "--paths", str(tmp_path / "a.py"), str(tmp_path / "sub"),
+                            str(tmp_path / "bin.dat")]) == 0
+    assert capsys.readouterr().out.strip() == "secret-scan-ok files 2"
+
+
+def test_secret_scan_reads_only_the_given_paths(tmp_path, capsys):
+    fake = "gsk" + "_" + "Zz9" * 8
+    (tmp_path / "outside.txt").write_text(fake + "\n")
+    (tmp_path / "inside").mkdir()
+    (tmp_path / "inside" / "ok.txt").write_text("fine\n")
+    assert run_checks.main(["secret-scan", "--paths", str(tmp_path / "inside")]) == 0
+    assert "secret-scan-ok files 1" in capsys.readouterr().out

@@ -923,3 +923,293 @@ def test_report_merges_only_final_phase4_directories(tmp_path, monkeypatch, caps
     assert jobs.report(prefix, f"{prefix}-report") == 0
     assert calls == [(f"{prefix}-report", sources)]
     assert f"MERGE {prefix}-scratch-gpt" in capsys.readouterr().out
+
+
+# ── Hosted loop under the D-09 rule (plan 04-05 Task 3); fakes only, no hosted request ──
+
+GROQ = "groq-gpt-oss-20b"
+
+
+class HostedChild:
+    """A fake run_benchmark child: runs `dur` fake seconds, then adds `gain` finished episodes and, if given,
+    writes the runner's quota stop line, and exits 0. A signal ends it at once."""
+
+    def __init__(self, hw, model, path, pid, behaviour):
+        self.hw, self.model, self.path, self.pid = hw, model, path, pid
+        self.end = hw.world.now + behaviour.get("dur", 30)
+        self.behaviour, self.code = behaviour, None
+
+    def poll(self):
+        if self.code is not None:
+            return self.code
+        if not self.hw.world.procs[self.pid]["alive"]:
+            self.code = -15
+            return self.code
+        if self.hw.world.now >= self.end:
+            self.hw.finished[self.model] += self.behaviour.get("gain", 0)
+            if self.behaviour.get("quota"):
+                with open(self.path, "a", encoding="utf-8") as f:
+                    f.write(f"[stop] {self.model}: quota exhausted ({self.behaviour['quota']}). "
+                            f"Re-run with --resume x later.\n")
+            self.hw.world.procs[self.pid]["alive"] = False
+            self.code = 0
+        return self.code
+
+    def wait(self, timeout=None):
+        return self.poll()
+
+
+class HostedWorld:
+    def __init__(self, world, monkeypatch, script):
+        self.world, self.script = world, {m: list(b) for m, b in script.items()}
+        self.finished = {m: 0 for m in jobs.HOSTED_MODELS}
+        self.spawned = []           # (model, argv, fake time)
+        monkeypatch.setattr(jobs, "_spawn", self.spawn)
+        monkeypatch.setattr(jobs, "model_status", self.status)
+        monkeypatch.setattr(jobs, "is_complete", lambda d, m: self.finished[m] >= 342)
+        world.run_results[("git", "rev-parse")] = (0, "c" * 40 + "\n")
+
+    def spawn(self, argv, path):
+        model = argv[argv.index("--models") + 1]
+        with open(os.path.join(argv[argv.index("--resume") + 1], "raw.jsonl"), "a", encoding="utf-8"):
+            pass                                     # the real child creates raw.jsonl; status reads it
+        behaviour = self.script[model].pop(0) if self.script.get(model) else {"dur": 30, "gain": 0}
+        pid = self.world.next_pid
+        self.world.next_pid += 1
+        self.world.add_proc(pid, cmdline=tuple(a.encode() for a in argv))
+        self.spawned.append((model, argv, self.world.now))
+        return HostedChild(self, model, path, pid, behaviour)
+
+    def status(self, out_dir, model):
+        f = self.finished[model]
+        return {"finished": f, "expected": 342, "pending_infra": 0, "problems": [] if f >= 342 else ["below"]}
+
+
+def _state(prefix, model=GROQ):
+    with open(f"{prefix}-{model}/hosted_state.json", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _hosted(clock, tmp_path, **kw):
+    return jobs.hosted_loop(str(tmp_path / "p4"), [GROQ], jobs_dir=str(tmp_path / "jobs"), **kw)
+
+
+def test_hosted_child_argv_is_phase1_args_ds_first_and_its_own_directory(clock, tmp_path, monkeypatch):
+    hw = HostedWorld(clock, monkeypatch, {GROQ: [{"gain": 342}]})
+    assert _hosted(clock, tmp_path) == 0
+    argv = hw.spawned[0][1]
+    i = argv.index("--models")
+    assert argv[i:] == ["--models", GROQ, "--resume", os.path.abspath(str(tmp_path / "p4")) + f"-{GROQ}",
+                        "--runs", "3", "--dh", "20", "--ds", "20", "--benign", "17", "--seed", "0",
+                        "--max-steps", "5", "--priority-kinds", "ds"]
+    assert argv[1] == "-u" and argv[2].endswith("run_benchmark.py")
+    assert _state(str(tmp_path / "p4"))["state"] == "complete"
+
+
+def test_quota_stop_with_retry_before_the_freeze_waits_then_relaunches(clock, tmp_path, monkeypatch):
+    hw = HostedWorld(clock, monkeypatch, {GROQ: [{"gain": 40, "quota": "API asks to retry in 2.0h"},
+                                                 {"gain": 302}]})
+    _hosted(clock, tmp_path)
+    assert len(hw.spawned) == 2
+    first_end = hw.spawned[0][2] + 30
+    assert hw.spawned[1][2] >= first_end + 7200 + 120
+    assert hw.spawned[1][2] <= first_end + 7200 + 120 + 70
+    st = _state(str(tmp_path / "p4"))
+    assert st["state"] == "complete"
+    assert st["launches"][0]["quota_stop"] is True and st["launches"][0]["stated_retry_s"] == 7200
+    assert st["launches"][0]["new_finished"] == 40
+
+
+def test_quota_stop_whose_reset_falls_at_the_freeze_ends_the_model(clock, tmp_path, monkeypatch):
+    clock.base = FREEZE - datetime.timedelta(hours=1)
+    hw = HostedWorld(clock, monkeypatch, {GROQ: [{"gain": 40, "quota": "API asks to retry in 2.0h"}]})
+    _hosted(clock, tmp_path)
+    assert len(hw.spawned) == 1
+    st = _state(str(tmp_path / "p4"))
+    assert st["state"] == "stopped_by_quota" and "freeze" in st["launches"][0]["stop_reason"]
+
+
+def test_quota_stop_without_a_retry_time_waits_60_minutes(clock, tmp_path, monkeypatch):
+    hw = HostedWorld(clock, monkeypatch, {GROQ: [{"gain": 10, "quota": "still rate limited after backoff"},
+                                                 {"gain": 332}]})
+    _hosted(clock, tmp_path)
+    assert len(hw.spawned) == 2 and 3600 <= hw.spawned[1][2] - (hw.spawned[0][2] + 30) <= 3600 + 70
+    assert _state(str(tmp_path / "p4"))["launches"][0]["stated_retry_s"] is None
+
+
+def test_quota_stop_without_a_retry_time_is_final_when_the_wait_passes_the_freeze(clock, tmp_path, monkeypatch):
+    clock.base = FREEZE - datetime.timedelta(minutes=30)
+    hw = HostedWorld(clock, monkeypatch, {GROQ: [{"gain": 10, "quota": "still rate limited after backoff"}]})
+    _hosted(clock, tmp_path)
+    assert len(hw.spawned) == 1 and _state(str(tmp_path / "p4"))["state"] == "stopped_by_quota"
+
+
+def test_freeze_stops_only_own_children_and_marks_stopped_at_freeze(clock, tmp_path, monkeypatch, capsys):
+    clock.base = FREEZE - datetime.timedelta(seconds=100)
+    clock.add_proc(55, cmdline=(b"python3", b"other_project.py"))        # a bystander: never signalled
+    hw = HostedWorld(clock, monkeypatch, {m: [{"dur": 10 ** 6, "gain": 5}] for m in jobs.HOSTED_MODELS})
+    assert jobs.hosted_loop(str(tmp_path / "p4"), jobs_dir=str(tmp_path / "jobs")) == 0
+    own = {pid for pid in clock.procs if pid >= 4000}
+    assert len(hw.spawned) == 3
+    assert {pid for pid, _ in clock.signals} == own and all(sig == signal.SIGTERM for _, sig in clock.signals)
+    assert (55, signal.SIGTERM) not in clock.signals
+    for model in jobs.HOSTED_MODELS:
+        st = _state(str(tmp_path / "p4"), model)
+        assert st["state"] == "stopped_at_freeze"
+        assert "FREEZE stopped at" in open(f"{tmp_path / 'p4'}-{model}/progress.log").read()
+    assert "HOSTED freeze reached" in capsys.readouterr().out
+
+
+def test_nothing_is_launched_after_the_freeze(clock, tmp_path, monkeypatch, capsys):
+    clock.base = FREEZE
+    hw = HostedWorld(clock, monkeypatch, {})
+    assert _hosted(clock, tmp_path) == 0
+    assert hw.spawned == [] and not os.path.exists(tmp_path / "jobs" / "stopping_rule.json")
+    assert "nothing launched (D-09)" in capsys.readouterr().out
+
+
+def test_stopping_rule_is_written_once_and_a_moved_freeze_refuses(clock, tmp_path, monkeypatch, capsys):
+    HostedWorld(clock, monkeypatch, {GROQ: [{"gain": 342}]})
+    _hosted(clock, tmp_path)
+    path = tmp_path / "jobs" / "stopping_rule.json"
+    rule = json.loads(path.read_text())
+    assert rule["freeze_utc"] == "2026-10-29T15:30:00+00:00" and rule["rule_sha"] == "c" * 40
+    assert rule["models"] == [GROQ] and rule["superseded"] == "results/final-20261011"
+    assert set(rule) >= {"written_utc", "freeze_utc", "rule_sha", "models", "directories", "superseded"}
+    before = path.read_text()
+    clock.now += 3600
+    _hosted(clock, tmp_path)
+    assert path.read_text() == before                                  # reused unchanged
+    monkeypatch.setattr(jobs, "FREEZE_UTC", "2026-10-30T15:30:00+00:00")
+    hw = HostedWorld(clock, monkeypatch, {GROQ: [{"gain": 1}]})
+    hw.finished[GROQ] = 0
+    assert _hosted(clock, tmp_path) == 1
+    assert hw.spawned == [] and "the freeze is never moved" in capsys.readouterr().out
+
+
+def test_three_zero_progress_launches_mark_the_model_stalled(clock, tmp_path, monkeypatch):
+    hw = HostedWorld(clock, monkeypatch, {GROQ: [{"gain": 0}, {"gain": 0}, {"gain": 0}, {"gain": 5}]})
+    _hosted(clock, tmp_path)
+    assert len(hw.spawned) == 3
+    gaps = [b[2] - a[2] for a, b in zip(hw.spawned, hw.spawned[1:])]
+    assert all(600 + 30 <= g <= 600 + 30 + 70 for g in gaps)
+    assert _state(str(tmp_path / "p4"))["state"] == "stalled"
+
+
+def test_an_unavailable_model_is_never_launched_and_state_survives_a_restart(clock, tmp_path, monkeypatch):
+    prefix = str(tmp_path / "p4")
+    jobs.write_hosted_state(f"{prefix}-groq-gpt-oss-120b", {"launches": [], "state": "unavailable",
+                                                            "next_launch_utc": None})
+    hw = HostedWorld(clock, monkeypatch, {GROQ: [{"gain": 40, "quota": "API asks to retry in 3.0h"}]})
+    monkeypatch.setattr(jobs, "QUOTA_MARGIN_S", 120)
+    clock.base = FREEZE - datetime.timedelta(hours=2)
+    jobs.hosted_loop(prefix, ["groq-gpt-oss-120b", GROQ], jobs_dir=str(tmp_path / "jobs"))
+    assert [s[0] for s in hw.spawned] == [GROQ]
+    assert _state(prefix, "groq-gpt-oss-120b")["state"] == "unavailable"
+    assert _state(prefix)["state"] == "stopped_by_quota"
+    jobs.hosted_loop(prefix, ["groq-gpt-oss-120b", GROQ], jobs_dir=str(tmp_path / "jobs"))
+    assert len(hw.spawned) == 1                                   # terminal states are kept across a restart
+
+
+def test_waiting_quota_state_survives_a_restart(clock, tmp_path, monkeypatch):
+    prefix = str(tmp_path / "p4")
+    due = BEFORE + datetime.timedelta(hours=1)
+    jobs.write_hosted_state(f"{prefix}-{GROQ}", {"launches": [{"quota_stop": True, "new_finished": 3}],
+                                                 "state": "waiting_quota",
+                                                 "next_launch_utc": due.strftime("%Y-%m-%dT%H:%M:%SZ")})
+    hw = HostedWorld(clock, monkeypatch, {GROQ: [{"gain": 342}]})
+    _hosted(clock, tmp_path)
+    assert len(hw.spawned) == 1 and 3600 <= hw.spawned[0][2] <= 3600 + 60
+
+
+def test_hosted_refuses_the_superseded_october_directory(clock, tmp_path, monkeypatch, capsys):
+    hw = HostedWorld(clock, monkeypatch, {})
+    for prefix in ("results/final-20261011/phase4", "results/final-20261011"):
+        assert jobs.hosted_loop(prefix, [GROQ], jobs_dir=str(tmp_path / "jobs")) == 1
+    assert hw.spawned == [] and "superseded" in capsys.readouterr().out
+    assert not os.path.exists(tmp_path / "jobs" / "stopping_rule.json")
+
+
+def test_hosted_refuses_a_second_instance(clock, tmp_path, monkeypatch, capsys):
+    prefix = str(tmp_path / "p4")
+    clock.add_proc(333, cmdline=(b"/x/venv/bin/python", b"-m", b"src.benchmark.jobs", b"hosted", b"--prefix",
+                                 prefix.encode()))
+    hw = HostedWorld(clock, monkeypatch, {GROQ: [{"gain": 342}]})
+    assert jobs.hosted_loop(prefix, [GROQ], jobs_dir=str(tmp_path / "jobs")) == 0
+    assert hw.spawned == [] and "HOSTED already running pid 333" in capsys.readouterr().out
+
+
+# ── hosted-probe --key-check (environment test only, sends nothing) ──
+
+def _no_requests(monkeypatch):
+    def must_not_build(*_a, **_k):
+        raise AssertionError("the key check must not build a provider or send a request")
+    monkeypatch.setattr("src.llm.registry.get_provider", must_not_build)
+
+
+def test_key_check_prints_set_and_never_the_value(monkeypatch, capsys):
+    _no_requests(monkeypatch)
+    fake_value = "gsk" + "_" + "Zq" * 14                     # built at runtime: no key-shaped literal in the file
+    monkeypatch.setenv("GROQ_API_KEY", fake_value)
+    assert jobs.main(["hosted-probe", "--key-check"]) == 0
+    out = capsys.readouterr().out
+    assert out.strip().splitlines() == ["KEY GROQ_API_KEY set"]
+    assert fake_value not in out and "Zq" not in out
+
+
+def test_key_check_prints_missing(monkeypatch, capsys):
+    _no_requests(monkeypatch)
+    monkeypatch.setattr(jobs, "load_model_config", lambda: load_model_config())
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    assert jobs.hosted_probe(key_check=True) == 0
+    assert capsys.readouterr().out.strip().splitlines() == ["KEY GROQ_API_KEY missing"]
+
+
+def test_key_check_runs_the_registry_start_up_first(monkeypatch, capsys):
+    _no_requests(monkeypatch)
+    order = []
+
+    def startup():
+        order.append("registry")
+        return load_model_config()
+    monkeypatch.setattr(jobs, "load_model_config", startup)
+    monkeypatch.setenv("GROQ_API_KEY", "x")
+    jobs.hosted_probe(key_check=True)
+    assert order == ["registry"]
+
+
+def test_probe_prints_classes_only(monkeypatch, capsys):
+    from src.llm.base import LLMResponse
+    errors = {"groq-gpt-oss-120b": None,
+              "groq-gpt-oss-20b": "NotFoundError: Error code: 404 - model_not_found (detail text)",
+              "groq-qwen3.8-27b": "RateLimitError: Error code: 429 - rate_limit_exceeded, try again in 7.5s"}
+
+    class P:
+        def __init__(self, name):
+            self.name = name
+
+        def generate(self, messages, temperature=0.0, max_tokens=512):
+            return LLMResponse(text="OK", latency_ms=1.0, model=self.name, error=errors[self.name])
+    monkeypatch.setattr("src.llm.registry.get_provider", lambda name: P(name))
+    monkeypatch.setenv("GROQ_API_KEY", "x")
+    assert jobs.hosted_probe() == 0
+    out = capsys.readouterr().out
+    assert "PROBE groq-gpt-oss-120b ok" in out and "PROBE groq-gpt-oss-20b unavailable" in out
+    assert "PROBE groq-qwen3.8-27b rate_limited" in out and "detail text" not in out
+    errors["groq-gpt-oss-120b"] = "AuthenticationError: Error code: 401 - invalid_api_key"
+    assert jobs.hosted_probe() == 1
+    assert "PROBE groq-gpt-oss-120b auth" in capsys.readouterr().out
+
+
+def test_probe_records_an_unavailable_model_for_the_loop(monkeypatch, tmp_path, capsys):
+    from src.llm.base import LLMResponse
+
+    class P:
+        name = "x"
+
+        def generate(self, messages, temperature=0.0, max_tokens=512):
+            return LLMResponse(text="", latency_ms=1.0, model="x", error="Error code: 404 - model_not_found")
+    monkeypatch.setattr("src.llm.registry.get_provider", lambda name: P())
+    monkeypatch.setenv("GROQ_API_KEY", "x")
+    jobs.hosted_probe([GROQ], prefix=str(tmp_path / "p4"))
+    assert _state(str(tmp_path / "p4"))["state"] == "unavailable"

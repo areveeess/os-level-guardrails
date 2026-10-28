@@ -11,6 +11,13 @@ runs go through:
   python -m src.benchmark.jobs local --prefix P [--models a,b] [--smoke]
   python -m src.benchmark.jobs status --prefix P [--models a,b] [--wait S]
   python -m src.benchmark.jobs report --prefix P --out DIR
+  python -m src.benchmark.jobs hosted-probe [--models a,b] [--key-check] [--prefix P]
+  python -m src.benchmark.jobs hosted --prefix P [--models a,b]
+
+`hosted` re-runs the Groq models fresh (D-08) into P-<model>, data-stealing episodes first
+(D-02), under the D-09 rule only: the hard freeze plus QuotaExhausted handling, written
+once to <jobs-dir>/stopping_rule.json (RULE_TEXT). `hosted-probe --key-check` prints only
+"KEY <name> set|missing" from the environment the children inherit and sends nothing.
 
 `local` runs the five D-01 models one at a time (the GPU is serial, D-04) into P-<model>,
 shortest GPU runs first for the D-09 freeze: it skips a complete directory, resumes an
@@ -1186,6 +1193,326 @@ def report(prefix: str, out_dir: str) -> int:
     return 0
 
 
+# ── Hosted re-run under the D-09 stopping rule (D-02, D-08) ──
+
+HOSTED_MODELS = ("groq-gpt-oss-120b", "groq-gpt-oss-20b", "groq-qwen3.8-27b")
+HOSTED_TERMINAL = ("complete", "stopped_by_quota", "stopped_at_freeze", "stalled", "unavailable")
+HOSTED_EXPECTED = 342
+QUOTA_MARGIN_S = 120            # after a stated retry time, so the quota has really reset
+QUOTA_DEFAULT_WAIT_S = 3600     # a quota stop that states no retry time
+RELAUNCH_WAIT_S = 600           # any other exit of an incomplete model
+STALL_LAUNCHES = 3              # consecutive launches with zero new finished episodes and no quota stop
+HOSTED_POLL_S = 10
+STOPPING_RULE_FILE = "stopping_rule.json"
+HOSTED_STATE_FILE = "hosted_state.json"
+SUPERSEDED_DIR = os.path.join("results", "final-20261011")   # D-08: October rows, never resumed or written
+RULE_TEXT = ("D-09: hard freeze at freeze_utc (no launch at or after it; at it SIGTERM to this loop's own children "
+             "only, then SIGKILL of the same pids after 60 s; unfinished models are stopped_at_freeze). "
+             "QuotaExhausted: next launch = stop time + stated retry time + 120 s, or + 60 min when no retry time "
+             "is stated; a next launch at or after the freeze ends the model as stopped_by_quota. Any other exit "
+             "relaunches after 10 min (not at or after the freeze); 3 consecutive launches with no new finished "
+             "episode and no quota stop end the model as stalled. Incomplete models are reported as partial with "
+             "their n.")
+_QUOTA_STOP_RE = re.compile(r"\[stop\] (\S+): quota exhausted \((.*)\)\. Re-run with --resume")
+_RETRY_HOURS_RE = re.compile(r"API asks to retry in ([\d.]+)h")
+_AUTH_RE = re.compile(r"\b401\b|\b403\b|invalid[_ ]api[_ ]key|unauthori[sz]ed|authentication|permission[_ ]denied",
+                      re.IGNORECASE)
+_UNAVAILABLE_RE = re.compile(r"\b404\b|model[_ ]not[_ ]found|does not exist|decommissioned|not found|no such model",
+                             re.IGNORECASE)
+
+
+def _under(path: str, root: str) -> bool:
+    p, r = os.path.normpath(os.path.abspath(path)), os.path.normpath(os.path.abspath(root))
+    return p == r or p.startswith(r + os.sep)
+
+
+def hosted_argv(model: str, out_dir: str) -> list:
+    """The Phase 1 arguments (D-05), data-stealing episodes first (D-02), resuming the model's own directory."""
+    return [sys.executable, "-u", os.path.join(PROJECT_ROOT, "run_benchmark.py"), "--models", _checked_name(model),
+            "--resume", out_dir, *FULL_ARGS, "--priority-kinds", "ds"]
+
+
+def read_hosted_state(out_dir: str) -> dict:
+    data = _read_json_file(os.path.join(out_dir, HOSTED_STATE_FILE))
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("launches", [])
+    data.setdefault("state", "pending")
+    data.setdefault("next_launch_utc", None)
+    return data
+
+
+def write_hosted_state(out_dir: str, state: dict) -> None:
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, HOSTED_STATE_FILE)
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+    os.replace(path + ".tmp", path)
+
+
+def _git_head() -> str:
+    code, text = _run(["git", "rev-parse", "HEAD"], timeout=30)
+    sha = (text or "").strip()
+    return sha if code == 0 and re.fullmatch(r"[0-9a-f]{40}", sha) else "unknown"
+
+
+def ensure_stopping_rule(jobs_dir: str, models: list, dirs: dict) -> dict:
+    """Write <jobs_dir>/stopping_rule.json once (at the first hosted launch) and reuse it unchanged afterwards. A
+    stored freeze that differs from FREEZE_UTC is refused: the freeze is never moved (D-09)."""
+    path = os.path.join(jobs_dir, STOPPING_RULE_FILE)
+    existing = _read_json_file(path)
+    if isinstance(existing, dict):
+        stored = existing.get("freeze_utc")
+        try:
+            same = stored is not None and _parse_utc(stored) == freeze_time()
+        except ValueError:
+            same = False
+        if not same:
+            raise JobError(f"{path} holds freeze_utc {stored!r} but FREEZE_UTC is {FREEZE_UTC}; the freeze is never "
+                           f"moved (D-09), so this loop does not start")
+        return existing
+    rule = {"written_utc": _utc_now(), "freeze_utc": FREEZE_UTC, "rule_sha": _git_head(), "models": list(models),
+            "directories": [dirs[m] for m in models], "superseded": SUPERSEDED_DIR.replace(os.sep, "/"),
+            "rule": RULE_TEXT}
+    os.makedirs(jobs_dir, exist_ok=True)
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(rule, f, indent=2)
+    os.replace(path + ".tmp", path)
+    return rule
+
+
+def parse_quota_stop(text: str) -> tuple:
+    """(quota stopped?, stated retry seconds or None) from the output of one child invocation."""
+    m = _QUOTA_STOP_RE.search(text or "")
+    if not m:
+        return False, None
+    hours = _RETRY_HOURS_RE.search(m.group(2))
+    return True, (float(hours.group(1)) * 3600 if hours else None)
+
+
+def _finished(out_dir: str, model: str) -> int:
+    if not os.path.exists(os.path.join(out_dir, "raw.jsonl")):
+        return 0
+    return int(model_status(out_dir, model).get("finished") or 0)
+
+
+def _read_from(path: str, offset: int) -> str:
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def _size(path: str) -> int:
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def hosted_loop(prefix: str, models: Optional[list] = None, jobs_dir: str = DEFAULT_JOBS_DIR) -> int:
+    """Re-run the Groq models fresh (D-08) into <prefix>-<model>, data-stealing first (D-02), one own
+    run_benchmark child per model in parallel (separate per-model quotas), under the D-09 rule only (RULE_TEXT).
+    Signals go only to the Popen handles this process created. Never prints an environment value."""
+    models = list(models or HOSTED_MODELS)
+    for model in models:
+        model_config(model)
+    dirs = {m: os.path.abspath(model_dir(prefix, m)) for m in models}
+    if _under(prefix, SUPERSEDED_DIR) or any(_under(d, SUPERSEDED_DIR) for d in dirs.values()):
+        print(f"FAIL hosted: {prefix} resolves under {SUPERSEDED_DIR}; the October rows are superseded and are never "
+              f"resumed or written (D-08)")
+        return 1
+    os.makedirs(jobs_dir, exist_ok=True)
+    log_path = _jobs_log(jobs_dir, "hosted", prefix)
+
+    def say(line: str) -> None:
+        print(line, flush=True)
+        _append(log_path, line + "\n")
+
+    other = find_loop("hosted", prefix)
+    if other is not None:
+        say(f"HOSTED already running pid {other}")
+        return 0
+    freeze = freeze_time()
+    if _now() >= freeze:
+        say(f"HOSTED freeze passed ({FREEZE_UTC}): nothing launched (D-09)")
+        return 0
+    try:
+        ensure_stopping_rule(jobs_dir, models, dirs)
+    except JobError as e:
+        say(f"FAIL hosted: {e}")
+        return 1
+    say(f"=== hosted {_utc_now()} prefix {prefix} models {','.join(models)} freeze {FREEZE_UTC} ===")
+    states = {m: read_hosted_state(dirs[m]) for m in models}
+    procs = {}   # model -> (Popen, launch record, progress offset, finished before)
+
+    for model, st in states.items():
+        if st["state"] == "running":       # the previous loop ended without recording this launch's end
+            if st["launches"] and st["launches"][-1].get("end") is None:
+                st["launches"][-1].update(end=_utc_now(), stop_reason="loop restarted; launch end not recorded")
+            st["state"] = "pending"
+            write_hosted_state(dirs[model], st)
+
+    def launch(model: str) -> None:
+        out = dirs[model]
+        os.makedirs(out, exist_ok=True)
+        progress = os.path.join(out, "progress.log")
+        _append(progress, f"=== invocation {_utc_now()} model {model} (hosted, freeze {FREEZE_UTC}) ===\n")
+        before = _finished(out, model)
+        offset = _size(progress)
+        proc = _spawn(hosted_argv(model, out), progress)
+        record = {"start": _utc_now(), "end": None, "exit": None, "pid": proc.pid, "finished_before": before,
+                  "new_finished": None, "quota_stop": None, "stated_retry_s": None, "stop_reason": None}
+        st = states[model]
+        st["launches"].append(record)
+        st["state"], st["next_launch_utc"] = "running", None
+        write_hosted_state(out, st)
+        procs[model] = (proc, record, offset, before)
+        say(f"[hosted] launch {model} #{len(st['launches'])} pid {proc.pid}")
+
+    def finish(model: str, code: int) -> None:
+        proc, record, offset, before = procs.pop(model)
+        out, st, now = dirs[model], states[model], _now()
+        text = _read_from(os.path.join(out, "progress.log"), offset)
+        quota, retry_s = parse_quota_stop(text)
+        after = _finished(out, model)
+        record.update(end=_utc_now(), exit=code, new_finished=after - before, quota_stop=quota,
+                      stated_retry_s=retry_s)
+        if is_complete(out, model):
+            st["state"], record["stop_reason"] = "complete", "complete"
+        elif quota:
+            next_launch = now + datetime.timedelta(seconds=(retry_s + QUOTA_MARGIN_S) if retry_s is not None
+                                                   else QUOTA_DEFAULT_WAIT_S)
+            if next_launch >= freeze:
+                st["state"] = "stopped_by_quota"
+                record["stop_reason"] = (f"quota stop; the next launch {_fmt_utc(next_launch)} is at or after the "
+                                         f"freeze (D-09)")
+            else:
+                st["state"], st["next_launch_utc"] = "waiting_quota", _fmt_utc(next_launch)
+                record["stop_reason"] = f"quota stop; waiting until {_fmt_utc(next_launch)}"
+        else:
+            streak = 0
+            for item in reversed(st["launches"]):
+                if item.get("quota_stop") or item.get("new_finished") is None or item.get("new_finished") > 0:
+                    break
+                streak += 1
+            next_launch = now + datetime.timedelta(seconds=RELAUNCH_WAIT_S)
+            if streak >= STALL_LAUNCHES:
+                st["state"], record["stop_reason"] = "stalled", f"{streak} launches without a new finished episode"
+            elif next_launch >= freeze:
+                st["state"], record["stop_reason"] = "stopped_at_freeze", "a relaunch would fall at the freeze"
+            else:
+                st["state"], st["next_launch_utc"] = "waiting_retry", _fmt_utc(next_launch)
+                record["stop_reason"] = f"exit {code}; relaunch at {_fmt_utc(next_launch)}"
+        write_hosted_state(out, st)
+        say(f"[hosted] {model} exit {code} new {record['new_finished']} quota {'yes' if quota else 'no'} "
+            f"state {st['state']}")
+
+    while True:
+        now = _now()
+        if now >= freeze:
+            for model in list(procs):
+                proc, record = procs[model][0], procs[model][1]
+                stop_own_child(proc)
+                record.update(end=_utc_now(), exit=proc.poll(), stop_reason="stopped at the freeze (D-09)")
+                _append(os.path.join(dirs[model], "progress.log"), f"FREEZE stopped at {_utc_now()} (D-09)\n")
+                procs.pop(model)
+            for model, st in states.items():
+                if st["state"] not in HOSTED_TERMINAL:
+                    st["state"], st["next_launch_utc"] = "stopped_at_freeze", None
+                    write_hosted_state(dirs[model], st)
+            say(f"HOSTED freeze reached {_utc_now()}: own children stopped, nothing more launched (D-09)")
+            break
+        for model in models:
+            st = states[model]
+            if model in procs:
+                code = procs[model][0].poll()
+                if code is not None:
+                    finish(model, code)
+                continue
+            if st["state"] in HOSTED_TERMINAL:
+                continue
+            due = st.get("next_launch_utc")
+            if due and _parse_utc(due) > now:
+                continue
+            if find_bench_child(dirs[model]) is not None:
+                continue          # a run this loop did not start is already on the directory: never a duplicate
+            if is_complete(dirs[model], model):
+                st["state"] = "complete"
+                write_hosted_state(dirs[model], st)
+                say(f"[hosted] skip {model}: complete")
+                continue
+            launch(model)
+        if not procs and all(states[m]["state"] in HOSTED_TERMINAL for m in models):
+            break
+        if procs:
+            _sleep(HOSTED_POLL_S)
+        else:
+            dues = [_parse_utc(s["next_launch_utc"]) for s in states.values()
+                    if s["state"] not in HOSTED_TERMINAL and s.get("next_launch_utc")]
+            wake = min(dues + [freeze])
+            _sleep(max(1.0, min(60.0, (wake - _now()).total_seconds())))
+    for model in models:
+        st = states[model]
+        say(f"[hosted] {model} state {st['state']} finished {_finished(dirs[model], model)}/{HOSTED_EXPECTED}")
+    say(f"HOSTED done: {sum(1 for m in models if states[m]['state'] == 'complete')}/{len(models)} complete")
+    return 0
+
+
+def _probe_class(error: Optional[str]) -> str:
+    from src.benchmark.runner import _is_rate_limited
+    if not error:
+        return "ok"
+    if _is_rate_limited(error):
+        return "rate_limited"
+    if _AUTH_RE.search(error):
+        return "auth"
+    if _UNAVAILABLE_RE.search(error):
+        return "unavailable"
+    return "error"
+
+
+def hosted_probe(models: Optional[list] = None, key_check: bool = False, prefix: Optional[str] = None) -> int:
+    """KEY lines first, then (without --key-check) one tiny request per model, printing only a class.
+
+    Key presence is an environment test on the variable named by api_key_env, the in-process form of a shell
+    [ -n ] test on the environment the hosted children inherit. The registry's usual start-up (load_model_config
+    in src/llm/registry.py, whose module start-up loads .env through python-dotenv) runs first, so this sees the
+    same environment the children see. This function opens no .env itself and prints set or missing, never a
+    value. With a prefix, an unavailable model is recorded in <prefix>-<model>/hosted_state.json and the hosted
+    loop never launches it; no substitute model is chosen (D-02)."""
+    configs = load_model_config()["models"]           # the provider registry's existing start-up (W1)
+    models = list(models or HOSTED_MODELS)
+    for model in models:
+        if model not in configs:
+            raise JobError(f"unknown model {model!r} (not in config/models.yaml)")
+    names = list(dict.fromkeys(str(configs[m].get("api_key_env")) for m in models if configs[m].get("api_key_env")))
+    for name in names:
+        print(f"KEY {name} {'set' if os.environ.get(name) else 'missing'}")
+    if key_check:
+        return 0
+    from src.llm.registry import get_provider
+    blocked = False
+    for model in models:
+        try:
+            provider = get_provider(model)
+            response = provider.generate([{"role": "user", "content": "Reply with the word OK."}], max_tokens=8)
+            cls = _probe_class(response.error)
+        except Exception as e:   # a missing key or a broken entry: report the class only, never the message
+            cls = "auth" if "key" in type(e).__name__.lower() or "key" in str(e).lower() else "error"
+        print(f"PROBE {model} {cls}")
+        blocked = blocked or cls == "auth"
+        if cls == "unavailable" and prefix:
+            out = os.path.abspath(model_dir(prefix, model))
+            if not (_under(prefix, SUPERSEDED_DIR) or _under(out, SUPERSEDED_DIR)):
+                st = read_hosted_state(out)
+                st["state"], st["next_launch_utc"] = "unavailable", None
+                write_hosted_state(out, st)
+    return 1 if blocked else 0
+
+
 # ── CLI ──
 
 def main(argv: Optional[list] = None) -> int:
@@ -1220,10 +1547,23 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIR)
     p.add_argument("--prefix", required=True)
     p.add_argument("--out", required=True)
+    p = sub.add_parser("hosted-probe")
+    p.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIR)
+    p.add_argument("--models", default=None)
+    p.add_argument("--key-check", action="store_true")
+    p.add_argument("--prefix", default=None)
+    p = sub.add_parser("hosted")
+    p.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIR)
+    p.add_argument("--prefix", required=True)
+    p.add_argument("--models", default=None)
     args = parser.parse_args(argv)
     models = [m.strip() for m in args.models.split(",") if m.strip()] if getattr(args, "models", None) else None
 
     try:
+        if args.cmd == "hosted-probe":
+            return hosted_probe(models, key_check=args.key_check, prefix=args.prefix)
+        if args.cmd == "hosted":
+            return hosted_loop(args.prefix, models, jobs_dir=args.jobs_dir)
         if args.cmd == "local":
             return local_queue(args.prefix, models, smoke=args.smoke, jobs_dir=args.jobs_dir)
         if args.cmd == "status":

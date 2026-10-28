@@ -10,6 +10,12 @@ verifier never has to read raw.jsonl by eye:
   python -m src.benchmark.run_checks control-tokens
   python -m src.benchmark.run_checks truncation --results DIR --model M [--num-ctx N] [--compare N]
   python -m src.benchmark.run_checks ollama-evidence --results DIR --model M [--jobs-dir D]
+  python -m src.benchmark.run_checks hosted --prefix P [--models a,b] [--jobs-dir D]
+  python -m src.benchmark.run_checks secret-scan --paths P1 P2 ...
+
+hosted labels each Groq model complete or "partial n=F ds n=K" and prints
+hosted-terminal-ok or hosted-running (D-09). secret-scan searches only the given paths
+with the one fixed regex gsk_[A-Za-z0-9]{20,}, loads no key and prints file:line only.
 
 default-context validates the measured Ollama default (results/phase4-jobs/
 ollama_default_context.json); context_band() turns it into the prompt_tokens band
@@ -428,6 +434,102 @@ def check_control_tokens() -> list:
             f"benchmark text is not edited)" for s, i in matches]
 
 
+# ── Hosted re-run under the D-09 rule ──
+
+HOSTED_EXPECTED = 342
+HOSTED_DS_EXPECTED = 120
+
+
+def check_hosted(prefix: str, models: Optional[list] = None, jobs_dir: str = DEFAULT_JOBS_DIR) -> tuple:
+    """(problems, word): one HOSTED line per model with its label (complete, or "partial n=F ds n=K"), then
+    word hosted-terminal-ok when every model is terminal, or when the freeze of stopping_rule.json has passed and
+    no child of the loop is alive (any other state is then partial, stopped at the freeze); hosted-running
+    otherwise. Problems: complete with fewer than 342 finished; ds first violated (ds finished plus pending ds
+    infra keys below min(F, 120))."""
+    from src.benchmark import jobs  # lazy: jobs imports this module
+    models = list(models or jobs.HOSTED_MODELS)
+    rule = _read_json(os.path.join(jobs_dir, jobs.STOPPING_RULE_FILE)) or {}
+    freeze = jobs._parse_utc(rule.get("freeze_utc") or jobs.FREEZE_UTC)
+    past = jobs._now() >= freeze
+    loop_alive = jobs.find_loop("hosted", prefix, exclude_self=False) is not None
+    problems, terminal, children = [], True, False
+    for model in models:
+        out = jobs.model_dir(prefix, model)
+        state = jobs.read_hosted_state(out) if os.path.isdir(out) else {"state": "not-started", "launches": []}
+        raw_path = os.path.join(out, "raw.jsonl")
+        rows = [r for r in load_rows(raw_path) if r.get("model") == model] if os.path.exists(raw_path) else []
+        finished = [r for r in rows if classify_outcome(r) != "llm_error"]
+        ds_done = sum(1 for r in finished if r.get("kind") == "ds")
+        ds_pending = sum(1 for r in rows if r.get("kind") == "ds" and classify_outcome(r) == "llm_error")
+        n = len(finished)
+        stops = [x for x in state.get("launches", []) if isinstance(x, dict) and x.get("quota_stop")]
+        stop_text = ", ".join(f"{x.get('end')} retry {x.get('stated_retry_s')}" for x in stops) or "none"
+        alive = os.path.isdir(out) and jobs.find_bench_child(out) is not None
+        children = children or alive
+        st = state.get("state")
+        is_terminal = st in jobs.HOSTED_TERMINAL
+        terminal = terminal and is_terminal
+        label = "complete" if st == "complete" and n >= HOSTED_EXPECTED else f"partial n={n} ds n={ds_done}"
+        if past and not is_terminal and not alive:
+            label += " (stopped at the freeze)"
+        print(f"HOSTED {model} state {st} finished {n}/{HOSTED_EXPECTED} ds {ds_done}/{HOSTED_DS_EXPECTED} "
+              f"quota_stops {len(stops)} [{stop_text}] label {label}")
+        if st == "complete" and n < HOSTED_EXPECTED:
+            problems.append(f"{model} is marked complete with {n} finished episodes, below {HOSTED_EXPECTED}")
+        if ds_done + ds_pending < min(n, HOSTED_DS_EXPECTED):
+            problems.append(f"{model}: ds-first violated (ds finished {ds_done} + pending ds {ds_pending} below "
+                            f"min({n}, {HOSTED_DS_EXPECTED}))")
+    if terminal or (past and not loop_alive and not children):
+        word = "hosted-terminal-ok"
+    else:
+        word = "hosted-running"
+    return problems, word
+
+
+# ── Secret scan (fixed regex, given paths only) ──
+
+SECRET_RE = re.compile(r"gsk_[A-Za-z0-9]{20,}")
+
+
+def _scan_files(paths: list) -> tuple:
+    """(text files under the given paths, problems for paths that do not exist). Symlinks are not followed, so
+    nothing outside the given paths is opened."""
+    files, problems = [], []
+    for path in paths:
+        if os.path.islink(path):
+            continue
+        if os.path.isfile(path):
+            files.append(path)
+        elif os.path.isdir(path):
+            for dirpath, dirnames, names in os.walk(path):
+                dirnames[:] = sorted(d for d in dirnames if not os.path.islink(os.path.join(dirpath, d)))
+                files += [os.path.join(dirpath, n) for n in sorted(names)
+                          if not os.path.islink(os.path.join(dirpath, n))]
+        else:
+            problems.append(f"{path} does not exist")
+    return files, problems
+
+
+def check_secret_scan(paths: list) -> tuple:
+    """(problems, text files scanned). Each text file (no NUL byte in its first 8 KiB) is searched with the one
+    fixed regex gsk_[A-Za-z0-9]{20,}; a match is reported as file:line only, never its text. No key is loaded."""
+    files, problems = _scan_files(paths)
+    scanned = 0
+    for path in files:
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError:
+            continue
+        if b"\0" in data[:8192]:
+            continue
+        scanned += 1
+        for lineno, line in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
+            if SECRET_RE.search(line):
+                problems.append(f"{path}:{lineno}")
+    return problems, scanned
+
+
 def _finish(cmd: str, problems: list) -> int:
     if problems:
         for p in problems:
@@ -458,8 +560,31 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--results", required=True)
     p.add_argument("--model", required=True)
     p.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIR)
+    p = sub.add_parser("hosted")
+    p.add_argument("--prefix", required=True)
+    p.add_argument("--models", default=None)
+    p.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIR)
+    p = sub.add_parser("secret-scan")
+    p.add_argument("--paths", nargs="+", required=True)
     args = parser.parse_args(argv)
 
+    if args.cmd == "hosted":
+        models = [m.strip() for m in args.models.split(",") if m.strip()] if args.models else None
+        problems, word = check_hosted(args.prefix, models, args.jobs_dir)
+        if problems:
+            for p in problems:
+                print(f"FAIL hosted: {p}")
+            return 1
+        print(word)
+        return 0
+    if args.cmd == "secret-scan":
+        problems, scanned = check_secret_scan(args.paths)
+        if problems:
+            for p in problems:
+                print(f"FAIL secret-scan: {p}")
+            return 1
+        print(f"secret-scan-ok files {scanned}")
+        return 0
     if args.cmd == "truncation":
         problems, unknown = check_truncation(args.results, args.model, args.num_ctx, args.compare)
         if unknown and not problems:
