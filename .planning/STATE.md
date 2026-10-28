@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: Qwen LoRA & hf_local Provider
 status: verifying
-stopped_at: Completed 04-01-PLAN.md
-last_updated: "2026-10-28T18:17:34.891Z"
+stopped_at: Completed 04-05-PLAN.md
+last_updated: "2026-10-28T18:43:34.557Z"
 last_activity: 2026-10-22
 last_activity_desc: Phase 3 execution started
-state_head: 040d2f3ee0512f2b5aec606e118e91c3abe6abd4
+state_head: 2759af147503eb8da5f2e6b7a6528e5eb1504971
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 17
-  completed_plans: 13
+  completed_plans: 14
   percent: 40
 ---
 
@@ -70,6 +70,7 @@ Progress: [████░░░░░░] 40% (Phase 1 of 5 complete)
 | Phase 03 P03 | n/a | 3 tasks | 6 files |
 | Phase 03 P04 | multi-session | 3 tasks | 7 files |
 | Phase 04 P01 | 33min | 3 tasks | 6 files |
+| Phase 04 P05 | 24min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -104,6 +105,9 @@ Recent decisions affecting current work:
 - [Phase 04]: Ollama context raised by Modelfile variants (num_ctx 8192); owned server also gets OLLAMA_CONTEXT_LENGTH=8192
 - [Phase 04]: Measured Ollama 0.40.3 default context for llama3.2:3b is 4096 (api_ps); evidence band 4198-7782
 - [Phase 04]: Ollama 0.40.3 cuts over-long prompts to about half the window (2050 at 4096): truncation shows as a drop, not a plateau
+- [Phase 04]: 04-05: local queue order agentlora, scratch-gpt, qwen base, ollama qwen2.5:3b, ollama llama3.2:3b; FREEZE_UTC 2026-10-29T15:30Z constant; done code 7 = freeze stop
+- [Phase 04]: 04-05: local context_overflow is a finished format_failure (attacked if attempted), never re-queued; --priority-kinds is order-only (manifest extra, not plan)
+- [Phase 04]: 04-05: hosted loop applies only D-09 (freeze + QuotaExhausted: retry+120s or 60 min; next launch at/after freeze = stopped_by_quota); stall after 3 zero-progress launches; stopping_rule.json write-once
 
 ### Pending Todos
 
@@ -138,6 +142,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-28T18:17:34.023Z
-Stopped at: Completed 04-01-PLAN.md
+Last session: 2026-10-28T18:43:33.644Z
+Stopped at: Completed 04-05-PLAN.md
 Resume file: None

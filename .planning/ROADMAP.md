@@ -111,14 +111,14 @@ Plans:
   4. The report's where-blocked-by-layer table counts the sandbox (namespaces / private filesystem) and seccomp blocks recorded in the Phase 4 full runs, per model and pooled, with k/n; it cites the Phase 1 residual-bypass table (01-REVIEW-FIX.md, by row number) as the evidence of what those layers contain, and a layer that recorded no blocks is reported as zero with its n (EVAL-08 narrowed by user decision D-07b: no new attack suite).
   5. The viva page(s) for namespaces, seccomp-bpf, and local-inference confounds (quantization, context window) are added to `docs/viva/` (DOC-03 is traced to Phase 5).
 
-**Plans**: 1/5 plans executed
+**Plans**: 2/5 plans executed
 
 Plans:
 **Wave 1**
 - [x] 04-01-PLAN.md — Ollama plumbing: 8192-context variants on an ownership-safe server, restart-proof launcher and complete check (tracer), server version and default context measured on a temporary port, preflight with keep-awake line, context evidence and truncation checks sized from the measured default (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 04-05-PLAN.md — Freeze-aware serial local queue with status no-progress warning and merged report (tracer), runner fixes (IN-02, context_overflow, ds-first), hosted loop for the fresh Groq re-run under the freeze-plus-quota rule with environment-only key check and fixed-regex secret scan (wave 2)
+- [x] 04-05-PLAN.md — Freeze-aware serial local queue with status no-progress warning and merged report (tracer), runner fixes (IN-02, context_overflow, ds-first), hosted loop for the fresh Groq re-run under the freeze-plus-quota rule with environment-only key check and fixed-regex secret scan (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 04-03-PLAN.md — Local full runs (Qwen LoRA, scratch-gpt, Qwen base, qwen2.5:3b, llama3.2:3b re-check/re-run), written stopping rule, Groq re-run ds first launched concurrently with the local queue, until the 2026-10-29 15:30 UTC freeze (wave 3)
@@ -152,5 +152,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (the `hf_local` provi
 | 1. Evaluation Hardening & Policy Fix | 4/4 | Complete    | 2026-10-21 |
 | 2. Local Data Foundation & ScratchGPT | 4/4 | Complete    | 2026-10-22 |
 | 3. Qwen LoRA & hf_local Provider | 4/4 | In Progress | - |
-| 4. Full Runs - Local, Added Ollama, Hosted Resume | 1/5 | In Progress | - |
+| 4. Full Runs - Local, Added Ollama, Hosted Resume | 2/5 | In Progress | - |
 | 5. Comparison Report & Deliverables | 0/TBD | Not started | - |
