@@ -17,11 +17,12 @@ from src.benchmark.injecagent import benign_cases, load_tool_specs
 from src.benchmark.report import generate_report
 from src.llm.base import LLMProvider, LLMResponse
 from src.llm.openai_compat import OpenAICompatibleProvider
+from src.llm.registry import load_model_config
 from src.policy_engine.engine import PolicyEngine
 from tests.test_llm_layer import FakeClient
 
 RESPOND = '{"action": "respond", "message": "done"}'
-MODEL = "ollama-llama3.2-3b"       # in config/models.yaml: provider openai_compat, model llama3.2:3b
+MODEL = "ollama-llama3.2-3b"       # in config/models.yaml: provider openai_compat, model llama3.2-3b-ctx8192
 STAMP_FIELDS = ("code_commit", "code_dirty", "policy_sha256", "provider", "config_model",
                 "resolved_model", "finish_reasons", "prompt_tokens", "completion_tokens")
 
@@ -96,7 +97,8 @@ def test_row_carries_every_stamp(tmp_path, monkeypatch, specs):
     assert row["code_commit"] == "unknown" or re.fullmatch(r"[0-9a-f]{40}", row["code_commit"])
     assert row["code_dirty"] in (True, False, None)
     assert row["policy_sha256"] == PolicyEngine(verbose=False).policy_sha256
-    assert row["provider"] == "openai_compat" and row["config_model"] == "llama3.2:3b"
+    assert row["provider"] == "openai_compat"
+    assert row["config_model"] == load_model_config()["models"][MODEL]["model"]   # the 8192-context variant (Phase 4)
     assert row["resolved_model"] == "stub-model-2026-10"
     steps = row["steps"]
     assert steps >= 1

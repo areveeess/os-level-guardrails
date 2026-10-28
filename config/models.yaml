@@ -8,6 +8,8 @@
 #     it is reported in its own 'Model-independent control' section)
 #     hf_local = a Hugging Face model served in-process from the local cache, offline and greedy
 #     (fields: base_model, adapter, device, max_new_tokens, max_context_tokens, merge)
+#   ollama_base / num_ctx: an Ollama row served as a Modelfile variant of the pulled tag ollama_base with
+#     PARAMETER num_ctx (created by `python -m src.benchmark.jobs ollama-variants`)
 #   benchmark: include in `run_benchmark.py --models all`
 # Model ids change over time; check the provider's model list if one 404s.
 # ============================================================
@@ -56,10 +58,28 @@ models:
     family: open / medium
     benchmark: true
 
+  # Ollama rows are served as Modelfile context variants (Phase 4, D-06): `python -m src.benchmark.jobs
+  # ollama-variants` creates <model> FROM the pulled <ollama_base> tag with PARAMETER num_ctx <num_ctx>, so the
+  # 8,192-token window holds whether the Ollama server is this project's or a foreign one. The October 2026
+  # llama3.2:3b rows used the plain tag at the server's default context (config_model llama3.2:3b on those rows).
+  # phi3.5:3.8b and gemma3:1b are deferred to v2 (CMP-V2-01, D-01) and have no entry.
   ollama-llama3.2-3b:
     provider: openai_compat
     base_url: http://localhost:11434/v1
-    model: llama3.2:3b
+    model: llama3.2-3b-ctx8192               # variant created by `jobs ollama-variants`, never pulled
+    ollama_base: llama3.2:3b                 # the pulled tag the variant is built FROM
+    num_ctx: 8192
+    timeout: 180
+    family: open / small / local
+    benchmark: true
+
+  ollama-qwen2.5-3b:
+    provider: openai_compat
+    base_url: http://localhost:11434/v1
+    model: qwen2.5-3b-ctx8192                # variant created by `jobs ollama-variants`, never pulled
+    ollama_base: qwen2.5:3b                  # the pulled tag the variant is built FROM
+    num_ctx: 8192
+    timeout: 180
     family: open / small / local
     benchmark: true
 
