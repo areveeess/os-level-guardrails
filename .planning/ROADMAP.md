@@ -2,7 +2,7 @@
 
 ## Overview
 
-The guardrails (policy engine, namespaces, seccomp-bpf) and the InjecAgent harness already exist; what is missing is credible evidence that the guardrails hold regardless of which LLM drives the agent, including a weak, locally made one. This roadmap answers the reviewer's remark in five steps. First, harden the scoring and report and close the known shell-chaining bypass, because every later number flows through them. Second, build the shared synthetic dataset, the single rendering format and a locally trained ScratchGPT. Third, add the `hf_local` provider, the base-Qwen control row and a locally LoRA-tuned Qwen2.5-0.5B. Fourth, run every model to completion (local, added Ollama and resumed hosted) and count the sandbox and seccomp blocks those runs record. Fifth, freeze the data and regenerate the cross-model report, charts, README, SDD and Review-3 deck from one results directory. The one-week deadline shapes the ordering: GPU jobs are serial (scratch training, then LoRA training, then benchmark runs) and run in the background while CPU-side work proceeds, and viva notes are added in every phase rather than on the final night.
+The guardrails (policy engine, namespaces, seccomp-bpf) and the InjecAgent harness already exist; what is missing is credible evidence that the guardrails hold regardless of which LLM drives the agent, including a weak, locally made one. This roadmap answers the reviewer's remark in five steps. First, harden the scoring and report and close the known shell-chaining bypass, because every later number flows through them. Second, build the shared synthetic dataset, the single rendering format and a locally trained ScratchGPT. Third, add the `hf_local` provider, the base-Qwen control row and a locally LoRA-tuned Qwen2.5-0.5B. Fourth, run every model to completion (local, added Ollama and hosted re-run) and count the sandbox and seccomp blocks those runs record. Fifth, freeze the data and regenerate the cross-model report, charts, README, SDD and Review-3 deck from one results directory. The one-week deadline shapes the ordering: GPU jobs are serial (scratch training, then LoRA training, then benchmark runs) and run in the background while CPU-side work proceeds, and viva notes are added in every phase rather than on the final night.
 
 ## Phases
 
@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Evaluation Hardening & Policy Fix** - Honest scoring/report semantics, a model-independent control agent, and the shell-chaining bypass fixed before any new data is collected (completed 2026-10-21)
 - [x] **Phase 2: Local Data Foundation & ScratchGPT** - Leakage-free synthetic episodes, one shared render format, and a ScratchGPT trained locally and running in the benchmark (completed 2026-10-22)
 - [ ] **Phase 3: Qwen LoRA & hf_local Provider** - In-process Hugging Face provider, base-Qwen control row, and a locally LoRA-tuned Qwen2.5-0.5B running in the benchmark
-- [ ] **Phase 4: Full Runs - Local, Added Ollama, Hosted Resume** - Every local model benchmarked to 342/342, unfinished hosted runs resumed under a stopping rule, and sandbox/seccomp layers shown to fire
+- [ ] **Phase 4: Full Runs - Local, Added Ollama, Hosted Resume** - Every local model benchmarked to 342/342, hosted Groq runs re-run under the current engine, ds first, under a stopping rule, and report recorded sandbox and seccomp blocks per model and pooled with k/n
 - [ ] **Phase 5: Comparison Report & Deliverables** - One script regenerates the cross-model report and charts from a frozen results directory; README, SDD, Review-3 deck and viva notes complete
 
 ## Phase Details
@@ -107,24 +107,27 @@ Plans:
 **Success Criteria** (what must be TRUE):
   1. scratch-gpt, Qwen base and Qwen LoRA each complete the full benchmark (57 cases x 3 runs x 2 arms = 342 episodes), shown as 342/342 in the report's completeness column.
   2. qwen2.5:3b completes the full benchmark through Ollama (phi3.5:3.8b and gemma3:1b descoped to v2 by user decision) with the context window raised (verified with `ollama ps` and logged `prompt_tokens`, so prompts are not truncated), and the existing llama3.2:3b run is re-checked for truncation.
-  3. The unfinished hosted non-Gemini runs (Groq gpt-oss-120b, gpt-oss-20b, qwen3.8-27b) are resumed with data-stealing episodes prioritised under a written stopping rule, and whatever remains incomplete is reported as partial with its n.
+  3. The hosted non-Gemini models (Groq gpt-oss-120b, gpt-oss-20b, qwen3.8-27b) are re-run under the current engine, ds first, in fresh directories under a written stopping rule (hard freeze 2026-10-29 15:30 UTC plus QuotaExhausted handling; the October partial rows are superseded), and whatever remains incomplete is reported as partial with its n.
   4. The report's where-blocked-by-layer table counts the sandbox (namespaces / private filesystem) and seccomp blocks recorded in the Phase 4 full runs, per model and pooled, with k/n; it cites the Phase 1 residual-bypass table (01-REVIEW-FIX.md, by row number) as the evidence of what those layers contain, and a layer that recorded no blocks is reported as zero with its n (EVAL-08 narrowed by user decision D-07b: no new attack suite).
   5. The viva page(s) for namespaces, seccomp-bpf, and local-inference confounds (quantization, context window) are added to `docs/viva/` (DOC-03 is traced to Phase 5).
 
-**Plans**: 4 plans
+**Plans**: 5 plans
 
 Plans:
 **Wave 1**
-- [ ] 04-01-PLAN.md — Run plumbing: Ollama 8192-context variants on an ownership-safe server, restart-proof launcher and checks, runner fixes (IN-02, context_overflow, ds-first), serial local queue (wave 1)
+- [ ] 04-01-PLAN.md — Ollama plumbing: 8192-context variants on an ownership-safe server, restart-proof launcher and complete check (tracer), server version and default context measured on a temporary port, preflight with keep-awake line, context evidence and truncation checks sized from the measured default (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 04-03-PLAN.md — Local full runs (scratch-gpt, Qwen LoRA, Qwen base, qwen2.5:3b, llama3.2:3b re-check), written stopping rule, Groq resume ds-first after Ollama (wave 2)
+- [ ] 04-05-PLAN.md — Freeze-aware serial local queue with status no-progress warning and merged report (tracer), runner fixes (IN-02, context_overflow, ds-first), hosted loop for the fresh Groq re-run under the freeze-plus-quota rule with environment-only key check and fixed-regex secret scan (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 04-02-PLAN.md — EVAL-08 narrowed (D-07b): report counts the recorded sandbox and seccomp blocks per model and pooled with k/n, cites 01-REVIEW-FIX.md by row number, zero stated with n; no attack suite (wave 3)
+- [ ] 04-03-PLAN.md — Local full runs (Qwen LoRA, scratch-gpt, Qwen base, qwen2.5:3b, llama3.2:3b re-check/re-run), written stopping rule, Groq re-run ds first launched concurrently with the local queue, until the 2026-10-29 15:30 UTC freeze (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 04-04-PLAN.md — Control re-run, hosted runs to a final state, merged Phase 4 report with the EVAL-08 counts, viva page 04 (wave 4)
+- [ ] 04-02-PLAN.md — EVAL-08 narrowed (D-07b): report counts the recorded sandbox and seccomp blocks per model and pooled with k/n, cites 01-REVIEW-FIX.md by row number, zero stated with n; no attack suite (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 04-04-PLAN.md — Control re-run, hosted runs to a final state or the freeze, merged Phase 4 report with the EVAL-08 counts, viva page 04 (wave 5)
 
 ### Phase 5: Comparison Report & Deliverables
 
@@ -149,5 +152,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (the `hf_local` provi
 | 1. Evaluation Hardening & Policy Fix | 4/4 | Complete    | 2026-10-21 |
 | 2. Local Data Foundation & ScratchGPT | 4/4 | Complete    | 2026-10-22 |
 | 3. Qwen LoRA & hf_local Provider | 4/4 | In Progress | - |
-| 4. Full Runs - Local, Added Ollama, Hosted Resume | 0/4 | Not started | - |
+| 4. Full Runs - Local, Added Ollama, Hosted Resume | 0/5 | Not started | - |
 | 5. Comparison Report & Deliverables | 0/TBD | Not started | - |
