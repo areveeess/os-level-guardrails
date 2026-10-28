@@ -220,3 +220,122 @@ def test_benchmark_texts_cover_the_57_cases():
     texts = run_checks.benchmark_texts()
     assert len(texts) > 57 * 3
     assert any("CANARY" in t for t in texts)   # the data-stealing source response with its placeholder canary
+
+
+# ── truncation ──
+
+def test_truncation_ok(tmp_path, capsys):
+    d = _write(tmp_path, _six())
+    assert run_checks.main(["truncation", "--results", d, "--model", MODEL, "--num-ctx", "8192"]) == 0
+    out = capsys.readouterr().out
+    assert "TRUNCATION model ollama-qwen2.5-3b steps 12 max 1100 p50" in out and "truncation-ok" in out
+
+
+def test_truncation_fails_on_a_plateau_at_95_percent(tmp_path, capsys):
+    rows = _six()
+    rows[3]["prompt_tokens"] = [2000, 7800, 7800]
+    d = _write(tmp_path, rows)
+    assert run_checks.main(["truncation", "--results", d, "--model", MODEL, "--num-ctx", "8192"]) == 1
+    assert "FAIL truncation" in capsys.readouterr().out
+
+
+def test_truncation_unknown_without_prompt_tokens(tmp_path, capsys):
+    rows = _six()
+    for r in rows:
+        r.pop("prompt_tokens")
+    d = _write(tmp_path, rows)
+    assert run_checks.main(["truncation", "--results", d, "--model", MODEL, "--num-ctx", "4096"]) == 0
+    assert "truncation-unknown" in capsys.readouterr().out
+
+
+def test_truncation_fails_when_some_finished_rows_lack_prompt_tokens(tmp_path):
+    rows = _six()
+    rows[0]["prompt_tokens"] = [None, None]
+    d = _write(tmp_path, rows)
+    assert run_checks.main(["truncation", "--results", d, "--model", MODEL, "--num-ctx", "8192"]) == 1
+
+
+def test_truncation_compare_and_decreasing_counts(tmp_path, capsys):
+    rows = _six()
+    rows[1]["prompt_tokens"] = [900, 4500]
+    rows[2]["prompt_tokens"] = [3000, 2050]                    # a drop between steps
+    d = _write(tmp_path, rows)
+    assert run_checks.main(["truncation", "--results", d, "--model", MODEL, "--num-ctx", "8192",
+                            "--compare", "2048"]) == 0
+    out = capsys.readouterr().out
+    assert "COMPARE episodes with a step above 2048: 2/6" in out
+    assert "decreasing 1" in out
+
+
+def test_truncation_num_ctx_defaults_to_config(tmp_path, capsys):
+    d = _write(tmp_path, _six())
+    assert run_checks.main(["truncation", "--results", d, "--model", MODEL]) == 0
+    assert "num_ctx 8192" in capsys.readouterr().out
+
+
+# ── ollama-evidence ──
+
+PS_JSON = {"models": [{"name": "qwen2.5-3b-ctx8192:latest", "model": "qwen2.5-3b-ctx8192:latest",
+                       "context_length": 8192}]}
+PS_TXT = ("NAME                         ID              SIZE      PROCESSOR    CONTEXT    UNTIL\n"
+          "qwen2.5-3b-ctx8192:latest    1a2b3c4d5e6f    2.9 GB    100% GPU     8192       4 minutes from now\n")
+PS_TXT_NO_CONTEXT = ("NAME                         ID              SIZE      PROCESSOR    UNTIL\n"
+                     "qwen2.5-3b-ctx8192:latest    1a2b3c4d5e6f    2.9 GB    100% GPU     4 minutes from now\n")
+SHOW_TXT = "  Model\n    quantization    Q4_K_M\n\n  Parameters\n    num_ctx    8192\n"
+
+
+def _evidence(tmp_path, ps_json=None, ps_txt=PS_TXT, show=SHOW_TXT, prompt_tokens=6000, server_context=8192,
+              server_state="owned-started", d=4096):
+    res = tmp_path / "res"
+    res.mkdir(exist_ok=True)
+    (res / "ollama_ps_start.json").write_text(json.dumps(PS_JSON if ps_json is None else ps_json))
+    (res / "ollama_ps_start.txt").write_text(ps_txt)
+    (res / "ollama_show.txt").write_text(show)
+    (res / "ollama_long_prompt.json").write_text(json.dumps(
+        {"prompt_tokens": prompt_tokens, "lines": 400, "D": d, "L": 4198, "U": 7782, "num_ctx": 8192,
+         "server_state": server_state, "server_context_length": server_context}))
+    jobs_dir = _default_file(tmp_path, default_context_length=d)
+    return ["ollama-evidence", "--results", str(res), "--model", MODEL, "--jobs-dir", jobs_dir]
+
+
+def test_evidence_primary_path(tmp_path, capsys):
+    assert run_checks.main(_evidence(tmp_path)) == 0
+    out = capsys.readouterr().out
+    assert "EVIDENCE model ollama-qwen2.5-3b path primary missing none D 4096 band 4198-7782 prompt_tokens 6000" in out
+    assert "ollama-evidence-ok" in out
+
+
+def test_evidence_fallback_path_names_missing_fields(tmp_path, capsys):
+    args = _evidence(tmp_path, ps_json={"models": [{"name": "qwen2.5-3b-ctx8192:latest"}]}, ps_txt=PS_TXT_NO_CONTEXT)
+    assert run_checks.main(args) == 0
+    out = capsys.readouterr().out
+    assert "path fallback" in out and "ps_context_length" in out and "ps_column_context" in out
+    assert "ollama-evidence-ok" in out
+
+
+def test_evidence_fallback_on_foreign_server(tmp_path, capsys):
+    assert run_checks.main(_evidence(tmp_path, server_context=None, server_state="foreign")) == 0
+    out = capsys.readouterr().out
+    assert "path fallback" in out and "server_context_length" in out
+
+
+def test_evidence_fails_when_the_reported_context_is_the_default(tmp_path, capsys):
+    ps = {"models": [{"name": "qwen2.5-3b-ctx8192:latest", "context_length": 4096}]}
+    assert run_checks.main(_evidence(tmp_path, ps_json=ps, ps_txt=PS_TXT.replace("8192 ", "4096 "))) == 1
+    assert "FAIL ollama-evidence" in capsys.readouterr().out
+
+
+def test_evidence_fails_when_show_lacks_num_ctx(tmp_path, capsys):
+    assert run_checks.main(_evidence(tmp_path, show="  Model\n    quantization    Q4_K_M\n")) == 1
+    assert "num_ctx" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("tokens", [2050, 4100, 7900])
+def test_evidence_fails_outside_the_band(tmp_path, capsys, tokens):
+    assert run_checks.main(_evidence(tmp_path, prompt_tokens=tokens)) == 1
+    assert "FAIL ollama-evidence" in capsys.readouterr().out
+
+
+def test_evidence_band_note_when_default_covers_the_window(tmp_path, capsys):
+    run_checks.main(_evidence(tmp_path, d=8192))
+    assert "NOTE" in capsys.readouterr().out

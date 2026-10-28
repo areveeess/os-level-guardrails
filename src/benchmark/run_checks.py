@@ -8,6 +8,8 @@ verifier never has to read raw.jsonl by eye:
   python -m src.benchmark.run_checks complete --results DIR --model M [--expect N] [--resolved-contains TEXT]
   python -m src.benchmark.run_checks default-context [--jobs-dir D]
   python -m src.benchmark.run_checks control-tokens
+  python -m src.benchmark.run_checks truncation --results DIR --model M [--num-ctx N] [--compare N]
+  python -m src.benchmark.run_checks ollama-evidence --results DIR --model M [--jobs-dir D]
 
 default-context validates the measured Ollama default (results/phase4-jobs/
 ollama_default_context.json); context_band() turns it into the prompt_tokens band
@@ -241,6 +243,141 @@ def band_note(default_context_length: int, num_ctx: int) -> Optional[str]:
     return None
 
 
+# ── Truncation over stored prompt_tokens ──
+
+def _percentile(values: list, q: float) -> int:
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, int(round(q * (len(ordered) - 1))))]
+
+
+def check_truncation(results_dir: str, model: str, num_ctx: Optional[int] = None,
+                     compare: Optional[int] = None) -> tuple:
+    """(problems, unknown). Over every step's prompt_tokens of the model's rows: max, p50, p95, steps at or
+    above 95 % of the window, 'length' finish reasons and episodes whose prompt_tokens drop between steps
+    (a server that reported only uncached tokens, or a prompt cut from the front). unknown is True when no
+    row carries prompt_tokens (rows written before EVAL-06)."""
+    if num_ctx is None:
+        cfg = load_model_config()["models"].get(model) or {}
+        num_ctx = cfg.get("num_ctx")
+        if num_ctx is None:
+            return [f"no --num-ctx given and config/models.yaml has no num_ctx for {model}"], False
+    raw_path = os.path.join(results_dir, "raw.jsonl")
+    if not os.path.exists(raw_path):
+        return [f"no raw.jsonl in {results_dir}"], False
+    rows = [r for r in load_rows(raw_path) if r.get("model") == model]
+    finished = [r for r in rows if classify_outcome(r) != "llm_error"]
+
+    def tokens(row):
+        return [t for t in (row.get("prompt_tokens") or []) if isinstance(t, int)]
+    steps = [t for r in rows for t in tokens(r)]
+    if not steps:
+        print(f"TRUNCATION model {model} num_ctx {num_ctx} no row carries prompt_tokens")
+        return [], True
+    threshold = (num_ctx * 95) // 100
+    at_cap = sum(1 for t in steps if t >= threshold)
+    lengths = sum(1 for r in rows for f in (r.get("finish_reasons") or []) if f == "length")
+    decreasing = sum(1 for r in rows if any(b < a for a, b in zip(tokens(r), tokens(r)[1:])))
+    lacking = sum(1 for r in finished if not tokens(r))
+    print(f"TRUNCATION model {model} steps {len(steps)} max {max(steps)} p50 {_percentile(steps, 0.5)} "
+          f"p95 {_percentile(steps, 0.95)} num_ctx {num_ctx} at_or_above_95pct {at_cap} length_finish {lengths} "
+          f"decreasing {decreasing} finished_without_prompt_tokens {lacking}")
+    if compare is not None:
+        above = sum(1 for r in finished if any(t > compare for t in tokens(r)))
+        print(f"COMPARE episodes with a step above {compare}: {above}/{len(finished)}")
+    problems = []
+    if at_cap:
+        problems.append(f"{at_cap} step(s) at or above 95 % of the {num_ctx}-token window ({threshold} tokens)")
+    if lacking:
+        problems.append(f"{lacking} finished row(s) carry no prompt_tokens")
+    return problems, False
+
+
+# ── Ollama context evidence ──
+
+def _ps_entry_context(ps_json, variant: str) -> Optional[int]:
+    entries = ps_json.get("models") if isinstance(ps_json, dict) else None
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        names = {str(entry.get("name", "")), str(entry.get("model", ""))}
+        if variant in names or f"{variant}:latest" in names:
+            value = entry.get("context_length")
+            return value if isinstance(value, int) and value > 0 else None
+    return None
+
+
+def _read_json(path: str):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _read_file(path: str) -> Optional[str]:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def check_ollama_evidence(results_dir: str, model: str, jobs_dir: str = DEFAULT_JOBS_DIR) -> list:
+    """FAIL reasons for an Ollama run's context evidence (D-06), against the measured default.
+
+    Primary path: the loaded variant's /api/ps context_length (or the `ollama ps` CONTEXT column) equals
+    num_ctx, `ollama show` lists num_ctx, and the long prompt's prompt_tokens lies in context_band(D, num_ctx).
+    Fallback path, when the ps context fields or the server's OLLAMA_CONTEXT_LENGTH are unknown (a foreign
+    server, or an owned one whose config line does not show it): `ollama show` lists num_ctx and the long
+    prompt lies in the band."""
+    from src.benchmark.jobs import _show_num_ctx, parse_ps_column
+    cfg = load_model_config()["models"].get(model)
+    if not cfg or not cfg.get("num_ctx"):
+        return [f"{model} has no num_ctx in config/models.yaml (not an Ollama context variant)"]
+    variant, num_ctx = str(cfg["model"]), int(cfg["num_ctx"])
+    default = read_default_context(jobs_dir)
+    if default is None or type(default.get("default_context_length")) is not int:
+        return ["no measured default context (run: python -m src.benchmark.jobs ollama-default-probe)"]
+    d = default["default_context_length"]
+    lower, upper = context_band(d, num_ctx)
+    note = band_note(d, num_ctx)
+    if note:
+        print(note)
+
+    ps_api = _ps_entry_context(_read_json(os.path.join(results_dir, "ollama_ps_start.json")), variant)
+    ps_col = parse_ps_column(_read_file(os.path.join(results_dir, "ollama_ps_start.txt")) or "", variant)
+    show = _show_num_ctx(_read_file(os.path.join(results_dir, "ollama_show.txt")) or "")
+    long_prompt = _read_json(os.path.join(results_dir, "ollama_long_prompt.json")) or {}
+    tokens = long_prompt.get("prompt_tokens")
+    server_ctx = long_prompt.get("server_context_length")
+
+    missing = [name for name, value in (("ps_context_length", ps_api), ("ps_column_context", ps_col),
+                                        ("server_context_length", server_ctx)) if value is None]
+    ps_value = ps_api if ps_api is not None else ps_col
+    path = "primary" if ps_value is not None and server_ctx is not None else "fallback"
+    print(f"EVIDENCE model {model} path {path} missing {','.join(missing) or 'none'} D {d} band {lower}-{upper} "
+          f"prompt_tokens {tokens}")
+
+    problems = []
+    for name, value in (("/api/ps context_length", ps_api), ("ollama ps CONTEXT column", ps_col)):
+        if value is not None and value != num_ctx:
+            problems.append(f"{name} of {variant} is {value}, not num_ctx {num_ctx}"
+                            + (" (it equals the measured default: the window was not raised)" if value == d else ""))
+    if show != num_ctx:
+        problems.append(f"ollama_show.txt lists num_ctx {show}, expected {num_ctx}")
+    if not isinstance(tokens, int):
+        problems.append("ollama_long_prompt.json has no prompt_tokens")
+    elif tokens < lower:
+        problems.append(f"long-prompt prompt_tokens {tokens} below L {lower} (the window was not raised past the "
+                        f"measured default {d}, or the prompt was cut)")
+    elif tokens > upper:
+        problems.append(f"long-prompt prompt_tokens {tokens} above U {upper} (95 % of num_ctx {num_ctx})")
+    if long_prompt.get("D") is not None and long_prompt.get("D") != d:
+        problems.append(f"ollama_long_prompt.json was sized from D {long_prompt.get('D')}, the measured default "
+                        f"is now {d}")
+    return problems
+
+
 # ── Control tokens (Phase 3 review IN-01) ──
 
 QWEN_TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -312,7 +449,25 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("default-context")
     p.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIR)
     sub.add_parser("control-tokens")
+    p = sub.add_parser("truncation")
+    p.add_argument("--results", required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--num-ctx", type=int, default=None)
+    p.add_argument("--compare", type=int, default=None)
+    p = sub.add_parser("ollama-evidence")
+    p.add_argument("--results", required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIR)
     args = parser.parse_args(argv)
+
+    if args.cmd == "truncation":
+        problems, unknown = check_truncation(args.results, args.model, args.num_ctx, args.compare)
+        if unknown and not problems:
+            print("truncation-unknown")
+            return 0
+        return _finish("truncation", problems)
+    if args.cmd == "ollama-evidence":
+        return _finish("ollama-evidence", check_ollama_evidence(args.results, args.model, args.jobs_dir))
 
     if args.cmd == "complete":
         return _finish("complete", check_complete(args.results, args.model, args.expect, args.resolved_contains))

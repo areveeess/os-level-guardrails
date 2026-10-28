@@ -289,8 +289,8 @@ def test_run_passes_exact_argv_and_writes_exit_code(world, tmp_path, smoke, expe
     assert world.popens == []   # not an Ollama model: no server
 
 
-def test_run_ollama_model_starts_and_stops_its_own_server(world, tmp_path):
-    jobs_dir = str(tmp_path / "jobs")
+def test_run_ollama_model_starts_and_stops_its_own_server(run_world, tmp_path):
+    world, jobs_dir = run_world, str(tmp_path / "jobs")
     code = jobs.run("ollama-qwen2.5-3b", str(tmp_path / "out"), smoke=True, jobs_dir=jobs_dir)
     assert code == 0
     assert len(world.popens) == 1
@@ -298,7 +298,8 @@ def test_run_ollama_model_starts_and_stops_its_own_server(world, tmp_path):
     assert any(r[0][:3] == ["ollama", "create", "qwen2.5-3b-ctx8192"] for r in world.runs)
 
 
-def test_run_on_foreign_server_never_signals_it(world, tmp_path):
+def test_run_on_foreign_server_never_signals_it(run_world, tmp_path):
+    world = run_world
     world.listening[11434] = "0.99.0"
     world.add_proc(55)
     code = jobs.run("ollama-qwen2.5-3b", str(tmp_path / "out"), smoke=True, jobs_dir=str(tmp_path / "jobs"))
@@ -514,3 +515,102 @@ def test_probe_refuses_when_preflight_fails(probe_world, tmp_path):
     probe_world.run_results[("nvidia-smi",)] = (0, "GPU, 6000, 100, 6144\n")
     assert jobs.ollama_default_probe(str(tmp_path)) == 5
     assert probe_world.popens == []
+
+
+# ── run(): preflight and context evidence (Task 3) ──
+
+VARIANT_PS_TEXT = ("NAME                         ID              SIZE      PROCESSOR    CONTEXT    UNTIL\n"
+                   "qwen2.5-3b-ctx8192:latest    1a2b3c4d5e6f    2.9 GB    100% GPU     8192       4 minutes from now\n")
+
+
+def _write_default(jobs_dir, d=4096):
+    os.makedirs(jobs_dir, exist_ok=True)
+    with open(os.path.join(jobs_dir, "ollama_default_context.json"), "w", encoding="utf-8") as f:
+        json.dump({"server_version": "0.99.0", "default_context_length": d, "evidence_source": "api_ps",
+                   "port": 11435, "temp_server_stopped": True}, f)
+
+
+@pytest.fixture
+def run_world(probe_world, tmp_path):
+    w = probe_world
+    w.ps_json = {"models": [{"name": "qwen2.5-3b-ctx8192:latest", "model": "qwen2.5-3b-ctx8192:latest",
+                             "context_length": 8192}]}
+    w.run_results[("ollama", "ps")] = (0, VARIANT_PS_TEXT)
+    w.run_results[("ollama", "list")] = (0, "NAME    ID    SIZE    MODIFIED\nqwen2.5:3b    357c53fb659c    1.9 GB    1 day ago\n")
+    w.run_results[("ollama", "show", "qwen2.5-3b-ctx8192")] = (
+        lambda argv: (0, "num_ctx 8192\n") if "--parameters" in argv
+        else (0, "  Model\n    quantization    Q4_K_M\n\n  Parameters\n    num_ctx    8192\n"))
+    w.http_replies["/v1/chat/completions"] = _chat_reply(10 ** 9)
+    _write_default(str(tmp_path / "jobs"))
+    return w
+
+
+def test_run_ollama_writes_start_and_end_evidence(run_world, tmp_path, capsys):
+    out = tmp_path / "out"
+    assert jobs.run("ollama-qwen2.5-3b", str(out), smoke=True, jobs_dir=str(tmp_path / "jobs")) == 0
+    for name in ("ollama_ps_start.json", "ollama_ps_start.txt", "ollama_ps_end.json", "ollama_ps_end.txt",
+                 "ollama_show.txt", "ollama_list.txt", "ollama_long_prompt.json", "preflight.log"):
+        assert (out / name).exists(), name
+    assert "KEEP_AWAKE D-04" in (out / "preflight.log").read_text()
+    assert "Q4_K_M" in (out / "ollama_show.txt").read_text()
+    data = json.loads((out / "ollama_long_prompt.json").read_text())
+    assert data["D"] == 4096 and data["L"] == 4198 and data["U"] == 7782 and data["num_ctx"] == 8192
+    assert data["L"] <= data["prompt_tokens"] <= data["U"] and data["lines"] > 0
+    assert data["server_state"] == "owned-started"
+    # unloaded (keep_alive 0) because the server is ours, then the server is stopped
+    assert any(p.get("keep_alive") == 0 and p.get("model") == "qwen2.5-3b-ctx8192" for _, p in run_world.http_posts)
+    assert run_world.signals == [(4000, signal.SIGTERM)]
+
+
+def test_run_on_foreign_server_does_not_unload(run_world, tmp_path):
+    run_world.listening[11434] = "0.98.0"
+    assert jobs.run("ollama-qwen2.5-3b", str(tmp_path / "out"), smoke=True, jobs_dir=str(tmp_path / "jobs")) == 0
+    assert not any(p.get("keep_alive") == 0 for _, p in run_world.http_posts)
+    assert run_world.signals == [] and run_world.popens == []
+    data = json.loads((tmp_path / "out" / "ollama_long_prompt.json").read_text())
+    assert data["server_state"] == "foreign" and data["server_context_length"] is None
+
+
+def test_run_without_measured_default_fails_before_any_child(run_world, tmp_path, capsys):
+    os.remove(tmp_path / "jobs" / "ollama_default_context.json")
+    assert jobs.run("ollama-qwen2.5-3b", str(tmp_path / "out"), smoke=True, jobs_dir=str(tmp_path / "jobs")) == 1
+    assert "FAIL run: measure the default first (jobs ollama-default-probe)" in capsys.readouterr().out
+    assert not [r for r in run_world.runs if r[2]] and run_world.popens == []
+
+
+def test_run_with_preflight_never_passing_writes_5_and_starts_no_child(run_world, tmp_path, monkeypatch):
+    run_world.run_results[("nvidia-smi",)] = (0, "GPU, 6000, 100, 6144\n")
+    monkeypatch.setattr(jobs, "PREFLIGHT_RECHECKS", 3)
+    monkeypatch.setattr(jobs, "PREFLIGHT_WAIT_S", 300)
+    out = tmp_path / "out"
+    assert jobs.run("ollama-qwen2.5-3b", str(out), smoke=True, jobs_dir=str(tmp_path / "jobs")) == 5
+    assert (out / "bench.done").read_text().strip() == "5"
+    assert run_world.now == 900 and (out / "preflight.log").read_text().count("=== preflight") == 4
+    assert not [r for r in run_world.runs if r[2]] and run_world.popens == []
+
+
+def test_scripted_and_hosted_models_skip_the_preflight(run_world, tmp_path):
+    run_world.run_results[("nvidia-smi",)] = (0, "GPU, 6000, 100, 6144\n")
+    assert jobs.run("control-always-comply", str(tmp_path / "out"), smoke=True, jobs_dir=str(tmp_path / "jobs")) == 0
+    assert not (tmp_path / "out" / "preflight.log").exists()
+    assert jobs.needs_gpu_preflight({"provider": "openai_compat", "base_url": "https://api.groq.com/openai/v1"}) is False
+    assert jobs.needs_gpu_preflight({"provider": "openai_compat", "base_url": "http://localhost:11434/v1"}) is True
+    assert jobs.needs_gpu_preflight({"provider": "hf_local"}) is True
+    assert jobs.needs_gpu_preflight({"provider": "scratch"}) is True
+
+
+def _per_line_reply(per_line, cap=10 ** 9):
+    def reply(url, payload):
+        lines = payload["messages"][-1]["content"].count("\n") + 1
+        return {"usage": {"prompt_tokens": min(30 + per_line * lines, cap)}}
+    return reply
+
+
+def test_long_prompt_aims_at_the_middle_and_adjusts_at_most_twice(run_world):
+    run_world.listening[11434] = "0.99.0"
+    run_world.http_replies["/v1/chat/completions"] = _per_line_reply(5)       # the first guess lands below L
+    sized = jobs.size_long_prompt(11434, "qwen2.5-3b-ctx8192", 4198, 7782)
+    assert 4198 <= sized["prompt_tokens"] <= 7782 and 2 <= len(sized["attempts"]) <= 3
+    run_world.http_replies["/v1/chat/completions"] = _per_line_reply(16, cap=2050)   # window not raised: cut
+    sized = jobs.size_long_prompt(11434, "qwen2.5-3b-ctx8192", 4198, 7782)
+    assert len(sized["attempts"]) == 3 and sized["prompt_tokens"] == 2050       # never inside: the check fails

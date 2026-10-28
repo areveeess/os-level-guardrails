@@ -36,6 +36,15 @@ command line is `ollama serve`, so a reused pid or a foreign server is never tou
 foreign server is used as it is: the Modelfile variants (FROM <pulled tag>, PARAMETER
 num_ctx 8192) raise the context window without restarting or reconfiguring it.
 
+Context evidence (D-06): GPU models (scratch, hf_local, localhost servers) pass the preflight
+before the child starts. An Ollama run needs the measured default first and saves
+ollama_ps_start/end (.json from /api/ps, .txt from `ollama ps`), ollama_show.txt,
+ollama_list.txt and ollama_long_prompt.json: one unique long prompt sized to the middle of
+run_checks.context_band(D, num_ctx), the same band `run_checks ollama-evidence` checks.
+Ollama 0.40.3 cuts an over-long prompt to about half the window ("truncating input
+prompt"), so a window that was not raised shows up below L, not as a plateau at the cap.
+The variant is unloaded (keep_alive 0) only on a server this project owns.
+
 Done-marker codes in DIR/bench.done: 0 the benchmark finished, 5 the preflight never
 passed (no child was started), 6 the Ollama server or the context variant could not be
 set up, anything else the benchmark process's own exit code.
@@ -57,6 +66,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Optional
 
@@ -625,24 +635,118 @@ def _append(path: str, text: str) -> None:
         f.write(text)
 
 
+def needs_gpu_preflight(cfg: dict) -> bool:
+    """Models that run on this machine's GPU: scratch, hf_local and OpenAI-compatible servers on localhost.
+    Scripted and hosted models skip the preflight."""
+    provider = cfg.get("provider")
+    if provider in ("scratch", "hf_local"):
+        return True
+    if provider == "openai_compat":
+        host = urllib.parse.urlparse(str(cfg.get("base_url") or "")).hostname
+        return host in ("localhost", "127.0.0.1")
+    return False
+
+
+TOKENS_PER_LINE_GUESS = 16   # the first long-prompt size is a guess; up to two corrections use the measurement
+
+
+def size_long_prompt(port: int, model: str, lower: int, upper: int) -> dict:
+    """Send one unique long prompt aimed at the middle of [lower, upper], correcting the line count at most
+    twice from the reported prompt_tokens. A window that was not raised cuts the prompt (Ollama keeps about
+    half the window), so prompt_tokens stays below `lower` and the evidence check fails, as it should."""
+    target = (lower + upper) // 2
+    lines = max(1, target // TOKENS_PER_LINE_GUESS)
+    attempts, tokens = [], None
+    for _ in range(3):
+        tokens = long_prompt_tokens(port, model, lines)
+        attempts.append([lines, tokens])
+        if tokens is None or lower <= tokens <= upper:
+            break
+        lines = max(1, int(lines * target / max(tokens, 1)))
+    return {"prompt_tokens": tokens, "lines": attempts[-1][0], "attempts": attempts}
+
+
+def _write_json(path: str, data) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def _write_text(path: str, text: str) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text or "")
+
+
+def capture_ps(out_dir: str, variant: str, suffix: str, port: int = MAIN_PORT) -> None:
+    """Warm the variant up (one token), then save /api/ps as JSON and `ollama ps` as text."""
+    _load_model(port, variant)
+    _write_json(os.path.join(out_dir, f"ollama_ps_{suffix}.json"), _http_json(f"http://{HOST}:{port}/api/ps",
+                                                                               timeout=10))
+    _, text = _run(["ollama", "ps"], env=client_env(port), timeout=30)
+    _write_text(os.path.join(out_dir, f"ollama_ps_{suffix}.txt"), text)
+
+
+def capture_start_evidence(out_dir: str, jobs_dir: str, cfg: dict, state: str, default_context: dict,
+                           port: int = MAIN_PORT) -> dict:
+    """ps (start), `ollama show <variant>`, `ollama list` and the long-prompt probe sized from the measured
+    default: the same context_band the ollama-evidence check uses."""
+    from src.benchmark.run_checks import band_note, context_band  # lazy: run_checks imports this module
+    variant, num_ctx = _checked_name(cfg["model"]), int(cfg["num_ctx"])
+    capture_ps(out_dir, variant, "start", port)
+    _, text = _run(["ollama", "show", variant], env=client_env(port), timeout=60)
+    _write_text(os.path.join(out_dir, "ollama_show.txt"), text)
+    _, text = _run(["ollama", "list"], env=client_env(port), timeout=60)
+    _write_text(os.path.join(out_dir, "ollama_list.txt"), text)
+    d = int(default_context["default_context_length"])
+    lower, upper = context_band(d, num_ctx)
+    note = band_note(d, num_ctx)
+    if note:
+        print(note)
+    sized = size_long_prompt(port, variant, lower, upper)
+    server_ctx = None
+    if state.startswith("owned"):
+        server_ctx = parse_config_context(_read_text(os.path.join(jobs_dir, MAIN_LOG)))
+    data = {"model": variant, "num_ctx": num_ctx, "D": d, "L": lower, "U": upper, **sized,
+            "server_state": state, "server_context_length": server_ctx, "note": note, "measured_at": _utc_now()}
+    _write_json(os.path.join(out_dir, "ollama_long_prompt.json"), data)
+    print(f"LONG_PROMPT {variant} prompt_tokens {sized['prompt_tokens']} band {lower}-{upper} D {d} "
+          f"attempts {len(sized['attempts'])}")
+    return data
+
+
 def run(model: str, out_dir: str, smoke: bool = False, jobs_dir: str = DEFAULT_JOBS_DIR) -> int:
-    """Run one model's benchmark into out_dir (resuming whatever is there) and return the done code."""
+    """Run one model's benchmark into out_dir (resuming whatever is there) and return the done code.
+
+    GPU models pass the read-only preflight first (done code 5 when it never passes). Ollama models need the
+    measured default context (jobs ollama-default-probe) and get start and end context evidence."""
     cfg = model_config(model)
     out_dir = os.path.abspath(out_dir)
     jobs_dir = os.path.abspath(jobs_dir)
+    ollama = is_ollama_model(cfg)
+    default_context = None
+    if ollama:
+        default_context = _read_default_context(jobs_dir)
+        if default_context is None:
+            print("FAIL run: measure the default first (jobs ollama-default-probe)")
+            return 1
     os.makedirs(out_dir, exist_ok=True)
     done_path = os.path.join(out_dir, "bench.done")
     if os.path.exists(done_path):
         os.remove(done_path)
     progress = os.path.join(out_dir, "progress.log")
-    started_server = False
+    if needs_gpu_preflight(cfg) and not preflight_with_rechecks(out_dir):
+        print("preflight never passed; not starting the benchmark")
+        _append(progress, f"=== invocation {_utc_now()} model {model} ===\npreflight never passed\n")
+        _write_done(out_dir, DONE_PREFLIGHT)
+        return DONE_PREFLIGHT
+    started_server, state = False, None
     try:
-        if is_ollama_model(cfg):
+        if ollama:
             try:
                 state = ollama_up(jobs_dir)
                 started_server = state == "owned-started"
                 print(f"OLLAMA {state}")
                 ollama_variants(jobs_dir, [model])
+                capture_start_evidence(out_dir, jobs_dir, cfg, state, default_context)
             except JobError as e:
                 print(f"FAIL run: {e}")
                 _append(progress, f"=== invocation {_utc_now()} model {model} ===\nFAIL ollama setup: {e}\n")
@@ -652,10 +756,28 @@ def run(model: str, out_dir: str, smoke: bool = False, jobs_dir: str = DEFAULT_J
         code, _ = _run(benchmark_argv(model, out_dir, smoke), timeout=7 * 24 * 3600, stdout_path=progress)
         _write_done(out_dir, code)
         print(f"BENCH {model} exit {code}")
+        if ollama:
+            capture_ps(out_dir, _checked_name(cfg["model"]), "end")
         return code
     finally:
+        if ollama and state and state.startswith("owned"):
+            # unload the variant (keep_alive 0) only on a server this project owns
+            _http_json(f"http://{HOST}:{MAIN_PORT}/api/generate", {"model": cfg["model"], "keep_alive": 0},
+                       timeout=60)
         if started_server:
             ollama_down(jobs_dir)
+
+
+def _read_default_context(jobs_dir: str) -> Optional[dict]:
+    path = os.path.join(jobs_dir, DEFAULT_CONTEXT_FILE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or type(data.get("default_context_length")) is not int:
+        return None
+    return data
 
 
 # ── CLI ──
