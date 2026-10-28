@@ -8,6 +8,17 @@ runs go through:
   python -m src.benchmark.jobs run --model M --out DIR [--smoke]
   python -m src.benchmark.jobs preflight --out DIR
   python -m src.benchmark.jobs ollama-default-probe [--model llama3.2:3b]
+  python -m src.benchmark.jobs local --prefix P [--models a,b] [--smoke]
+  python -m src.benchmark.jobs status --prefix P [--models a,b] [--wait S]
+  python -m src.benchmark.jobs report --prefix P --out DIR
+
+`local` runs the five D-01 models one at a time (the GPU is serial, D-04) into P-<model>,
+shortest GPU runs first for the D-09 freeze: it skips a complete directory, resumes an
+incomplete one (at most twice per invocation), launches nothing at or after FREEZE_UTC
+and at the freeze stops only the run child it started itself (done code 7). `status`
+only reads; it prints a WARN no-progress line when a live run has written nothing for
+more than STALE_MINUTES (D-04: the laptop must stay awake and on mains power). `report`
+merges only the final P-<model> directories.
 
 The preflight only reads (nvidia-smi free MiB, MemAvailable) and appends a KEEP_AWAKE
 line for D-04 (keeping the laptop on mains power and awake is the user's job; boot_id
@@ -47,7 +58,8 @@ The variant is unloaded (keep_alive 0) only on a server this project owns.
 
 Done-marker codes in DIR/bench.done: 0 the benchmark finished, 5 the preflight never
 passed (no child was started), 6 the Ollama server or the context variant could not be
-set up, anything else the benchmark process's own exit code.
+set up, 7 stopped at (or not launched because of) the D-09 freeze, anything else the
+benchmark process's own exit code.
 
 Every subprocess is an argv list (no shell), HTTP goes through urllib with short
 timeouts, and the HTTP, /proc, signal, subprocess and clock helpers are module-level
@@ -82,7 +94,20 @@ MAIN_LOG, MAIN_PIDFILE = "ollama-serve.log", "ollama.pid"
 SERVER_START_WAIT_S = 60
 STOP_WAIT_S = 30
 MINIMAL_ENV_KEYS = ("PATH", "HOME", "LANG")
-DONE_PREFLIGHT, DONE_OLLAMA_SETUP = 5, 6
+DONE_PREFLIGHT, DONE_OLLAMA_SETUP, DONE_FREEZE = 5, 6, 7
+
+# D-09: hard data freeze, 2026-10-29 15:30 UTC (21:00 IST). Nothing is launched at or after it, and at it every
+# run this project started is stopped. A constant on purpose: the freeze is never moved.
+FREEZE_UTC = "2026-10-29T15:30:00+00:00"
+CHILD_POLL_S = 5            # how often a run with a deadline checks its child and the clock
+FREEZE_STOP_WAIT_S = 60     # SIGTERM -> SIGKILL grace for our own child at the freeze
+
+# Serial local queue (D-01 models; GPU serial per D-04; shortest GPU runs first for the freeze, D-09)
+LOCAL_ORDER = ("qwen2.5-0.5b-agentlora", "scratch-gpt", "qwen2.5-0.5b-base", "ollama-qwen2.5-3b",
+               "ollama-llama3.2-3b")
+MAX_LAUNCHES_PER_MODEL = 2
+STALE_MINUTES = 20          # D-04 keep-awake duty: a live run without progress this long gets a WARN line
+STATUS_WAIT_CAP_S = 400
 
 # Read-only GPU/RAM preflight (the src/qwen_lora/run_train.sh pattern); environment overrides are read per call
 MIN_FREE_MIB = 3584
@@ -185,8 +210,30 @@ def _clock() -> float:
     return time.monotonic()
 
 
+def _now() -> datetime.datetime:
+    """The one wall clock (aware UTC). Every freeze, staleness and quota comparison goes through it, so the
+    tests replace it with a fake clock."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
 def _utc_now() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _now().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _list_pids() -> list:
+    """Every numeric /proc entry. Read-only: used to find our own loops and children, never to signal."""
+    try:
+        return [int(name) for name in os.listdir("/proc") if name.isdigit()]
+    except OSError:
+        return []
+
+
+def _spawn(argv: list, stdout_path: str):
+    """Start a benchmark child with its output appended to stdout_path; the Popen handle is what may later be
+    signalled (its pid only)."""
+    with open(stdout_path, "ab") as out:
+        return subprocess.Popen(argv, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                cwd=PROJECT_ROOT)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -713,12 +760,71 @@ def capture_start_evidence(out_dir: str, jobs_dir: str, cfg: dict, state: str, d
     return data
 
 
-def run(model: str, out_dir: str, smoke: bool = False, jobs_dir: str = DEFAULT_JOBS_DIR) -> int:
+def _parse_utc(value) -> datetime.datetime:
+    """An aware UTC datetime from an ISO string ('Z' or an offset) or a datetime."""
+    if isinstance(value, datetime.datetime):
+        dt = value
+    else:
+        dt = datetime.datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc)
+
+
+def freeze_time() -> datetime.datetime:
+    return _parse_utc(FREEZE_UTC)
+
+
+def past_freeze() -> bool:
+    return _now() >= freeze_time()
+
+
+def _fmt_utc(dt: datetime.datetime) -> str:
+    return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def stop_own_child(proc, wait_s: float = FREEZE_STOP_WAIT_S) -> None:
+    """SIGTERM the pid of a Popen this process created, wait up to wait_s, then SIGKILL that same pid. Nothing
+    else is ever signalled: the handle is the proof of ownership."""
+    if proc.poll() is not None:
+        return
+    _send_signal(proc.pid, signal.SIGTERM)
+    waited = 0.0
+    while waited < wait_s and proc.poll() is None:
+        _sleep(1)
+        waited += 1
+    if proc.poll() is None:
+        _send_signal(proc.pid, signal.SIGKILL)
+        try:
+            proc.wait(timeout=10)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+
+def run_child_until(argv: list, progress: str, deadline) -> int:
+    """Run the benchmark child, polling it every CHILD_POLL_S; at the deadline stop only that child, log the
+    freeze line and return DONE_FREEZE (7)."""
+    proc = _spawn(argv, progress)
+    while True:
+        code = proc.poll()
+        if code is not None:
+            return code
+        if _now() >= deadline:
+            stop_own_child(proc)
+            _append(progress, f"FREEZE stopped at {_utc_now()} (D-09)\n")
+            return DONE_FREEZE
+        _sleep(CHILD_POLL_S)
+
+
+def run(model: str, out_dir: str, smoke: bool = False, jobs_dir: str = DEFAULT_JOBS_DIR, deadline=None) -> int:
     """Run one model's benchmark into out_dir (resuming whatever is there) and return the done code.
 
     GPU models pass the read-only preflight first (done code 5 when it never passes). Ollama models need the
-    measured default context (jobs ollama-default-probe) and get start and end context evidence."""
+    measured default context (jobs ollama-default-probe) and get start and end context evidence. With a
+    deadline (FREEZE_UTC for the Phase 4 queue) the child is polled and, at the deadline, only that child is
+    stopped and bench.done is 7; nothing is launched when the deadline has already passed."""
     cfg = model_config(model)
+    deadline = _parse_utc(deadline) if deadline is not None else None
     out_dir = os.path.abspath(out_dir)
     jobs_dir = os.path.abspath(jobs_dir)
     ollama = is_ollama_model(cfg)
@@ -733,6 +839,11 @@ def run(model: str, out_dir: str, smoke: bool = False, jobs_dir: str = DEFAULT_J
     if os.path.exists(done_path):
         os.remove(done_path)
     progress = os.path.join(out_dir, "progress.log")
+    if deadline is not None and _now() >= deadline:
+        print(f"FREEZE {model}: not launched (D-09)")
+        _append(progress, f"=== invocation {_utc_now()} model {model} ===\nFREEZE not launched (D-09)\n")
+        _write_done(out_dir, DONE_FREEZE)
+        return DONE_FREEZE
     if needs_gpu_preflight(cfg) and not preflight_with_rechecks(out_dir):
         print("preflight never passed; not starting the benchmark")
         _append(progress, f"=== invocation {_utc_now()} model {model} ===\npreflight never passed\n")
@@ -753,10 +864,14 @@ def run(model: str, out_dir: str, smoke: bool = False, jobs_dir: str = DEFAULT_J
                 _write_done(out_dir, DONE_OLLAMA_SETUP)
                 return DONE_OLLAMA_SETUP
         _append(progress, f"=== invocation {_utc_now()} model {model} ===\n")
-        code, _ = _run(benchmark_argv(model, out_dir, smoke), timeout=7 * 24 * 3600, stdout_path=progress)
+        if deadline is None:
+            code, _ = _run(benchmark_argv(model, out_dir, smoke), timeout=7 * 24 * 3600, stdout_path=progress)
+        else:
+            code = run_child_until(benchmark_argv(model, out_dir, smoke), progress, deadline)
         _write_done(out_dir, code)
-        print(f"BENCH {model} exit {code}")
-        if ollama:
+        print(f"BENCH {model} exit {code}" + (" (stopped at the freeze, D-09)" if code == DONE_FREEZE
+                                               and deadline is not None else ""))
+        if ollama and not (deadline is not None and code == DONE_FREEZE):
             capture_ps(out_dir, _checked_name(cfg["model"]), "end")
         return code
     finally:
@@ -780,6 +895,297 @@ def _read_default_context(jobs_dir: str) -> Optional[dict]:
     return data
 
 
+# ── Process discovery (read-only /proc scans) ──
+
+def _cmdline(pid: int) -> list:
+    raw = _read_proc(pid, "cmdline")
+    if not raw:
+        return []
+    return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+
+
+def _ppid(pid: int) -> Optional[int]:
+    stat = _read_proc(pid, "stat")
+    if not stat:
+        return None
+    after = stat.rsplit(b")", 1)[-1].split()
+    return int(after[1]) if len(after) > 1 and after[1].isdigit() else None
+
+
+def _ancestors(pid: int) -> set:
+    """pid and every ancestor (a `timeout` or shell wrapper of this process is not another instance)."""
+    seen = set()
+    while pid and pid not in seen:
+        seen.add(pid)
+        pid = _ppid(pid)
+    return seen
+
+
+def _arg_value(argv: list, flag: str) -> Optional[str]:
+    for i, arg in enumerate(argv):
+        if arg == flag and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith(flag + "="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def _same_path(a: Optional[str], b: Optional[str]) -> bool:
+    if not a or not b:
+        return False
+    return os.path.normpath(os.path.abspath(a)) == os.path.normpath(os.path.abspath(b))
+
+
+def _is_python(argv: list) -> bool:
+    return bool(argv) and "python" in os.path.basename(argv[0])
+
+
+def find_loop(cmd: str, prefix: str, exclude_self: bool = True) -> Optional[int]:
+    """The pid of a running `python -m src.benchmark.jobs <cmd> --prefix <prefix>` other than this process and
+    its wrappers, or None. Only reads /proc."""
+    skip = _ancestors(os.getpid()) if exclude_self else set()
+    for pid in _list_pids():
+        if pid in skip:
+            continue
+        argv = _cmdline(pid)
+        if not _is_python(argv) or "src.benchmark.jobs" not in argv:
+            continue
+        i = argv.index("src.benchmark.jobs")
+        if i + 1 < len(argv) and argv[i + 1] == cmd and _same_path(_arg_value(argv, "--prefix"), prefix):
+            return pid
+    return None
+
+
+def find_bench_child(out_dir: str) -> Optional[int]:
+    """The pid of a running run_benchmark.py whose --resume is out_dir, or None. Only reads /proc."""
+    for pid in _list_pids():
+        argv = _cmdline(pid)
+        if (_is_python(argv) and any(a.endswith("run_benchmark.py") for a in argv)
+                and _same_path(_arg_value(argv, "--resume"), out_dir)):
+            return pid
+    return None
+
+
+# ── Serial local queue (D-04, D-09) ──
+
+def model_dir(prefix: str, model: str) -> str:
+    return f"{prefix.rstrip('/')}-{model}"
+
+
+def _jobs_log(jobs_dir: str, kind: str, prefix: str) -> str:
+    return os.path.join(jobs_dir, f"{kind}-{os.path.basename(prefix.rstrip('/'))}.log")
+
+
+def model_status(out_dir: str, model: str) -> dict:
+    """run_checks.complete_status of one directory (expected from its manifest); the tests replace this."""
+    from src.benchmark.run_checks import complete_status  # lazy: run_checks imports this module
+    return complete_status(out_dir, model)
+
+
+def is_complete(out_dir: str, model: str) -> bool:
+    """Every expected episode finished and no provenance problem (the skip rule of the queue)."""
+    if not os.path.isdir(out_dir):
+        return False
+    st = model_status(out_dir, model)
+    return st.get("expected") is not None and st.get("finished") == st.get("expected") and not st.get("problems")
+
+
+def local_queue(prefix: str, models: Optional[list] = None, smoke: bool = False,
+                jobs_dir: str = DEFAULT_JOBS_DIR) -> int:
+    """Run the local models one at a time (GPU serial, D-04) into <prefix>-<model>, in LOCAL_ORDER unless
+    `models` is given. A complete directory is skipped; an incomplete one is resumed, at most
+    MAX_LAUNCHES_PER_MODEL times per invocation and never again after a freeze stop (code 7); nothing is
+    launched at or after FREEZE_UTC (D-09). The Ollama server is brought up once before the first Ollama
+    launch and, only if this invocation started it, stopped after the last model."""
+    models = list(models or LOCAL_ORDER)
+    os.makedirs(jobs_dir, exist_ok=True)
+    log_path = _jobs_log(jobs_dir, "local", prefix)
+
+    def say(line: str) -> None:
+        print(line, flush=True)
+        _append(log_path, line + "\n")
+
+    other = find_loop("local", prefix)
+    if other is not None:
+        say(f"LOCAL already running pid {other}")
+        return 0
+    say(f"=== local {_utc_now()} prefix {prefix} models {','.join(models)} smoke {smoke} freeze {FREEZE_UTC} ===")
+    freeze = freeze_time()
+    complete, ollama_state = 0, None
+    try:
+        for model in models:
+            cfg = model_config(model)
+            out = model_dir(prefix, model)
+            if is_complete(out, model):
+                say(f"[local] skip {model}: complete")
+                complete += 1
+                continue
+            launches = 0
+            while launches < MAX_LAUNCHES_PER_MODEL:
+                if _now() >= freeze:
+                    say(f"[local] freeze {model}: not launched (D-09)")
+                    break
+                if is_ollama_model(cfg) and ollama_state is None:
+                    try:
+                        ollama_state = ollama_up(jobs_dir)
+                    except JobError as e:
+                        ollama_state = "failed"
+                        say(f"[local] FAIL ollama-up: {e}")
+                    say(f"[local] ollama {ollama_state}")
+                launches += 1
+                say(f"[local] launch {model} {launches}/{MAX_LAUNCHES_PER_MODEL} -> {out}")
+                code = run(model, out, smoke=smoke, jobs_dir=jobs_dir, deadline=freeze)
+                say(f"[local] {model} done {code}")
+                if is_complete(out, model):
+                    say(f"[local] complete {model}")
+                    complete += 1
+                    break
+                if code == DONE_FREEZE:
+                    say(f"[local] freeze {model}: stopped at the freeze, not relaunched (D-09)")
+                    break
+            else:
+                say(f"[local] incomplete {model}: {MAX_LAUNCHES_PER_MODEL} launches used, moving on")
+    finally:
+        if ollama_state == "owned-started":
+            say(f"[local] ollama-down {ollama_down(jobs_dir)}")
+    say(f"LOCAL done: {complete}/{len(models)} complete")
+    return 0
+
+
+# ── Read-only status (D-04 keep-awake warning) ──
+
+def _mtime(path: str) -> Optional[float]:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+def _last_line(path: str) -> str:
+    text = _read_text(path) or ""
+    lines = [line for line in text.splitlines() if line.strip()]
+    return lines[-1].strip() if lines else "-"
+
+
+def _done_code(out_dir: str) -> Optional[str]:
+    text = _read_text(os.path.join(out_dir, "bench.done"))
+    return text.strip() if text is not None and text.strip() else None
+
+
+def _read_json_file(path: str):
+    text = _read_text(path)
+    if text is None:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        return None
+
+
+def _done_snapshot(prefix: str, models: list) -> dict:
+    return {m: (_mtime(os.path.join(model_dir(prefix, m), "bench.done")),
+                _done_code(model_dir(prefix, m))) for m in models}
+
+
+def _status_models(prefix: str) -> list:
+    """Every config model with a <prefix>-<model> directory, else the local queue's models."""
+    names = list(load_model_config()["models"])
+    ordered = list(LOCAL_ORDER) + [n for n in names if n not in LOCAL_ORDER]
+    present = [m for m in ordered if os.path.isdir(model_dir(prefix, m))]
+    return present or list(LOCAL_ORDER)
+
+
+def status(prefix: str, models: Optional[list] = None, wait_s: float = 0) -> str:
+    """Print one line per model, the keep-awake WARN / quota WAIT lines, the time to the freeze and one STATUS
+    line; return the STATUS word. Only reads (files and /proc): it never starts, changes or signals anything."""
+    models = list(models or _status_models(prefix))
+    wait_s = max(0.0, min(float(wait_s or 0), STATUS_WAIT_CAP_S))
+    if wait_s:
+        before = _done_snapshot(prefix, models)
+        waited = 0.0
+        while waited < wait_s and _done_snapshot(prefix, models) == before:
+            _sleep(5)
+            waited += 5
+    now = _now()
+    loops = {kind: find_loop(kind, prefix, exclude_self=False) for kind in ("local", "hosted")}
+    any_alive, all_complete, any_data = False, True, False
+    for model in models:
+        out = model_dir(prefix, model)
+        exists = os.path.isdir(out)
+        st = model_status(out, model) if exists else {"finished": 0, "expected": None, "pending_infra": 0,
+                                                      "problems": ["no directory"]}
+        child = find_bench_child(out) if exists else None
+        alive = child is not None
+        any_alive = any_alive or alive
+        done = _done_code(out) if exists else None
+        complete = (st.get("expected") is not None and st.get("finished") == st.get("expected")
+                    and not st.get("problems"))
+        all_complete = all_complete and complete
+        any_data = any_data or (exists and (os.path.exists(os.path.join(out, "raw.jsonl")) or done is not None))
+        expected = st.get("expected") if st.get("expected") is not None else "-"
+        print(f"MODEL {model} finished {st.get('finished', 0)}/{expected} pending_infra {st.get('pending_infra', 0)} "
+              f"done {done or '-'} alive {'yes' if alive else 'no'}")
+        if exists:
+            print(f"  last: {_last_line(os.path.join(out, 'progress.log'))[:200]}")
+        hosted = _read_json_file(os.path.join(out, "hosted_state.json")) if exists else None
+        next_launch = hosted.get("next_launch_utc") if isinstance(hosted, dict) else None
+        if isinstance(hosted, dict) and hosted.get("state") == "waiting_quota" and next_launch \
+                and _parse_utc(next_launch) > now:
+            print(f"WAIT {model} quota until {_fmt_utc(_parse_utc(next_launch))}")
+        elif alive:
+            stamps = [t for t in (_mtime(os.path.join(out, "raw.jsonl")), _mtime(os.path.join(out, "progress.log")))
+                      if t is not None]
+            if stamps:
+                idle_min = int((now.timestamp() - max(stamps)) // 60)
+                if idle_min > STALE_MINUTES:
+                    print(f"WARN no-progress {model} {idle_min} min: check that the laptop is awake and on mains "
+                          f"power (D-04)")
+    for kind, pid in loops.items():
+        if pid is not None:
+            any_alive = True
+            print(f"LOOP {kind} alive pid {pid}")
+    left = freeze_time() - now
+    if left.total_seconds() > 0:
+        minutes = int(left.total_seconds() // 60)
+        print(f"FREEZE in {minutes // 60}h{minutes % 60}m")
+    else:
+        print("FREEZE passed")
+    word = "all-complete" if all_complete else "running" if any_alive else "incomplete" if any_data else "idle"
+    print(f"STATUS {word}")
+    return word
+
+
+# ── Merged report ──
+
+def report_sources(prefix: str, out_dir: Optional[str] = None) -> list:
+    """The final Phase 4 directories that exist: <prefix>-<every benchmark model> and <prefix>-control. Never a
+    tracer, smoke, jobs or report directory: only these exact names are considered, so <prefix>-tracer-*,
+    <prefix>-smoke-*, <prefix>-jobs and the report directory itself can never be merged."""
+    from src.llm.registry import list_models
+    names = list(list_models(benchmark_only=True)) + ["control"]
+    sources = []
+    for name in names:
+        path = model_dir(prefix, name)
+        if out_dir and _same_path(path, out_dir):
+            continue
+        if os.path.isdir(path) and path not in sources:
+            sources.append(path)
+    return sources
+
+
+def report(prefix: str, out_dir: str) -> int:
+    from src.benchmark.report import generate_report  # lazy: matplotlib is only needed here
+    sources = report_sources(prefix, out_dir)
+    if not sources:
+        print(f"FAIL report: no Phase 4 directory {prefix}-<model> exists")
+        return 1
+    for path in sources:
+        print(f"MERGE {path}")
+    generate_report(out_dir, sources=sources)
+    print(f"REPORT {out_dir} sources {len(sources)}")
+    return 0
+
+
 # ── CLI ──
 
 def main(argv: Optional[list] = None) -> int:
@@ -800,9 +1206,31 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("ollama-default-probe")
     p.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIR)
     p.add_argument("--model", default="llama3.2:3b")
+    p = sub.add_parser("local")
+    p.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIR)
+    p.add_argument("--prefix", required=True)
+    p.add_argument("--models", default=None)
+    p.add_argument("--smoke", action="store_true")
+    p = sub.add_parser("status")
+    p.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIR)
+    p.add_argument("--prefix", required=True)
+    p.add_argument("--models", default=None)
+    p.add_argument("--wait", type=float, default=0)
+    p = sub.add_parser("report")
+    p.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIR)
+    p.add_argument("--prefix", required=True)
+    p.add_argument("--out", required=True)
     args = parser.parse_args(argv)
+    models = [m.strip() for m in args.models.split(",") if m.strip()] if getattr(args, "models", None) else None
 
     try:
+        if args.cmd == "local":
+            return local_queue(args.prefix, models, smoke=args.smoke, jobs_dir=args.jobs_dir)
+        if args.cmd == "status":
+            status(args.prefix, models, wait_s=args.wait)
+            return 0
+        if args.cmd == "report":
+            return report(args.prefix, args.out)
         if args.cmd == "preflight":
             return 0 if preflight(args.out) else 1
         if args.cmd == "ollama-default-probe":

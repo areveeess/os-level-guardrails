@@ -4,6 +4,7 @@ one-model launcher. Everything is faked (HTTP, /proc, signals, subprocesses, clo
 no real server, no GPU, no benchmark child.
 """
 
+import datetime
 import json
 import os
 import signal
@@ -614,3 +615,311 @@ def test_long_prompt_aims_at_the_middle_and_adjusts_at_most_twice(run_world):
     run_world.http_replies["/v1/chat/completions"] = _per_line_reply(16, cap=2050)   # window not raised: cut
     sized = jobs.size_long_prompt(11434, "qwen2.5-3b-ctx8192", 4198, 7782)
     assert len(sized["attempts"]) == 3 and sized["prompt_tokens"] == 2050       # never inside: the check fails
+
+
+# ── Phase 4 queue: fake clock, local queue, run() deadline, status, report (plan 04-05 Task 1) ──
+
+FREEZE = datetime.datetime(2026, 10, 29, 15, 30, tzinfo=datetime.timezone.utc)
+BEFORE = FREEZE - datetime.timedelta(hours=10)
+
+
+@pytest.fixture
+def clock(world, monkeypatch):
+    """A fake wall clock: BEFORE plus the fake world's elapsed seconds (its _sleep advances it)."""
+    world.base = BEFORE
+    monkeypatch.setattr(jobs, "_now", lambda: world.base + datetime.timedelta(seconds=world.now))
+    monkeypatch.setattr(jobs, "_list_pids", lambda: list(world.procs))
+    return world
+
+
+class FakeQueue:
+    """Replaces run() and the completeness check for the local queue."""
+
+    def __init__(self, complete=(), becomes_complete=True, code=0):
+        self.complete = set(complete)
+        self.becomes_complete = becomes_complete
+        self.code = code
+        self.calls = []
+
+    def run(self, model, out_dir, smoke=False, jobs_dir=None, deadline=None):
+        self.calls.append((model, out_dir, smoke, deadline))
+        if self.becomes_complete and self.code == 0:
+            self.complete.add(model)
+        return self.code
+
+    def is_complete(self, out_dir, model):
+        return model in self.complete
+
+
+def _queue(monkeypatch, fake):
+    monkeypatch.setattr(jobs, "run", fake.run)
+    monkeypatch.setattr(jobs, "is_complete", fake.is_complete)
+    return fake
+
+
+def test_freeze_constant_is_the_d09_freeze():
+    assert jobs.FREEZE_UTC == "2026-10-29T15:30:00+00:00"
+    assert jobs.freeze_time() == FREEZE
+    assert jobs.DONE_FREEZE == 7
+
+
+def test_local_default_order_is_the_five_d01_models_shortest_first(clock, tmp_path, monkeypatch):
+    assert jobs.LOCAL_ORDER == ("qwen2.5-0.5b-agentlora", "scratch-gpt", "qwen2.5-0.5b-base",
+                                "ollama-qwen2.5-3b", "ollama-llama3.2-3b")
+    fake = _queue(monkeypatch, FakeQueue())
+    prefix = str(tmp_path / "phase4")
+    assert jobs.local_queue(prefix, jobs_dir=str(tmp_path / "jobs")) == 0
+    assert [c[0] for c in fake.calls] == list(jobs.LOCAL_ORDER)
+    assert [c[1] for c in fake.calls] == [f"{prefix}-{m}" for m in jobs.LOCAL_ORDER]
+    assert all(c[3] == FREEZE for c in fake.calls)            # every launch carries the freeze deadline
+    log = (tmp_path / "jobs" / "local-phase4.log").read_text()
+    assert "LOCAL done: 5/5 complete" in log
+
+
+def test_local_skips_complete_and_caps_launches_at_two(clock, tmp_path, monkeypatch, capsys):
+    fake = _queue(monkeypatch, FakeQueue(complete={"scratch-gpt"}, becomes_complete=False, code=1))
+    jobs.local_queue(str(tmp_path / "p"), ["scratch-gpt", "qwen2.5-0.5b-base"], jobs_dir=str(tmp_path / "jobs"))
+    assert [c[0] for c in fake.calls] == ["qwen2.5-0.5b-base", "qwen2.5-0.5b-base"]
+    out = capsys.readouterr().out
+    assert "[local] skip scratch-gpt: complete" in out
+    assert "[local] incomplete qwen2.5-0.5b-base: 2 launches used, moving on" in out
+    assert "LOCAL done: 1/2 complete" in out
+
+
+def test_local_resume_that_completes_is_not_relaunched(clock, tmp_path, monkeypatch):
+    fake = _queue(monkeypatch, FakeQueue())
+    jobs.local_queue(str(tmp_path / "p"), ["scratch-gpt"], smoke=True, jobs_dir=str(tmp_path / "jobs"))
+    jobs.local_queue(str(tmp_path / "p"), ["scratch-gpt"], smoke=True, jobs_dir=str(tmp_path / "jobs"))
+    assert len(fake.calls) == 1 and fake.calls[0][2] is True
+    log = (tmp_path / "jobs" / "local-p.log").read_text()
+    assert log.count("[local] skip scratch-gpt: complete") == 1
+
+
+def test_local_refuses_a_second_instance_for_the_same_prefix(clock, tmp_path, monkeypatch, capsys):
+    prefix = str(tmp_path / "p")
+    clock.add_proc(321, cmdline=(b"/x/venv/bin/python", b"-u", b"-m", b"src.benchmark.jobs", b"local",
+                                 b"--prefix", prefix.encode()))
+    clock.add_proc(322, cmdline=(b"/x/venv/bin/python", b"-m", b"src.benchmark.jobs", b"local",
+                                 b"--prefix", b"/elsewhere"))
+    fake = _queue(monkeypatch, FakeQueue())
+    assert jobs.local_queue(prefix, ["scratch-gpt"], jobs_dir=str(tmp_path / "jobs")) == 0
+    assert fake.calls == [] and clock.signals == []
+    assert "LOCAL already running pid 321" in capsys.readouterr().out
+
+
+def test_local_own_process_is_not_another_instance(clock, tmp_path, monkeypatch):
+    prefix = str(tmp_path / "p")
+    clock.add_proc(os.getpid(), cmdline=(b"/x/venv/bin/python", b"-m", b"src.benchmark.jobs", b"local",
+                                         b"--prefix", prefix.encode()))
+    fake = _queue(monkeypatch, FakeQueue())
+    jobs.local_queue(prefix, ["scratch-gpt"], jobs_dir=str(tmp_path / "jobs"))
+    assert len(fake.calls) == 1
+
+
+def test_local_starts_and_stops_its_own_ollama_server_once(clock, tmp_path, monkeypatch):
+    fake = _queue(monkeypatch, FakeQueue())
+    jobs.local_queue(str(tmp_path / "p"), ["scratch-gpt", "ollama-qwen2.5-3b", "ollama-llama3.2-3b"],
+                     jobs_dir=str(tmp_path / "jobs"))
+    assert len(clock.popens) == 1 and clock.popens[0][0] == ["ollama", "serve"]
+    assert clock.signals == [(4000, signal.SIGTERM)]
+    assert [c[0] for c in fake.calls] == ["scratch-gpt", "ollama-qwen2.5-3b", "ollama-llama3.2-3b"]
+
+
+def test_local_never_stops_a_foreign_ollama_server(clock, tmp_path, monkeypatch, capsys):
+    clock.listening[11434] = "0.98.0"
+    clock.add_proc(55)
+    _queue(monkeypatch, FakeQueue())
+    jobs.local_queue(str(tmp_path / "p"), ["ollama-qwen2.5-3b"], jobs_dir=str(tmp_path / "jobs"))
+    assert clock.signals == [] and clock.popens == []
+    assert "[local] ollama foreign" in capsys.readouterr().out
+
+
+def test_local_launches_nothing_at_or_after_the_freeze(clock, tmp_path, monkeypatch, capsys):
+    clock.base = FREEZE
+    fake = _queue(monkeypatch, FakeQueue())
+    jobs.local_queue(str(tmp_path / "p"), jobs_dir=str(tmp_path / "jobs"))
+    assert fake.calls == [] and clock.popens == []
+    out = capsys.readouterr().out
+    for model in jobs.LOCAL_ORDER:
+        assert f"[local] freeze {model}: not launched (D-09)" in out
+    assert "LOCAL done: 0/5 complete" in out
+
+
+def test_local_does_not_relaunch_after_a_freeze_stop(clock, tmp_path, monkeypatch, capsys):
+    fake = _queue(monkeypatch, FakeQueue(becomes_complete=False, code=7))
+    jobs.local_queue(str(tmp_path / "p"), ["scratch-gpt"], jobs_dir=str(tmp_path / "jobs"))
+    assert len(fake.calls) == 1
+    assert "[local] freeze scratch-gpt: stopped at the freeze, not relaunched (D-09)" in capsys.readouterr().out
+
+
+class FakeChild:
+    def __init__(self, world, pid=9001):
+        self.world, self.pid = world, pid
+        world.add_proc(pid, cmdline=(b"python", b"run_benchmark.py"))
+
+    def poll(self):
+        return None if self.world.procs[self.pid]["alive"] else -15
+
+    def wait(self, timeout=None):
+        return self.poll()
+
+
+def test_run_with_deadline_stops_only_its_own_child_and_writes_7(clock, tmp_path, monkeypatch):
+    clock.add_proc(55, cmdline=(b"python3", b"other_project.py"))       # a bystander: never signalled
+    monkeypatch.setattr(jobs, "_spawn", lambda argv, path: FakeChild(clock))
+    out = tmp_path / "out"
+    code = jobs.run("control-always-comply", str(out), jobs_dir=str(tmp_path / "jobs"),
+                    deadline=BEFORE + datetime.timedelta(seconds=30))
+    assert code == 7
+    assert clock.signals == [(9001, signal.SIGTERM)]
+    assert (out / "bench.done").read_text().strip() == "7"
+    assert "FREEZE stopped at " in (out / "progress.log").read_text()
+
+
+def test_run_with_deadline_escalates_to_sigkill_on_the_same_pid(clock, tmp_path, monkeypatch):
+    clock.term_kills = False
+    monkeypatch.setattr(jobs, "_spawn", lambda argv, path: FakeChild(clock))
+    jobs.run("control-always-comply", str(tmp_path / "out"), jobs_dir=str(tmp_path / "jobs"),
+             deadline=BEFORE + datetime.timedelta(seconds=10))
+    assert clock.signals == [(9001, signal.SIGTERM), (9001, signal.SIGKILL)]
+
+
+def test_run_with_deadline_returns_the_child_code_before_the_freeze(clock, tmp_path, monkeypatch):
+    class Done(FakeChild):
+        def poll(self):
+            return 0
+    monkeypatch.setattr(jobs, "_spawn", lambda argv, path: Done(clock))
+    assert jobs.run("control-always-comply", str(tmp_path / "out"), jobs_dir=str(tmp_path / "jobs"),
+                    deadline=FREEZE) == 0
+    assert clock.signals == []
+
+
+def test_run_after_the_deadline_launches_nothing(clock, tmp_path, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(jobs, "_spawn", lambda argv, path: spawned.append(argv))
+    clock.base = FREEZE
+    assert jobs.run("control-always-comply", str(tmp_path / "out"), jobs_dir=str(tmp_path / "jobs"),
+                    deadline=FREEZE) == 7
+    assert spawned == [] and (tmp_path / "out" / "bench.done").read_text().strip() == "7"
+
+
+# ── status ──
+
+def _tree(root):
+    snap = {}
+    for dirpath, _, files in os.walk(root):
+        for name in files:
+            path = os.path.join(dirpath, name)
+            with open(path, "rb") as f:
+                snap[path] = (os.path.getmtime(path), f.read())
+    return snap
+
+
+@pytest.fixture
+def status_world(clock, tmp_path, monkeypatch):
+    prefix = str(tmp_path / "phase4")
+    out = f"{prefix}-scratch-gpt"
+    os.makedirs(out)
+    for name, text in (("raw.jsonl", "{}\n"), ("progress.log", "header\n[3/6] scratch-gpt benign-00 run0\n")):
+        with open(os.path.join(out, name), "w", encoding="utf-8") as f:
+            f.write(text)
+    monkeypatch.setattr(jobs, "model_status", lambda d, m: {"finished": 3, "expected": 6, "pending_infra": 0,
+                                                            "problems": ["finished 3 below expected 6"]})
+    clock.add_proc(700, cmdline=(b"/x/venv/bin/python", b"-u", b"/x/run_benchmark.py", b"--models",
+                                 b"scratch-gpt", b"--resume", os.path.abspath(out).encode()))
+    clock.prefix, clock.out = prefix, out
+    return clock
+
+
+def _age(path, minutes, world):
+    t = (world.base + datetime.timedelta(seconds=world.now)).timestamp() - minutes * 60
+    os.utime(path, (t, t))
+
+
+def test_status_warns_after_21_minutes_without_progress(status_world, capsys):
+    w = status_world
+    for name in ("raw.jsonl", "progress.log"):
+        _age(os.path.join(w.out, name), 21, w)
+    before = _tree(os.path.dirname(w.out))
+    assert jobs.status(w.prefix, ["scratch-gpt"]) == "running"
+    out = capsys.readouterr().out
+    assert "MODEL scratch-gpt finished 3/6 pending_infra 0 done - alive yes" in out
+    assert "last: [3/6] scratch-gpt benign-00 run0" in out
+    assert ("WARN no-progress scratch-gpt 21 min: check that the laptop is awake and on mains power (D-04)"
+            in out)
+    assert "FREEZE in 10h0m" in out and out.strip().endswith("STATUS running")
+    assert _tree(os.path.dirname(w.out)) == before and w.signals == [] and w.popens == []
+
+
+def test_status_does_not_warn_at_19_minutes(status_world, capsys):
+    w = status_world
+    for name in ("raw.jsonl", "progress.log"):
+        _age(os.path.join(w.out, name), 19, w)
+    jobs.status(w.prefix, ["scratch-gpt"])
+    assert "WARN" not in capsys.readouterr().out
+
+
+def test_status_does_not_warn_for_a_run_that_is_not_alive(status_world, capsys):
+    w = status_world
+    del w.procs[700]
+    for name in ("raw.jsonl", "progress.log"):
+        _age(os.path.join(w.out, name), 90, w)
+    assert jobs.status(w.prefix, ["scratch-gpt"]) == "incomplete"
+    out = capsys.readouterr().out
+    assert "alive no" in out and "WARN" not in out
+
+
+def test_status_shows_wait_for_a_hosted_model_in_a_quota_wait(status_world, capsys):
+    w = status_world
+    out_dir = f"{w.prefix}-groq-gpt-oss-20b"
+    os.makedirs(out_dir)
+    until = w.base + datetime.timedelta(hours=2)
+    with open(os.path.join(out_dir, "hosted_state.json"), "w", encoding="utf-8") as f:
+        json.dump({"state": "waiting_quota", "next_launch_utc": until.strftime("%Y-%m-%dT%H:%M:%SZ")}, f)
+    jobs.status(w.prefix, ["groq-gpt-oss-20b"])
+    out = capsys.readouterr().out
+    assert f"WAIT groq-gpt-oss-20b quota until {until.strftime('%Y-%m-%dT%H:%M:%SZ')}" in out
+    assert "WARN" not in out
+
+
+def test_status_all_complete_and_freeze_passed(status_world, monkeypatch, capsys):
+    w = status_world
+    del w.procs[700]
+    w.base = FREEZE + datetime.timedelta(minutes=5)
+    monkeypatch.setattr(jobs, "model_status", lambda d, m: {"finished": 6, "expected": 6, "pending_infra": 0,
+                                                            "problems": []})
+    assert jobs.status(w.prefix, ["scratch-gpt"]) == "all-complete"
+    out = capsys.readouterr().out
+    assert "FREEZE passed" in out and "STATUS all-complete" in out
+
+
+def test_status_wait_returns_early_when_a_done_marker_appears(status_world, monkeypatch, capsys):
+    w = status_world
+    marker = os.path.join(w.out, "bench.done")
+
+    def sleep(seconds):
+        w.now += seconds
+        if w.now >= 15 and not os.path.exists(marker):
+            with open(marker, "w", encoding="utf-8") as f:
+                f.write("0\n")
+    monkeypatch.setattr(jobs, "_sleep", sleep)
+    jobs.status(w.prefix, ["scratch-gpt"], wait_s=1000)
+    assert 15 <= w.now < 400                    # capped at 400 s, returned at the marker
+    assert "done 0" in capsys.readouterr().out
+
+
+# ── report ──
+
+def test_report_merges_only_final_phase4_directories(tmp_path, monkeypatch, capsys):
+    prefix = str(tmp_path / "phase4")
+    for name in ("scratch-gpt", "groq-gpt-oss-20b", "control", "tracer-ollama", "smoke-scratch-gpt", "jobs",
+                 "report"):
+        os.makedirs(f"{prefix}-{name}")
+    sources = jobs.report_sources(prefix, f"{prefix}-report")
+    assert sorted(sources) == sorted([f"{prefix}-scratch-gpt", f"{prefix}-groq-gpt-oss-20b", f"{prefix}-control"])
+    calls = []
+    monkeypatch.setattr("src.benchmark.report.generate_report",
+                        lambda out, charts=True, sources=None, expected=None: calls.append((out, sources)) or [])
+    assert jobs.report(prefix, f"{prefix}-report") == 0
+    assert calls == [(f"{prefix}-report", sources)]
+    assert f"MERGE {prefix}-scratch-gpt" in capsys.readouterr().out
