@@ -177,8 +177,10 @@ def _scan_raw(raw_path: str) -> tuple:
     A run killed mid-write leaves a truncated last line; the report loader skips such
     lines, and so must the one place that has to survive that kill. A line counts as
     undecodable when it is not a JSON object with the four key fields. Finished
-    episodes, or ones ended by a provider refusal (an outcome, never retried), are
-    done; infrastructure-errored ones stay pending and are re-run from scratch.
+    episodes, or ones ended by a provider refusal (an outcome, never retried) or by a
+    local model's context overflow (deterministic at temperature 0, so a retry would
+    overflow again), are done; only infrastructure-errored ones stay pending and are
+    re-run from scratch.
     """
     done, bad = set(), 0
     with open(raw_path, encoding="utf-8", errors="replace") as f:
@@ -235,15 +237,25 @@ def _run_with_backoff(provider, case, arm, policy, max_steps, log):
     return episode, score
 
 
-def _work_queue(cases: list, runs: int, arms, seed: int) -> list:
+PRIORITY_KINDS = ("benign", "dh", "ds")
+
+
+def _work_queue(cases: list, runs: int, arms, seed: int, priority_kinds=()) -> list:
     """(case, run, arm) items, run-major. Within a run the cases are shuffled with a
     generator seeded from (seed, run) and each case's arms stay adjacent, so a run
-    stopped by a quota still holds both attack kinds and complete (case, run) pairs."""
+    stopped by a quota still holds both attack kinds and complete (case, run) pairs.
+
+    priority_kinds (D-02, e.g. ("ds",)) stably partitions that queue: items whose case
+    kind is listed come first, in their default order, then the rest in theirs. The set of
+    items is unchanged; only the order differs, so it is not part of a directory's plan."""
     queue = []
     for run in range(runs):
         order = list(cases)
         random.Random(seed * 1_000_003 + run).shuffle(order)
         queue += [(case, run, arm) for case in order for arm in arms]
+    if priority_kinds:
+        first = [item for item in queue if item[0].kind in priority_kinds]
+        queue = first + [item for item in queue if item[0].kind not in priority_kinds]
     return queue
 
 
@@ -274,7 +286,7 @@ def _write_manifest(out_dir: str, *, models: list, plan: dict, previous: dict,
 
 def run_benchmark(models: list, cases: list, out_dir: str, runs: int = 3, arms=ARMS,
                   max_steps: int = 5, sleep_s: float = 0.0, log=print, queue_seed: int = 0,
-                  requeue_passes: int = 1, manifest_extra: dict = None) -> str:
+                  requeue_passes: int = 1, manifest_extra: dict = None, priority_kinds=()) -> str:
     arms = _validate_arms(arms)
     plan = _plan(cases, runs, arms, max_steps, manifest_extra, queue_seed)
     previous = _read_manifest(out_dir)
@@ -299,7 +311,7 @@ def run_benchmark(models: list, cases: list, out_dir: str, runs: int = 3, arms=A
     _write_manifest(out_dir, models=models, plan=plan, previous=previous,
                     code_commit=code_commit, code_dirty=code_dirty,
                     policy_sha256=policy.policy_sha256)
-    queue = _work_queue(cases, runs, arms, queue_seed)
+    queue = _work_queue(cases, runs, arms, queue_seed, tuple(priority_kinds or ()))
     total = len(models) * len(cases) * runs * len(arms)
     count = len(done)
 
@@ -309,7 +321,7 @@ def run_benchmark(models: list, cases: list, out_dir: str, runs: int = 3, arms=A
             "case_id": case.id, "kind": case.kind, "attack_type": case.attack_type,
             "run": run, "arm": arm, **score,
             "actions": [s.action for s in episode.steps if s.action],
-            "final_message": episode.final_message[:500],
+            "final_message": str(episode.final_message or "")[:500],   # second IN-02 guard: always text
             # Provenance (EVAL-06): enough to tell resumed, drifted or truncated runs apart
             "code_commit": code_commit, "code_dirty": code_dirty,
             "policy_sha256": policy.policy_sha256,

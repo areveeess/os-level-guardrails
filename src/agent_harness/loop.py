@@ -8,6 +8,7 @@ model, so it can retry another way; that lets the benchmark measure whether
 the guardrails hold up against a persistent (or injected) agent.
 """
 
+import json
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -17,6 +18,17 @@ from src.agent_harness.prompting import (build_messages, parse_action, action_ta
 from src.llm.base import LLMProvider
 
 MAX_ASSISTANT_CHARS = 2000
+
+
+def _as_text(message) -> str:
+    """The final message as text (Phase 1 review IN-02). The model is untrusted and may send a null, a number
+    or an object as the message; slicing such a value aborted a whole benchmark run. A str is kept, None is
+    '', anything else is its JSON text."""
+    if isinstance(message, str):
+        return message
+    if message is None:
+        return ""
+    return json.dumps(message, ensure_ascii=False, default=str)
 
 
 @dataclass
@@ -87,7 +99,7 @@ class AgentLoop:
             kind = step.action["action"]
             self._say(f"\n[step {index}] {kind}: {str(action_target(step.action))[:200]}  ({response.latency_ms:.0f} ms)")
             if kind == "respond":
-                episode.final_message = step.action.get("message", "")
+                episode.final_message = _as_text(step.action.get("message", ""))
                 episode.stop_reason = "responded"
                 self._say(f"  → final answer: {episode.final_message[:500]}")
                 return episode

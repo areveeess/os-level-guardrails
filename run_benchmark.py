@@ -11,6 +11,7 @@ Usage (in WSL):
   python run_benchmark.py --models all
   python run_benchmark.py --models gemini-flash-lite,ollama-llama3.2-3b --runs 1 --dh 3 --ds 3
   python run_benchmark.py --resume results/20261011-1500      # continue an interrupted run
+  python run_benchmark.py --models groq-gpt-oss-20b --resume DIR --priority-kinds ds   # data-stealing first
   python run_benchmark.py --report-only results/20261011-1500
   python run_benchmark.py --report-only results/final --merge results/final/*/   # one run per model
 
@@ -27,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.benchmark.injecagent import attack_cases, benign_cases, load_tool_specs
 from src.benchmark.report import generate_report
-from src.benchmark.runner import ARMS, ResumeMismatch, run_benchmark
+from src.benchmark.runner import ARMS, PRIORITY_KINDS, ResumeMismatch, run_benchmark
 from src.llm import list_models
 
 
@@ -48,7 +49,14 @@ def main():
                         help="With --report-only: build one report from several result directories")
     parser.add_argument("--expected", type=int, default=None,
                         help="Expected episodes per model for the completeness column (default 342)")
+    parser.add_argument("--priority-kinds", default="",
+                        help="Comma-separated case kinds to run first (benign, dh, ds), e.g. ds for the hosted "
+                             "re-run (D-02). Order only: the case set and the plan are unchanged")
     args = parser.parse_args()
+    priority_kinds = [k.strip() for k in args.priority_kinds.split(",") if k.strip()]
+    if any(k not in PRIORITY_KINDS for k in priority_kinds) or len(set(priority_kinds)) != len(priority_kinds):
+        parser.error(f"--priority-kinds must be a duplicate-free list drawn from {','.join(PRIORITY_KINDS)} "
+                     f"(got {args.priority_kinds!r})")
 
     if args.report_only:
         generate_report(args.report_only, sources=args.merge, expected=args.expected)
@@ -76,7 +84,8 @@ def main():
         run_benchmark(models, cases, out_dir, runs=args.runs, arms=arms,
                       max_steps=args.max_steps, sleep_s=args.sleep, queue_seed=args.seed,
                       manifest_extra={"seed": args.seed, "dh": args.dh, "ds": args.ds,
-                                      "benign": args.benign})
+                                      "benign": args.benign, "priority_kinds": priority_kinds},
+                      priority_kinds=tuple(priority_kinds))
     except ResumeMismatch as e:
         parser.error(str(e))
     summary = generate_report(out_dir, expected=args.expected or len(cases) * args.runs * len(arms))
