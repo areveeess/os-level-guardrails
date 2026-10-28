@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: Qwen LoRA & hf_local Provider
 status: verifying
-stopped_at: Completed 03-04-PLAN.md
-last_updated: "2026-10-28T15:53:15.716Z"
+stopped_at: Completed 04-01-PLAN.md
+last_updated: "2026-10-28T18:17:34.891Z"
 last_activity: 2026-10-22
 last_activity_desc: Phase 3 execution started
-state_head: 3881dfb2751521d360e2558bdf6c117d012907e6
+state_head: 040d2f3ee0512f2b5aec606e118e91c3abe6abd4
 progress:
   total_phases: 5
   completed_phases: 2
-  total_plans: 12
-  completed_plans: 12
+  total_plans: 17
+  completed_plans: 13
   percent: 40
 ---
 
@@ -69,6 +69,7 @@ Progress: [████░░░░░░] 40% (Phase 1 of 5 complete)
 | Phase 03 P02 | 30min | 3 tasks | 4 files |
 | Phase 03 P03 | n/a | 3 tasks | 6 files |
 | Phase 03 P04 | multi-session | 3 tasks | 7 files |
+| Phase 04 P01 | 33min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -100,6 +101,9 @@ Recent decisions affecting current work:
 - [Phase 03]: 03-02: loss mask from tokenizer character offsets, never token ids; action-level mask excludes only respond message text (boundary BPE token excluded whole)
 - [Phase 03]: 03-02: PEFT all-linear resolves to full per-layer module names, targets verified by leaf name plus count 7 x layers; LORA-03 stays unchecked until the 03-04 GPU run
 - [Phase 03]: 03-04: D-05 600 steps kept (pilot estimate 42.5 min); D-06 retry not needed (dev_action_exact 0.9396); LORA-04 dev gate pass (parse 1.0000); decided before smoke runs
+- [Phase 04]: Ollama context raised by Modelfile variants (num_ctx 8192); owned server also gets OLLAMA_CONTEXT_LENGTH=8192
+- [Phase 04]: Measured Ollama 0.40.3 default context for llama3.2:3b is 4096 (api_ps); evidence band 4198-7782
+- [Phase 04]: Ollama 0.40.3 cuts over-long prompts to about half the window (2050 at 4096): truncation shows as a drop, not a plateau
 
 ### Pending Todos
 
@@ -134,6 +138,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-22T13:37:29.438Z
-Stopped at: Completed 03-04-PLAN.md
+Last session: 2026-10-28T18:17:34.023Z
+Stopped at: Completed 04-01-PLAN.md
 Resume file: None
