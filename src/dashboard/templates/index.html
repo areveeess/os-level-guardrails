@@ -1,978 +1,968 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Guardrails — Security Monitor</title>
-    <!-- Preconnect for performance -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        /* ── Tokens ─────────────────────────────────────────── */
-        :root {
-            --bg:         #0F172A;
-            --bg-subtle:  #131c31;
-            --card:       rgba(27,35,54,0.75);
-            --card-solid: #1B2336;
-            --card-hover: #222d47;
-            --border:     rgba(148,163,184,0.25);
-            --border-light: rgba(255,255,255,0.08);
-            --fg:         #F8FAFC;
-            --fg-2:       #E2E8F0;
-            --fg-3:       #CBD5E1;
-            --fg-4:       #94A3B8; /* Elevated contrast: 6.98:1 on #0F172A (passes WCAG AA & AAA) */
-            --green:      #4ADE80;
-            --green-bg:   rgba(34,197,94,0.16);
-            --green-bdr:  rgba(74,222,128,0.45);
-            --red:        #F87171;
-            --red-bg:     rgba(239,68,68,0.18);
-            --red-bdr:    rgba(248,113,113,0.45);
-            --amber:      #FBBF24;
-            --amber-bg:   rgba(245,158,11,0.16);
-            --amber-bdr:  rgba(251,191,36,0.45);
-            --blue:       #60A5FA;
-            --blue-bg:    rgba(59,130,246,0.15);
-            --violet:     #A78BFA;
-            --violet-bg:  rgba(139,92,246,0.15);
-            --cyan:       #38BDF8;
-            --cyan-bg:    rgba(56,189,248,0.15);
-            --orange:     #FB923C;
-            --orange-bg:  rgba(249,115,22,0.15);
-            --glass:      blur(16px);
-            --radius:     14px;
-            --radius-sm:  8px;
-            --radius-xs:  5px;
-            --sans:       'Fira Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            --mono:       'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Guardrails Reference Monitor</title>
+<meta name="description" content="Live view of every action an LLM agent attempted and the defense layer that allowed, flagged or blocked it.">
+<meta name="color-scheme" content="dark light">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.2.5/400.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.2.5/500.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.2.5/600.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5.2.5/400.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5.2.5/500.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.2/src/regular/style.css">
+<script>
+    // Apply a remembered theme before first paint so the page does not flash.
+    try {
+        const t = localStorage.getItem('guardrails-theme');
+        if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+    } catch (e) { /* storage unavailable: follow the system theme */ }
+</script>
+<style>
+    /* ── Tokens ──
+       Monochrome graphite UI. The only hues are the three decision colours, and every one is
+       paired with an icon and a word, so the state never depends on colour alone. */
+    :root {
+        --bg: #f4f5f6;
+        --surface: #ffffff;
+        --surface-2: #eceef0;
+        --line: #d5d9dd;
+        --line-strong: #b4bac1;
+        --ink: #15181b;
+        --ink-2: #444b53;
+        --ink-3: #636b74;
+        --invert-bg: #15181b;
+        --invert-ink: #f4f5f6;
+
+        --allow: #17784a;
+        --allow-bg: #e3f2ea;
+        --flag: #8a5a00;
+        --flag-bg: #fbefd6;
+        --block: #b3261e;
+        --block-bg: #fbe4e2;
+
+        --bar-allow: #2f9e66;
+        --bar-flag: #d49a1c;
+        --bar-block: #d0433a;
+
+        --sans: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+        --mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+        --r: 2px;
+        --gutter: clamp(16px, 3vw, 32px);
+    }
+    @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+            --bg: #0f1113;
+            --surface: #16191c;
+            --surface-2: #1d2125;
+            --line: #2a2f34;
+            --line-strong: #3b4248;
+            --ink: #e8eaec;
+            --ink-2: #b3b9bf;
+            --ink-3: #8b939b;
+            --invert-bg: #e8eaec;
+            --invert-ink: #0f1113;
+
+            --allow: #5ccf93;
+            --allow-bg: #12291e;
+            --flag: #e9b54a;
+            --flag-bg: #2d2412;
+            --block: #f07a72;
+            --block-bg: #331a19;
+
+            --bar-allow: #3fae76;
+            --bar-flag: #d9a131;
+            --bar-block: #e0544b;
         }
+    }
+    :root[data-theme="dark"] {
+        --bg: #0f1113;
+        --surface: #16191c;
+        --surface-2: #1d2125;
+        --line: #2a2f34;
+        --line-strong: #3b4248;
+        --ink: #e8eaec;
+        --ink-2: #b3b9bf;
+        --ink-3: #8b939b;
+        --invert-bg: #e8eaec;
+        --invert-ink: #0f1113;
 
-        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+        --allow: #5ccf93;
+        --allow-bg: #12291e;
+        --flag: #e9b54a;
+        --flag-bg: #2d2412;
+        --block: #f07a72;
+        --block-bg: #331a19;
 
-        body {
-            font-family: var(--sans);
-            background: var(--bg);
-            color: var(--fg);
-            min-height: 100vh;
-            line-height: 1.5;
-            -webkit-font-smoothing: antialiased;
+        --bar-allow: #3fae76;
+        --bar-flag: #d9a131;
+        --bar-block: #e0544b;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+        margin: 0;
+        min-height: 100dvh;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: var(--sans);
+        font-size: 14px;
+        line-height: 1.5;
+        font-feature-settings: 'tnum' 1;
+        -webkit-font-smoothing: antialiased;
+    }
+    button, input { font: inherit; color: inherit; }
+    code, .mono { font-family: var(--mono); }
+    :focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+    .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+    }
+    .wrap { max-width: 1440px; margin: 0 auto; padding: 0 var(--gutter); }
+
+    /* ── Top bar ── */
+    .top {
+        position: sticky; top: 0; z-index: 10;
+        background: var(--bg);
+        border-bottom: 1px solid var(--line);
+    }
+    .top .wrap {
+        display: flex; align-items: center; gap: 24px;
+        min-height: 60px;
+    }
+    .brand { display: flex; align-items: baseline; gap: 10px; white-space: nowrap; }
+    .brand-name { font-weight: 600; font-size: 15px; letter-spacing: -0.01em; }
+    .brand-sub { color: var(--ink-3); font-size: 13px; }
+    .meta { display: flex; gap: 24px; margin-left: auto; min-width: 0; }
+    .meta-item { display: flex; flex-direction: column; min-width: 0; }
+    .meta-k { font-size: 11px; color: var(--ink-3); }
+    .meta-v {
+        font-family: var(--mono); font-size: 12.5px; color: var(--ink);
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px;
+    }
+    .controls { display: flex; align-items: center; gap: 8px; }
+    .live {
+        display: inline-flex; align-items: center; gap: 8px;
+        font-size: 12.5px; color: var(--ink-2); padding: 0 6px; white-space: nowrap;
+    }
+    .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--bar-allow); }
+    .live[data-state="down"] .live-dot { background: var(--bar-block); }
+    .live[data-state="wait"] .live-dot { background: var(--ink-3); }
+
+    .btn {
+        display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+        height: 34px; padding: 0 12px;
+        border: 1px solid var(--line-strong); border-radius: var(--r);
+        background: var(--surface); color: var(--ink);
+        font-size: 13px; font-weight: 500; white-space: nowrap; cursor: pointer;
+        transition: background-color .15s ease, border-color .15s ease, color .15s ease, transform .08s ease;
+    }
+    .btn:hover { background: var(--surface-2); }
+    .btn:active { transform: translateY(1px); }
+    .btn i { font-size: 16px; }
+    .btn-icon { width: 34px; padding: 0; }
+    .btn-danger { color: var(--block); min-width: 132px; }
+    .btn-danger[data-armed="true"] { background: var(--block); border-color: var(--block); color: var(--surface); }
+    .btn[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
+    .btn[aria-disabled="true"]:active { transform: none; }
+
+    /* ── Sections ── */
+    main { padding: 28px 0 48px; }
+    section { margin-bottom: 36px; }
+    h2 {
+        margin: 0 0 14px; font-size: 15px; font-weight: 600; letter-spacing: -0.005em;
+        display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    }
+    h2 .h-note { font-size: 12.5px; font-weight: 400; color: var(--ink-3); }
+
+    /* ── Decision ledger ── */
+    .ledger {
+        display: grid;
+        grid-template-columns: minmax(180px, 260px) 1fr;
+        gap: 0;
+        background: var(--surface);
+        border: 1px solid var(--line); border-radius: var(--r);
+    }
+    .ledger-total { padding: 20px 24px; border-right: 1px solid var(--line); }
+    .ledger-k { font-size: 12.5px; color: var(--ink-3); }
+    .ledger-n {
+        font-size: 52px; font-weight: 600; line-height: 1.05; letter-spacing: -0.03em;
+        margin-top: 6px;
+    }
+    .ledger-src { font-size: 12px; color: var(--ink-3); margin-top: 10px; }
+    .ledger-body { padding: 20px 24px; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+    .bar {
+        display: flex; height: 14px; border-radius: var(--r); overflow: hidden;
+        gap: 2px;
+    }
+    .bar-seg { height: 100%; min-width: 0; }
+    .bar-seg[data-d="ALLOW"] { background: var(--bar-allow); }
+    .bar-seg[data-d="FLAG"] { background: var(--bar-flag); }
+    .bar-seg[data-d="BLOCK"] { background: var(--bar-block); }
+    .bar[data-empty="true"] { outline: 1px dashed var(--line-strong); outline-offset: -1px; }
+    .tallies { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+    .tally { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .tally-head { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 500; }
+    .tally-head i { font-size: 16px; }
+    .tally[data-d="ALLOW"] .tally-head { color: var(--allow); }
+    .tally[data-d="FLAG"] .tally-head { color: var(--flag); }
+    .tally[data-d="BLOCK"] .tally-head { color: var(--block); }
+    .tally-n { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; }
+    .tally-p { font-size: 12.5px; color: var(--ink-3); font-family: var(--mono); }
+
+    /* ── Mediation path ── */
+    .path {
+        display: grid;
+        grid-template-columns: auto repeat(var(--stages, 4), minmax(0, 1fr)) auto;
+        align-items: stretch;
+        border: 1px solid var(--line); border-radius: var(--r);
+        background: var(--surface);
+        overflow: hidden;
+    }
+    .end {
+        display: flex; flex-direction: column; justify-content: center; gap: 4px;
+        padding: 16px 18px; background: var(--surface-2);
+        font-size: 12.5px; color: var(--ink-2); white-space: nowrap;
+    }
+    .end i { font-size: 20px; color: var(--ink-3); }
+    .stage {
+        position: relative;
+        padding: 16px 18px 18px;
+        border-left: 1px solid var(--line);
+        display: flex; flex-direction: column; gap: 4px; min-width: 0;
+    }
+    .stage-tag { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
+    .stage-name { font-weight: 600; font-size: 14px; }
+    .stage-mech { font-size: 12.5px; color: var(--ink-3); min-height: 2.6em; }
+    .stage-n { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.15; margin-top: 8px; }
+    .stage-n[data-zero="true"] { color: var(--ink-3); }
+    .stage-cap { font-size: 12.5px; color: var(--ink-2); }
+    .stage-cap b { font-weight: 500; color: var(--block); }
+    .stage-off { font-size: 12px; color: var(--flag); display: flex; gap: 6px; align-items: center; margin-top: 6px; }
+    .stage::after {
+        /* Flow marker between consecutive layers: an action only reaches a layer if the
+           previous one let it through. */
+        content: ''; position: absolute; top: 50%; left: -5px;
+        width: 8px; height: 8px; transform: translateY(-50%) rotate(45deg);
+        background: var(--surface); border-top: 1px solid var(--line); border-right: 1px solid var(--line);
+    }
+
+    /* ── Event stream ── */
+    .toolbar {
+        display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+        padding: 10px 12px;
+        background: var(--surface);
+        border: 1px solid var(--line); border-bottom: 0;
+        border-radius: var(--r) var(--r) 0 0;
+    }
+    .seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--r); overflow: hidden; }
+    .seg button {
+        border: 0; background: transparent; padding: 0 12px; height: 30px;
+        font-size: 12.5px; color: var(--ink-2); cursor: pointer; white-space: nowrap;
+        border-left: 1px solid var(--line-strong);
+    }
+    .seg button:first-child { border-left: 0; }
+    .seg button[aria-pressed="true"] { background: var(--invert-bg); color: var(--invert-ink); }
+    .seg .c { font-family: var(--mono); margin-left: 6px; opacity: .8; }
+    .search { position: relative; flex: 1 1 220px; max-width: 360px; }
+    .search i { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--ink-3); }
+    .search input {
+        width: 100%; height: 32px; padding: 0 10px 0 32px;
+        border: 1px solid var(--line-strong); border-radius: var(--r);
+        background: var(--bg);
+        font-size: 13px;
+    }
+    .search input::placeholder { color: var(--ink-3); }
+    .shown { margin-left: auto; font-size: 12.5px; color: var(--ink-3); font-family: var(--mono); }
+
+    .tbl-wrap {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 0 0 var(--r) var(--r);
+        overflow-x: auto;
+    }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    thead th {
+        text-align: left; font-size: 12px; font-weight: 500; color: var(--ink-3);
+        padding: 9px 12px; border-bottom: 1px solid var(--line);
+        background: var(--surface-2);
+        white-space: nowrap;
+    }
+    col.c-time { width: 92px; }
+    col.c-dec { width: 104px; }
+    col.c-layer { width: 132px; }
+    col.c-act { width: 128px; }
+    col.c-tgt { width: 38%; }
+    tbody td {
+        padding: 9px 12px; vertical-align: top;
+        border-bottom: 1px solid var(--line);
+        font-size: 13px;
+    }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr { cursor: pointer; }
+    tbody tr:hover td { background: var(--surface-2); }
+    tbody tr[data-d="BLOCK"] td:first-child { box-shadow: inset 3px 0 0 var(--bar-block); }
+    tbody tr[data-d="FLAG"] td:first-child { box-shadow: inset 3px 0 0 var(--bar-flag); }
+    .t-time { font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); white-space: nowrap; }
+    .dec {
+        display: inline-flex; align-items: center; gap: 5px;
+        font-family: var(--mono); font-size: 12px; font-weight: 500;
+        padding: 1px 7px 1px 5px; border-radius: var(--r);
+    }
+    .dec i { font-size: 14px; }
+    .dec[data-d="ALLOW"] { color: var(--allow); background: var(--allow-bg); }
+    .dec[data-d="FLAG"] { color: var(--flag); background: var(--flag-bg); }
+    .dec[data-d="BLOCK"] { color: var(--block); background: var(--block-bg); }
+    .dec[data-d="OTHER"] { color: var(--ink-2); background: var(--surface-2); }
+    .layer { font-size: 12.5px; color: var(--ink-2); }
+    .act { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); }
+    .act i { font-size: 15px; color: var(--ink-3); }
+    .tgt, .rsn {
+        overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1;
+        word-break: break-all;
+    }
+    .tgt { font-family: var(--mono); font-size: 12.5px; color: var(--ink); }
+    .rsn { color: var(--ink-2); word-break: break-word; }
+    tr[aria-expanded="true"] .tgt, tr[aria-expanded="true"] .rsn {
+        -webkit-line-clamp: unset; display: block;
+        max-height: 14em; overflow-y: auto;  /* fuzzing payloads run to 10,000 characters */
+    }
+    tr[aria-expanded="true"] td { background: var(--surface-2); }
+
+    @media (prefers-reduced-motion: no-preference) {
+        .bar-seg { transition: flex-grow .4s cubic-bezier(.2,.7,.2,1); }
+        tr.is-new td { animation: arrive 1.6s ease-out; }
+        @keyframes arrive {
+            from { background: var(--surface-2); }
+            to { background: transparent; }
         }
+    }
 
-        /* Subtle grid background */
-        body::before {
-            content: '';
-            position: fixed;
-            inset: 0;
-            background-image:
-                linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px);
-            background-size: 64px 64px;
-            pointer-events: none;
-            z-index: 0;
-        }
+    /* Skeleton rows match the final row shape while the first fetch is in flight. */
+    .sk td span {
+        display: block; height: 10px; margin: 4px 0; border-radius: var(--r);
+        background: var(--surface-2);
+    }
 
-        /* Top glow */
-        body::after {
-            content: '';
-            position: fixed;
-            top: -200px;
-            left: 50%;
-            transform: translateX(-50%);
-            width: 800px;
-            height: 400px;
-            background: radial-gradient(ellipse, rgba(59,130,246,0.08) 0%, transparent 70%);
-            pointer-events: none;
-            z-index: 0;
-        }
+    .empty {
+        display: none;
+        padding: 40px 24px 44px;
+        background: var(--surface);
+        border: 1px solid var(--line); border-top: 0;
+        border-radius: 0 0 var(--r) var(--r);
+    }
+    .empty[data-show="true"] { display: block; }
+    .empty-h { font-size: 15px; font-weight: 600; margin: 0 0 6px; }
+    .empty-p { color: var(--ink-2); margin: 0 0 16px; max-width: 62ch; }
+    .cmds { display: grid; gap: 8px; max-width: 560px; }
+    .cmd {
+        display: flex; gap: 12px; align-items: baseline;
+        padding: 8px 12px; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r);
+    }
+    .cmd code { font-size: 12.5px; color: var(--ink); overflow-wrap: anywhere; }
+    .cmd span { font-size: 12px; color: var(--ink-3); margin-left: auto; white-space: nowrap; }
 
-        /* ── Screen Reader Utility ───────────────────────────── */
-        .sr-only {
-            position: absolute;
-            width: 1px;
-            height: 1px;
-            padding: 0;
-            margin: -1px;
-            overflow: hidden;
-            clip: rect(0, 0, 0, 0);
-            white-space: nowrap;
-            border-width: 0;
-        }
+    .foot {
+        border-top: 1px solid var(--line);
+        padding: 18px 0 28px; color: var(--ink-3); font-size: 12.5px;
+    }
+    .foot .wrap { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 
-        /* ── Shell ──────────────────────────────────────────── */
-        .shell {
-            position: relative;
-            z-index: 1;
-            max-width: 1360px;
-            margin: 0 auto;
-            padding: 28px 36px 36px;
-        }
+    /* ── Tablet: meta strip moves under the bar, path wraps to two columns ── */
+    @media (max-width: 1080px) {
+        .top .wrap { flex-wrap: wrap; row-gap: 6px; padding-top: 10px; padding-bottom: 10px; }
+        .meta { order: 3; flex-basis: 100%; margin-left: 0; }
+        .controls { margin-left: auto; }
+        .path { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .end { display: none; }
+        /* Hairlines drawn into the neighbouring cell; the container clips the outer edges. */
+        .stage { border-left: 0; box-shadow: -1px -1px 0 var(--line); }
+        .stage::after { display: none; }
+    }
 
-        /* ── Navbar ─────────────────────────────────────────── */
-        .navbar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-bottom: 32px;
-        }
+    /* ── Phone: stacked records instead of a table ── */
+    @media (max-width: 720px) {
+        body { font-size: 14px; }
+        /* A two-row sticky bar would cover a fifth of a phone screen. */
+        .top { position: static; }
+        .brand-sub { display: none; }
+        .meta { gap: 16px; overflow-x: auto; }
+        .meta-v { max-width: 160px; }
+        .live-text { display: none; }
+        main { padding-top: 20px; }
+        .ledger { grid-template-columns: 1fr; }
+        .ledger-total { border-right: 0; border-bottom: 1px solid var(--line); padding: 16px; }
+        .ledger-n { font-size: 44px; }
+        .ledger-body { padding: 16px; }
+        .tallies { gap: 10px; }
+        .tally-n { font-size: 22px; }
+        .path { grid-template-columns: 1fr; }
+        .stage { display: grid; grid-template-columns: 1fr auto; column-gap: 12px; padding: 14px 16px; }
+        .stage-tag, .stage-name, .stage-mech, .stage-off { grid-column: 1; }
+        .stage-mech { min-height: 0; }
+        .stage-n { grid-column: 2; grid-row: 1 / span 3; margin: 0; align-self: center; text-align: right; }
+        .stage-cap { grid-column: 2; grid-row: 4; text-align: right; }
+        .search { max-width: none; flex-basis: 100%; order: 2; }
+        .seg { order: 1; }
+        .shown { order: 3; margin-left: 0; }
+        .seg button { padding: 0 10px; }
 
-        .nav-brand {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        .nav-logo {
-            width: 36px; height: 36px;
-            background: linear-gradient(135deg, var(--blue), var(--violet));
-            border-radius: 10px;
-            display: grid; place-items: center;
-        }
-
-        .nav-logo svg { width: 20px; height: 20px; color: #fff; }
-
-        .nav-name {
-            font-weight: 700;
-            font-size: 1.1rem;
-            letter-spacing: -0.02em;
-        }
-
-        .nav-sep {
-            color: var(--fg-4);
-            margin: 0 4px;
-            font-weight: 300;
-        }
-
-        .nav-page {
-            color: var(--fg-3);
-            font-weight: 400;
-        }
-
-        .nav-actions {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        .chip {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-size: 0.75rem;
-            font-weight: 600;
-            letter-spacing: 0.03em;
-            border: 1px solid;
-            transition: all 0.2s ease;
-        }
-
-        .chip-live {
-            color: var(--green);
-            background: var(--green-bg);
-            border-color: var(--green-bdr);
-        }
-
-        .chip-live .dot {
-            width: 8px; height: 8px;
-            border-radius: 50%;
-            background: var(--green);
-            animation: blink 2s ease-in-out infinite;
-        }
-
-        .chip-offline {
-            color: var(--red);
-            background: var(--red-bg);
-            border-color: var(--red-bdr);
-        }
-
-        .chip-offline .dot {
-            width: 8px; height: 8px;
-            border-radius: 50%;
-            background: var(--red);
-            animation: none;
-        }
-
-        @keyframes blink {
-            0%,100% { opacity: 1; }
-            50% { opacity: 0.3; }
-        }
-
-        /* Accessible touch target >= 44x44px */
-        .btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            min-height: 44px;
-            min-width: 44px;
-            padding: 8px 18px;
-            border: 1px solid var(--border);
-            border-radius: var(--radius-sm);
-            background: var(--card);
-            backdrop-filter: var(--glass);
-            color: var(--fg-3);
-            font-family: var(--sans);
-            font-size: 0.82rem;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.15s ease;
-        }
-
-        .btn:hover:not(:disabled) { background: var(--card-hover); color: var(--fg); border-color: var(--fg-3); }
-        .btn:active:not(:disabled) { transform: scale(0.97); }
-        .btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-
-        .btn:disabled {
-            opacity: 0.4;
-            cursor: not-allowed;
-            border-color: var(--border-light);
-            pointer-events: none;
-        }
-
-        .btn svg { width: 15px; height: 15px; }
-
-        /* ── Metric Strip ───────────────────────────────────── */
-        .metrics {
+        table, thead, tbody, tr, td { display: block; width: 100%; }
+        colgroup, thead { display: none; }
+        tbody tr {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 14px;
-            margin-bottom: 28px;
+            grid-template-columns: auto 1fr auto;
+            grid-template-areas: "dec layer time" "tgt tgt tgt" "rsn rsn rsn" "act act act";
+            gap: 4px 10px;
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--line);
         }
-
-        .metric {
-            background: var(--card);
-            backdrop-filter: var(--glass);
-            border: 1px solid var(--border-light);
-            border-radius: var(--radius);
-            padding: 22px 24px 18px;
-            position: relative;
-            overflow: hidden;
-            transition: border-color 0.2s;
-        }
-
-        .metric:hover { border-color: var(--border); }
-
-        .metric-glow {
-            position: absolute;
-            top: -1px; left: 24px; right: 24px;
-            height: 2px;
-            border-radius: 0 0 2px 2px;
-        }
-
-        .m-total .metric-glow { background: linear-gradient(90deg, var(--blue), var(--violet)); }
-        .m-allow .metric-glow { background: var(--green); }
-        .m-block .metric-glow { background: var(--red); }
-        .m-flag  .metric-glow { background: var(--amber); }
-
-        .metric-head {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-bottom: 12px;
-        }
-
-        .metric-label {
-            font-size: 0.72rem;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.07em;
-            color: var(--fg-3);
-        }
-
-        .metric-icon {
-            width: 28px; height: 28px;
-            border-radius: var(--radius-xs);
-            display: grid; place-items: center;
-        }
-
-        .metric-icon svg { width: 15px; height: 15px; }
-
-        .m-total .metric-icon { background: var(--blue-bg); color: var(--blue); }
-        .m-allow .metric-icon { background: var(--green-bg); color: var(--green); }
-        .m-block .metric-icon { background: var(--red-bg); color: var(--red); }
-        .m-flag  .metric-icon { background: var(--amber-bg); color: var(--amber); }
-
-        .metric-val {
-            font-size: 2.4rem;
-            font-weight: 700;
-            letter-spacing: -0.04em;
-            line-height: 1;
-            font-variant-numeric: tabular-nums;
-            transition: transform 0.2s ease;
-        }
-
-        .m-total .metric-val { color: var(--fg); }
-        .m-allow .metric-val { color: var(--green); }
-        .m-block .metric-val { color: var(--red); }
-        .m-flag  .metric-val { color: var(--amber); }
-
-        .metric-val.pop { transform: scale(1.08); }
-
-        /* ── Table Card ─────────────────────────────────────── */
-        .panel {
-            background: var(--card);
-            backdrop-filter: var(--glass);
-            border: 1px solid var(--border-light);
-            border-radius: var(--radius);
-            overflow: hidden;
-        }
-
-        .panel-bar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 14px 22px;
-            border-bottom: 1px solid var(--border-light);
-        }
-
-        .panel-title {
-            font-size: 0.85rem;
-            font-weight: 600;
-        }
-
-        .panel-badge {
-            font-size: 0.72rem;
-            font-family: var(--mono);
-            color: var(--fg-3);
-            background: var(--bg);
-            padding: 4px 10px;
-            border-radius: 10px;
-            border: 1px solid var(--border-light);
-        }
-
-        .tbl-scroll { overflow-x: auto; }
-
-        table { width: 100%; border-collapse: collapse; }
-
-        thead th {
-            padding: 11px 20px;
-            font-size: 0.68rem;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.07em;
-            color: var(--fg-3);
-            text-align: left;
-            background: var(--bg-subtle);
-            border-bottom: 1px solid var(--border-light);
-            white-space: nowrap;
-            position: sticky; top: 0; z-index: 2;
-        }
-
-        tbody td {
-            padding: 12px 20px;
-            font-size: 0.8rem;
-            color: var(--fg-2);
-            border-bottom: 1px solid var(--border-light);
-            vertical-align: middle;
-        }
-
-        tbody tr { transition: background 0.12s; }
-        tbody tr:hover { background: rgba(255,255,255,0.03); }
-
-        /* Time */
-        .c-time {
-            font-family: var(--mono);
-            font-size: 0.74rem;
-            color: var(--fg-4);
-            white-space: nowrap;
-        }
-
-        /* Action & Layer pills */
-        .pill {
-            display: inline-flex;
-            align-items: center;
-            gap: 5px;
-            padding: 3px 10px;
-            border-radius: var(--radius-xs);
-            font-family: var(--mono);
-            font-size: 0.7rem;
-            font-weight: 500;
-            white-space: nowrap;
-        }
-
-        .pill svg { width: 13px; height: 13px; flex-shrink: 0; }
-
-        .pill-shell   { background: var(--violet-bg); color: var(--violet); }
-        .pill-read    { background: var(--green-bg);  color: var(--green);  }
-        .pill-write   { background: var(--orange-bg); color: var(--orange); }
-        .pill-http    { background: var(--blue-bg);   color: var(--blue);   }
-        .pill-respond { background: rgba(148,163,184,0.15); color: var(--fg-2); }
-
-        /* Defense Layer Pills */
-        .pill-layer-policy  { background: var(--cyan-bg);   color: var(--cyan);   border: 1px solid rgba(56,189,248,0.3); }
-        .pill-layer-sandbox { background: var(--violet-bg); color: var(--violet); border: 1px solid rgba(167,139,250,0.3); }
-        .pill-layer-seccomp { background: var(--orange-bg); color: var(--orange); border: 1px solid rgba(251,146,60,0.3); }
-
-        /* Target & Reason with interactive copy capability */
-        .c-target {
-            font-family: var(--mono);
-            font-size: 0.75rem;
-            color: var(--fg-2);
-            max-width: 300px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            cursor: pointer;
-            transition: color 0.15s ease;
-        }
-
-        .c-target:hover {
-            color: var(--cyan);
-            text-decoration: underline;
-            text-decoration-style: dotted;
-            text-underline-offset: 3px;
-        }
-
-        .c-reason {
-            font-size: 0.76rem;
-            color: var(--fg-3);
-            max-width: 280px;
-            cursor: pointer;
-            transition: color 0.15s ease;
-        }
-
-        .c-reason:hover {
-            color: var(--fg);
-        }
-
-        /* Decision Tags with accessible contrast (exceeds WCAG AA 4.5:1) */
-        .tag {
-            display: inline-flex;
-            align-items: center;
-            gap: 5px;
-            padding: 4px 10px;
-            border-radius: var(--radius-xs);
-            font-size: 0.7rem;
-            font-weight: 700;
-            letter-spacing: 0.04em;
-            text-transform: uppercase;
-            border: 1px solid;
-        }
-
-        .tag svg { width: 12px; height: 12px; }
-
-        .tag-allow { background: var(--green-bg); color: #86EFAC; border-color: var(--green-bdr); }
-        .tag-block { background: var(--red-bg);   color: #FCA5A5; border-color: var(--red-bdr);   }
-        .tag-flag  { background: var(--amber-bg); color: #FDE68A; border-color: var(--amber-bdr); }
-
-        /* ── Empty ──────────────────────────────────────────── */
-        .empty {
-            padding: 72px 24px;
-            text-align: center;
-        }
-
-        .empty svg { width: 48px; height: 48px; color: var(--fg-4); opacity: 0.35; margin-bottom: 16px; }
-        .empty-h { font-size: 0.95rem; font-weight: 600; color: var(--fg-2); margin-bottom: 6px; }
-        .empty-p { font-size: 0.82rem; color: var(--fg-3); }
-        .empty-p code {
-            background: var(--bg);
-            padding: 3px 8px;
-            border-radius: 4px;
-            font-family: var(--mono);
-            font-size: 0.78rem;
-            color: var(--blue);
-            border: 1px solid var(--border-light);
-        }
-
-        /* ── Row animation ──────────────────────────────────── */
-        @keyframes fadeUp {
-            from { opacity: 0; transform: translateY(-6px); }
-            to   { opacity: 1; transform: translateY(0); }
-        }
-        .row-new { animation: fadeUp 0.35s cubic-bezier(0.22,1,0.36,1) forwards; }
-
-        /* ── Toast Notification ─────────────────────────────── */
-        .toast {
-            position: fixed;
-            bottom: 24px;
-            right: 24px;
-            background: var(--card-solid);
-            color: var(--fg);
-            border: 1px solid var(--border);
-            padding: 10px 18px;
-            border-radius: var(--radius-sm);
-            font-size: 0.8rem;
-            font-family: var(--sans);
-            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-            z-index: 100;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            opacity: 0;
-            transform: translateY(8px);
-            transition: opacity 0.2s ease, transform 0.2s ease;
-            pointer-events: none;
-        }
-
-        .toast.show {
-            opacity: 1;
-            transform: translateY(0);
-        }
-
-        /* ── Footer ─────────────────────────────────────────── */
-        .foot {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-            margin-top: 32px;
-            padding: 18px 0;
-            border-top: 1px solid var(--border-light);
-        }
-
-        .foot-chip {
-            font-family: var(--mono);
-            font-size: 0.68rem;
-            color: var(--fg-3);
-            background: var(--card-solid);
-            border: 1px solid var(--border-light);
-            padding: 4px 11px;
-            border-radius: 4px;
-        }
-
-        .foot-sep { color: var(--fg-4); font-size: 0.5rem; opacity: 0.5; }
-
-        /* ── Responsive ─────────────────────────────────────── */
-        @media (max-width: 900px) {
-            .shell { padding: 16px; }
-            .metrics { grid-template-columns: 1fr 1fr; }
-            .navbar { flex-wrap: wrap; gap: 12px; }
-            .c-reason {
-                display: block;
-                max-width: 200px;
-                white-space: normal;
-                font-size: 0.72rem;
-            }
-        }
-
-        @media (max-width: 500px) {
-            .metrics { grid-template-columns: 1fr 1fr; gap: 8px; }
-            .metric { padding: 16px; }
-            .metric-val { font-size: 1.8rem; }
-        }
-
-        /* Intentional reduced motion alternative (WCAG 2.1 §2.3.3 compliant) */
-        @media (prefers-reduced-motion: reduce) {
-            .chip-live .dot { animation: none; opacity: 1; }
-            .row-new { animation: none; }
-            .metric-val.pop { transform: none; }
-            *, *::before, *::after {
-                transition-duration: 0.01ms !important;
-                scroll-behavior: auto !important;
-            }
-        }
-    </style>
+        tbody tr:last-child { border-bottom: 0; }
+        tbody td { padding: 0; border: 0; background: transparent !important; }
+        tbody tr[data-d="BLOCK"] td:first-child, tbody tr[data-d="FLAG"] td:first-child { box-shadow: none; }
+        tbody tr[data-d="BLOCK"] { box-shadow: inset 3px 0 0 var(--bar-block); }
+        tbody tr[data-d="FLAG"] { box-shadow: inset 3px 0 0 var(--bar-flag); }
+        tbody tr[aria-expanded="true"] { background: var(--surface-2); }
+        td.c-time { grid-area: time; text-align: right; }
+        td.c-dec { grid-area: dec; }
+        td.c-layer { grid-area: layer; align-self: center; }
+        td.c-act { grid-area: act; }
+        td.c-tgt { grid-area: tgt; margin-top: 4px; }
+        td.c-rsn { grid-area: rsn; }
+        .tgt, .rsn { -webkit-line-clamp: 2; }
+        .sk { display: block !important; }
+        .cmd { flex-direction: column; gap: 2px; }
+        .cmd span { margin-left: 0; }
+    }
+</style>
 </head>
 <body>
-<div class="shell">
 
-    <!-- Screen Reader Live Announcer -->
-    <div id="sr-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+<div id="sr-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
 
-    <!-- Toast Container -->
-    <div id="toast" class="toast" role="status" aria-live="polite"></div>
-
-    <!-- Navbar -->
-    <nav class="navbar" aria-label="Main Navigation">
-        <div class="nav-brand">
-            <div class="nav-logo">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            </div>
-            <span class="nav-name">Guardrails<span class="nav-sep"> / </span><span class="nav-page">Monitor</span></span>
+<header class="top">
+    <div class="wrap">
+        <div class="brand">
+            <span class="brand-name">Guardrails</span>
+            <span class="brand-sub">Reference monitor</span>
         </div>
-        <div class="nav-actions">
-            <div class="chip chip-live" id="status-chip" role="status" aria-label="Live monitoring active">
-                <span class="dot" aria-hidden="true"></span>
-                <span id="status-text">Live</span>
+        <div class="meta">
+            <div class="meta-item">
+                <span class="meta-k">Agent model</span>
+                <span class="meta-v" id="m-model" title="{{ info.model }}">{{ info.model }}</span>
             </div>
-            <button class="btn" id="btn-clear" type="button" onclick="clearLogs()" aria-label="Clear all security event logs">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
-                Clear
+            <div class="meta-item">
+                <span class="meta-k">Monitor host</span>
+                <span class="meta-v" id="m-platform">{{ info.platform }}</span>
+            </div>
+            <div class="meta-item">
+                <span class="meta-k">Kernel layers</span>
+                <span class="meta-v" id="m-kernel">{{ 'available' if info.is_linux else 'Linux only' }}</span>
+            </div>
+        </div>
+        <div class="controls">
+            <span class="live" id="live" data-state="wait" role="status">
+                <span class="live-dot" aria-hidden="true"></span>
+                <span class="live-text" id="live-text">Connecting</span>
+            </span>
+            <button class="btn btn-icon" id="btn-theme" type="button" aria-label="Switch colour theme">
+                <i class="ph ph-circle-half" aria-hidden="true"></i>
+            </button>
+            <button class="btn btn-danger" id="btn-clear" type="button" aria-disabled="true">
+                <i class="ph ph-trash" aria-hidden="true"></i>
+                <span id="btn-clear-label">Clear log</span>
             </button>
         </div>
-    </nav>
+    </div>
+</header>
 
-    <!-- Metrics -->
-    <section class="metrics" aria-label="Security Metrics Summary" aria-live="polite" aria-atomic="true">
-        <div class="metric m-total">
-            <div class="metric-glow"></div>
-            <div class="metric-head">
-                <span class="metric-label">Total Events</span>
-                <div class="metric-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+<main class="wrap">
+
+    <section aria-labelledby="h-decisions">
+        <h2 id="h-decisions">Decisions</h2>
+        <div class="ledger">
+            <div class="ledger-total">
+                <div class="ledger-k">Actions mediated</div>
+                <div class="ledger-n" id="s-total">0</div>
+                <div class="ledger-src mono">logs/guardrails.jsonl</div>
+            </div>
+            <div class="ledger-body">
+                <div class="bar" id="bar" data-empty="true" role="img" aria-label="No decisions recorded">
+                    <div class="bar-seg" data-d="ALLOW" style="flex-grow:0"></div>
+                    <div class="bar-seg" data-d="FLAG" style="flex-grow:0"></div>
+                    <div class="bar-seg" data-d="BLOCK" style="flex-grow:0"></div>
+                </div>
+                <div class="tallies">
+                    <div class="tally" data-d="ALLOW">
+                        <span class="tally-head"><i class="ph ph-check-circle" aria-hidden="true"></i>Allowed</span>
+                        <span class="tally-n" id="s-allow">0</span>
+                        <span class="tally-p" id="p-allow">0.0%</span>
+                    </div>
+                    <div class="tally" data-d="FLAG">
+                        <span class="tally-head"><i class="ph ph-warning" aria-hidden="true"></i>Flagged</span>
+                        <span class="tally-n" id="s-flag">0</span>
+                        <span class="tally-p" id="p-flag">0.0%</span>
+                    </div>
+                    <div class="tally" data-d="BLOCK">
+                        <span class="tally-head"><i class="ph ph-prohibit" aria-hidden="true"></i>Blocked</span>
+                        <span class="tally-n" id="s-block">0</span>
+                        <span class="tally-p" id="p-block">0.0%</span>
+                    </div>
                 </div>
             </div>
-            <div class="metric-val" id="s-total">0</div>
-        </div>
-        <div class="metric m-allow">
-            <div class="metric-glow"></div>
-            <div class="metric-head">
-                <span class="metric-label">Allowed</span>
-                <div class="metric-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="20 6 9 17 4 12"/></svg>
-                </div>
-            </div>
-            <div class="metric-val" id="s-allow">0</div>
-        </div>
-        <div class="metric m-block">
-            <div class="metric-glow"></div>
-            <div class="metric-head">
-                <span class="metric-label">Blocked</span>
-                <div class="metric-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
-                </div>
-            </div>
-            <div class="metric-val" id="s-block">0</div>
-        </div>
-        <div class="metric m-flag">
-            <div class="metric-glow"></div>
-            <div class="metric-head">
-                <span class="metric-label">Flagged</span>
-                <div class="metric-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                </div>
-            </div>
-            <div class="metric-val" id="s-flag">0</div>
         </div>
     </section>
 
-    <!-- Event Log -->
-    <section class="panel" aria-label="Security Event Log Panel">
-        <div class="panel-bar">
-            <span class="panel-title">Event Log</span>
-            <span class="panel-badge" id="ev-count" aria-live="polite">0 events</span>
+    <section aria-labelledby="h-path">
+        <h2 id="h-path">Where actions were stopped <span class="h-note">Blocks recorded at each layer, in the order an action meets them</span></h2>
+        <div class="path" id="path">
+            <div class="end"><i class="ph ph-robot" aria-hidden="true"></i>Agent action</div>
+            <!-- stages rendered by script -->
+            <div class="end"><i class="ph ph-cpu" aria-hidden="true"></i>Host kernel</div>
         </div>
-        <div class="tbl-scroll">
-            <table aria-label="Security Event Telemetry Stream">
-                <caption class="sr-only">List of security decisions mediated by OS-level guardrails</caption>
+    </section>
+
+    <section aria-labelledby="h-stream">
+        <h2 id="h-stream">Event stream <span class="h-note">Newest first. Select a row to read the full target and reason.</span></h2>
+        <div class="toolbar">
+            <div class="seg" role="group" aria-label="Filter by decision">
+                <button type="button" data-filter="ALL" aria-pressed="true">All<span class="c" id="f-all">0</span></button>
+                <button type="button" data-filter="BLOCK" aria-pressed="false">Blocked<span class="c" id="f-block">0</span></button>
+                <button type="button" data-filter="FLAG" aria-pressed="false">Flagged<span class="c" id="f-flag">0</span></button>
+                <button type="button" data-filter="ALLOW" aria-pressed="false">Allowed<span class="c" id="f-allow">0</span></button>
+            </div>
+            <label class="search">
+                <span class="sr-only">Search target, reason, action or layer</span>
+                <i class="ph ph-magnifying-glass" aria-hidden="true"></i>
+                <input id="q" type="search" placeholder="Search target or reason" autocomplete="off" spellcheck="false">
+            </label>
+            <span class="shown" id="shown" aria-live="polite"></span>
+        </div>
+        <div class="tbl-wrap" id="tbl-wrap">
+            <table>
+                <caption class="sr-only">Decisions made by the guardrails for each action the agent attempted</caption>
+                <colgroup>
+                    <col class="c-time"><col class="c-dec"><col class="c-layer"><col class="c-act"><col class="c-tgt"><col class="c-rsn">
+                </colgroup>
                 <thead>
                     <tr>
-                        <th scope="col" style="width:105px">Time</th>
-                        <th scope="col" style="width:115px">Action</th>
-                        <th scope="col" style="width:130px">Defense Layer</th>
+                        <th scope="col">Time</th>
+                        <th scope="col">Decision</th>
+                        <th scope="col">Layer</th>
+                        <th scope="col">Action</th>
                         <th scope="col">Target</th>
-                        <th scope="col" style="width:105px">Decision</th>
                         <th scope="col">Reason</th>
                     </tr>
                 </thead>
+                <tbody id="skeleton" aria-hidden="true"></tbody>
                 <tbody id="tbody"></tbody>
             </table>
         </div>
         <div class="empty" id="empty">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
-            <div class="empty-h">No events recorded</div>
-            <div class="empty-p">Run <code>python run_attack_simulation.py</code> to populate</div>
+            <p class="empty-h" id="empty-h">No actions mediated yet</p>
+            <p class="empty-p" id="empty-p">Every action an agent attempts is written here with the layer that decided it. Run one of these from the project root to populate the log.</p>
+            <div class="cmds" id="empty-cmds">
+                <div class="cmd"><code>python run_attack_simulation.py</code><span>7 attacks, 1 benign control</span></div>
+                <div class="cmd"><code>python run_sandboxed.py "list files in /tmp"</code><span>live agent, sandboxed</span></div>
+                <div class="cmd"><code>python run_benchmark.py --models all</code><span>InjecAgent cases</span></div>
+            </div>
         </div>
     </section>
 
-    <!-- Footer -->
-    <footer class="foot">
-        <span class="foot-chip">seccomp-bpf</span>
-        <span class="foot-sep" aria-hidden="true">·</span>
-        <span class="foot-chip">namespaces</span>
-        <span class="foot-sep" aria-hidden="true">·</span>
-        <span class="foot-chip">access-matrix</span>
-        <span class="foot-sep" aria-hidden="true">·</span>
-        <span class="foot-chip" id="foot-model">{{ info.model if info and info.model else 'gemini-2.5-flash' }}</span>
-    </footer>
-</div>
+</main>
+
+<footer class="foot">
+    <div class="wrap">
+        <span>OS-Level Guardrails for Autonomous AI Agents. Raj Vardhan Singh (24BDS0200), BCSE303P Operating Systems Lab</span>
+        <span>Polled every 2 s from 127.0.0.1</span>
+    </div>
+</footer>
 
 <script>
-/* ── SVG icon fragments (inline, zero-dependency, aria-hidden) ────── */
-const IC = {
-    terminal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>',
-    file:     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
-    pen:      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>',
-    globe:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
-    chat:     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
-    shield:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
-    cpu:      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>',
-    box:      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>',
-    check:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="20 6 9 17 4 12"/></svg>',
-    x:        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
-    alert:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+'use strict';
+
+const POLL_MS = 2000;
+const MAX_ROWS = 400;
+
+// Defense layers in the order an action meets them. Names match the "layer" field written by
+// PolicyEngine._log_decision, ToolBroker and SandboxExecutor.
+const LAYERS = [
+    { key: 'tool_broker',   tag: 'capability',  name: 'Tool broker',  mech: 'Per-task tool allow list', kernel: false },
+    { key: 'policy_engine', tag: 'access matrix', name: 'Policy engine', mech: 'YAML rules: allow, flag, block', kernel: false },
+    { key: 'sandbox',       tag: 'unshare',     name: 'Namespaces',   mech: 'user, mount, pid and net isolation', kernel: true },
+    { key: 'seccomp',       tag: 'seccomp-bpf', name: 'Syscall filter', mech: 'Kills chmod, mount, ptrace, setuid', kernel: true },
+];
+const LAYER_NAME = Object.fromEntries(LAYERS.map(l => [l.key, l.name]));
+
+const ACTION_ICON = {
+    run_shell: 'ph-terminal-window',
+    read_file: 'ph-file-text',
+    write_file: 'ph-pencil-simple-line',
+    http_request: 'ph-globe-simple',
+    call_tool: 'ph-wrench',
+};
+const DECISION = {
+    ALLOW: { icon: 'ph-check-circle', word: 'ALLOW' },
+    FLAG:  { icon: 'ph-warning',      word: 'FLAG' },
+    BLOCK: { icon: 'ph-prohibit',     word: 'BLOCK' },
 };
 
-const PILL_MAP = {
-    run_shell:    { cls: 'pill-shell',   icon: IC.terminal, label: 'shell' },
-    read_file:    { cls: 'pill-read',    icon: IC.file,     label: 'read'  },
-    write_file:   { cls: 'pill-write',   icon: IC.pen,      label: 'write' },
-    http_request: { cls: 'pill-http',    icon: IC.globe,    label: 'http'  },
-    respond:      { cls: 'pill-respond', icon: IC.chat,     label: 'text'  },
+const $ = id => document.getElementById(id);
+const state = {
+    logs: [],
+    stats: null,
+    isLinux: {{ 'true' if info.is_linux else 'false' }},
+    filter: 'ALL',
+    query: '',
+    signature: null,
+    prevCount: null,
+    expanded: new Set(),
+    loaded: false,
 };
 
-const LAYER_MAP = {
-    policy_engine: { cls: 'pill-layer-policy',  icon: IC.shield, label: 'Policy Engine' },
-    namespace:     { cls: 'pill-layer-sandbox', icon: IC.box,    label: 'Namespace'     },
-    sandbox:       { cls: 'pill-layer-sandbox', icon: IC.box,    label: 'Namespace'     },
-    seccomp:       { cls: 'pill-layer-seccomp', icon: IC.cpu,    label: 'seccomp-bpf'   },
-};
+// ── Helpers ──
 
-const TAG_MAP = {
-    ALLOW: { cls: 'tag-allow', icon: IC.check },
-    BLOCK: { cls: 'tag-block', icon: IC.x     },
-    FLAG:  { cls: 'tag-flag',  icon: IC.alert },
-};
-
-let prevCount = -1;
-let lastTimestamp = null;
-
-function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
-
+function el(tag, cls, text) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+}
+function icon(name) {
+    const i = el('i', 'ph ' + name);
+    i.setAttribute('aria-hidden', 'true');
+    return i;
+}
+function pct(n, total) { return total ? (100 * n / total).toFixed(1) + '%' : '0.0%'; }
 function fmtTime(ts) {
-    if (!ts) return '—';
-    try { return new Date(ts).toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit', second:'2-digit' }); }
-    catch { return ts; }
+    if (!ts) return '';
+    const d = new Date(ts);
+    if (isNaN(d)) return String(ts).slice(11, 19);
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+}
+function rowKey(l, i) { return (l.timestamp || '') + '|' + i; }
+function announce(msg) { $('sr-announcer').textContent = msg; }
+
+// ── Connection indicator ──
+
+function setLive(stateName, text) {
+    const live = $('live');
+    live.dataset.state = stateName;
+    $('live-text').textContent = text;
+    live.setAttribute('aria-label', 'Monitor connection: ' + text);
 }
 
-function pop(id, v) {
-    const el = document.getElementById(id);
-    if (+el.textContent !== v) {
-        el.textContent = v;
-        el.classList.add('pop');
-        setTimeout(() => el.classList.remove('pop'), 220);
+// ── Ledger ──
+
+function renderLedger(s) {
+    const total = s.total || 0;
+    $('s-total').textContent = total.toLocaleString();
+    $('s-allow').textContent = (s.allowed || 0).toLocaleString();
+    $('s-flag').textContent = (s.flagged || 0).toLocaleString();
+    $('s-block').textContent = (s.blocked || 0).toLocaleString();
+    $('p-allow').textContent = pct(s.allowed || 0, total);
+    $('p-flag').textContent = pct(s.flagged || 0, total);
+    $('p-block').textContent = pct(s.blocked || 0, total);
+
+    const bar = $('bar');
+    const segs = bar.querySelectorAll('.bar-seg');
+    segs[0].style.flexGrow = s.allowed || 0;
+    segs[1].style.flexGrow = s.flagged || 0;
+    segs[2].style.flexGrow = s.blocked || 0;
+    bar.dataset.empty = total ? 'false' : 'true';
+    bar.setAttribute('aria-label', total
+        ? `${s.allowed} allowed, ${s.flagged} flagged, ${s.blocked} blocked of ${total}`
+        : 'No decisions recorded');
+
+    $('f-all').textContent = total;
+    $('f-allow').textContent = s.allowed || 0;
+    $('f-flag').textContent = s.flagged || 0;
+    $('f-block').textContent = s.blocked || 0;
+
+    const btn = $('btn-clear');
+    btn.setAttribute('aria-disabled', total ? 'false' : 'true');
+}
+
+// ── Mediation path ──
+
+function renderPath() {
+    // /api/stats counts every entry per layer, ALLOW rows included, so blocks per layer are
+    // counted here from the entries themselves.
+    const blocks = {};
+    let totalBlocks = 0;
+    for (const l of state.logs) {
+        if (l.decision !== 'BLOCK') continue;
+        const k = l.layer || 'policy_engine';
+        blocks[k] = (blocks[k] || 0) + 1;
+        totalBlocks++;
+    }
+    const stages = LAYERS.slice();
+    for (const k of Object.keys(blocks)) {
+        if (!LAYER_NAME[k]) stages.push({ key: k, tag: k, name: k, mech: 'Layer reported by the log', kernel: false });
+    }
+
+    const path = $('path');
+    path.style.setProperty('--stages', stages.length);
+    path.querySelectorAll('.stage').forEach(n => n.remove());
+    const kernelEnd = path.lastElementChild;
+    for (const st of stages) {
+        const n = blocks[st.key] || 0;
+        const box = el('div', 'stage');
+        box.append(el('span', 'stage-tag', st.tag));
+        box.append(el('span', 'stage-name', st.name));
+        box.append(el('span', 'stage-mech', st.mech));
+        const num = el('span', 'stage-n', n.toLocaleString());
+        num.dataset.zero = n ? 'false' : 'true';
+        box.append(num);
+        const cap = el('span', 'stage-cap');
+        if (totalBlocks) {
+            const b = el('b', '', pct(n, totalBlocks));
+            cap.append(b, document.createTextNode(' of blocks'));
+        } else {
+            cap.textContent = 'no blocks yet';
+        }
+        box.append(cap);
+        if (st.kernel && !state.isLinux) {
+            const off = el('span', 'stage-off');
+            off.append(icon('ph-info'), document.createTextNode('Needs Linux or WSL2'));
+            box.append(off);
+        }
+        box.setAttribute('aria-label', `${st.name}: ${n} blocked`);
+        path.insertBefore(box, kernelEnd);
     }
 }
 
-function showToast(msg) {
-    const t = document.getElementById('toast');
-    if (!t) return;
-    t.textContent = msg;
-    t.classList.add('show');
-    clearTimeout(t._timeout);
-    t._timeout = setTimeout(() => t.classList.remove('show'), 2200);
+// ── Event stream ──
+
+function matches(l) {
+    if (state.filter !== 'ALL' && l.decision !== state.filter) return false;
+    if (!state.query) return true;
+    const q = state.query;
+    return [l.target, l.reason, l.action, l.layer, LAYER_NAME[l.layer]]
+        .some(v => v && String(v).toLowerCase().includes(q));
 }
 
-function copyText(text, label) {
-    if (!text || text === '—') return;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(() => {
-            const preview = text.length > 32 ? text.slice(0, 32) + '...' : text;
-            showToast(`Copied ${label}: "${preview}"`);
-        }).catch(() => {});
-    }
-}
+function buildRow(l, i, isNew) {
+    const d = DECISION[l.decision] ? l.decision : 'OTHER';
+    const tr = el('tr');
+    const key = rowKey(l, state.logs.length - i);
+    tr.dataset.key = key;
+    tr.dataset.d = d;
+    tr.tabIndex = 0;
+    tr.setAttribute('aria-expanded', state.expanded.has(key) ? 'true' : 'false');
+    if (isNew) tr.classList.add('is-new');
 
-function setConnectionStatus(online) {
-    const chip = document.getElementById('status-chip');
-    const txt = document.getElementById('status-text');
-    if (!chip || !txt) return;
-    if (online) {
-        chip.className = 'chip chip-live';
-        txt.textContent = 'Live';
-        chip.setAttribute('aria-label', 'Live monitoring active');
-    } else {
-        chip.className = 'chip chip-offline';
-        txt.textContent = 'Disconnected';
-        chip.setAttribute('aria-label', 'Disconnected from server');
-    }
-}
+    const tdTime = el('td', 'c-time t-time', fmtTime(l.timestamp));
+    if (l.timestamp) tdTime.title = l.timestamp;
 
-let isClearing = false;
+    const tdDec = el('td', 'c-dec');
+    const badge = el('span', 'dec');
+    badge.dataset.d = d;
+    badge.append(icon(d === 'OTHER' ? 'ph-question' : DECISION[d].icon),
+                 document.createTextNode(d === 'OTHER' ? String(l.decision || '?') : DECISION[d].word));
+    tdDec.append(badge);
 
-function updateClearButtonState() {
-    const clearBtn = document.getElementById('btn-clear');
-    if (!clearBtn) return;
-    if (isClearing) {
-        clearBtn.disabled = true;
-        return;
-    }
-    const totalEl = document.getElementById('s-total');
-    const totalVal = totalEl ? +totalEl.textContent : 0;
-    const tb = document.getElementById('tbody');
-    const hasRows = tb ? tb.children.length > 0 : false;
-    clearBtn.disabled = (totalVal === 0 && !hasRows);
-}
+    const tdLayer = el('td', 'c-layer');
+    tdLayer.append(el('span', 'layer', LAYER_NAME[l.layer] || l.layer || 'Policy engine'));
 
-function refreshStats() {
-    if (isClearing) return;
-    fetch('/api/stats')
-        .then(r => {
-            if (!r.ok) throw new Error('Network response not ok');
-            return r.json();
-        })
-        .then(d => {
-            if (isClearing) return;
-            setConnectionStatus(true);
-            const total = d.total || 0;
-            pop('s-total', total);
-            pop('s-allow', d.allowed || 0);
-            pop('s-block', d.blocked || 0);
-            pop('s-flag',  d.flagged || 0);
-            const evBadge = document.getElementById('ev-count');
-            if (evBadge) {
-                evBadge.textContent = total + ' event' + (total !== 1 ? 's' : '');
-            }
-            updateClearButtonState();
-        })
-        .catch(() => {
-            setConnectionStatus(false);
-        });
-}
+    const tdAct = el('td', 'c-act');
+    const act = el('span', 'act');
+    act.append(icon(ACTION_ICON[l.action] || 'ph-dot-outline'), document.createTextNode(l.action || ''));
+    tdAct.append(act);
 
-function createRow(l, isNew) {
-    const tr = document.createElement('tr');
-    if (isNew) tr.classList.add('row-new');
+    const tdTgt = el('td', 'c-tgt');
+    tdTgt.append(el('span', 'tgt', l.target == null ? '' : String(l.target)));
 
-    const a  = l.action || 'unknown';
-    const d  = l.decision || 'UNKNOWN';
-    const ly = l.layer || 'policy_engine';
-    const pm = PILL_MAP[a] || { cls: 'pill-respond', icon: IC.chat, label: a };
-    const lm = LAYER_MAP[ly] || LAYER_MAP.policy_engine;
-    const tm = TAG_MAP[d]  || TAG_MAP.FLAG;
+    const tdRsn = el('td', 'c-rsn');
+    tdRsn.append(el('span', 'rsn', l.reason || ''));
 
-    const rawTarget = l.target || '';
-    const rawReason = l.reason || '';
-
-    const targetEsc = esc(rawTarget) || '—';
-    const reasonEsc = esc(rawReason) || '—';
-
-    tr.innerHTML =
-        `<td class="c-time">${fmtTime(l.timestamp)}</td>` +
-        `<td><span class="pill ${pm.cls}">${pm.icon} ${pm.label}</span></td>` +
-        `<td><span class="pill ${lm.cls}">${lm.icon} ${lm.label}</span></td>` +
-        `<td class="c-target" title="Click to copy target">${targetEsc}</td>` +
-        `<td><span class="tag ${tm.cls}">${tm.icon} ${d}</span></td>` +
-        `<td class="c-reason" title="Click to copy reason">${reasonEsc}</td>`;
-
-    // Add click listeners for copy
-    const targetCell = tr.querySelector('.c-target');
-    if (targetCell && rawTarget) {
-        targetCell.addEventListener('click', () => copyText(rawTarget, 'target'));
-    }
-    const reasonCell = tr.querySelector('.c-reason');
-    if (reasonCell && rawReason) {
-        reasonCell.addEventListener('click', () => copyText(rawReason, 'reason'));
-    }
-
+    tr.append(tdTime, tdDec, tdLayer, tdAct, tdTgt, tdRsn);
     return tr;
 }
 
-function refreshLogs() {
-    if (isClearing) return;
-    fetch('/api/logs')
-        .then(r => {
-            if (!r.ok) throw new Error('Network response not ok');
-            return r.json();
-        })
-        .then(data => {
-            if (isClearing) return;
-            setConnectionStatus(true);
-            const tb = document.getElementById('tbody');
-            const em = document.getElementById('empty');
-            const count = Array.isArray(data) ? data.length : 0;
-            const currentTimestamp = count > 0 ? data[0].timestamp : null;
-
-            // If empty, always ensure empty state is displayed and table is cleared
-            if (!count) {
-                if (tb) tb.innerHTML = '';
-                if (em) em.style.display = 'block';
-                prevCount = 0;
-                lastTimestamp = null;
-                updateClearButtonState();
-                return;
-            }
-
-            if (em) em.style.display = 'none';
-
-            // Optimized DOM: If nothing changed, do not touch DOM
-            if (count === prevCount && currentTimestamp === lastTimestamp) {
-                updateClearButtonState();
-                return;
-            }
-
-            const isFirstLoad = (prevCount === -1);
-            const diff = count - (prevCount > -1 ? prevCount : 0);
-
-            prevCount = count;
-            lastTimestamp = currentTimestamp;
-
-            // Prepend only new rows if appending, otherwise render all
-            if (!isFirstLoad && diff > 0 && diff < count) {
-                const frag = document.createDocumentFragment();
-                for (let i = 0; i < diff; i++) {
-                    frag.appendChild(createRow(data[i], true));
-                }
-                tb.insertBefore(frag, tb.firstChild);
-
-                // Announce to screen reader
-                const announcer = document.getElementById('sr-announcer');
-                if (announcer) {
-                    announcer.textContent = `${diff} new security event${diff > 1 ? 's' : ''} recorded: ${data[0].decision} on ${data[0].action}`;
-                }
-            } else {
-                // Full render
-                const frag = document.createDocumentFragment();
-                data.forEach((l, i) => {
-                    frag.appendChild(createRow(l, isFirstLoad ? false : (i < diff)));
-                });
-                tb.innerHTML = '';
-                tb.appendChild(frag);
-            }
-            updateClearButtonState();
-        })
-        .catch(() => {
-            setConnectionStatus(false);
-        });
-}
-
-function clearLogs() {
-    if (isClearing) return;
-    isClearing = true;
-
-    const clearBtn = document.getElementById('btn-clear');
-    if (clearBtn) {
-        clearBtn.disabled = true;
-        clearBtn.innerHTML =
-            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> Clearing...';
+function renderStream(newCount) {
+    const tbody = $('tbody');
+    const rows = [];
+    let matched = 0;
+    for (let i = 0; i < state.logs.length; i++) {
+        const l = state.logs[i];
+        if (!matches(l)) continue;
+        matched++;
+        if (rows.length < MAX_ROWS) rows.push(buildRow(l, i, i < newCount));
     }
+    tbody.replaceChildren(...rows);
 
-    // Immediately clear UI table and metrics for immediate feedback
-    const tb = document.getElementById('tbody');
-    const em = document.getElementById('empty');
-    if (tb) tb.innerHTML = '';
-    if (em) em.style.display = 'block';
+    const total = state.logs.length;
+    const empty = $('empty');
+    if (!total) {
+        $('empty-h').textContent = 'No actions mediated yet';
+        $('empty-p').textContent = 'Every action an agent attempts is written here with the layer that decided it. Run one of these from the project root to populate the log.';
+        $('empty-cmds').hidden = false;
+        empty.dataset.show = 'true';
+    } else if (!matched) {
+        $('empty-h').textContent = 'No events match this filter';
+        $('empty-p').textContent = 'Clear the search or choose All to see every decision.';
+        $('empty-cmds').hidden = true;
+        empty.dataset.show = 'true';
+    } else {
+        empty.dataset.show = 'false';
+    }
+    $('tbl-wrap').hidden = !matched;
 
-    pop('s-total', 0);
-    pop('s-allow', 0);
-    pop('s-block', 0);
-    pop('s-flag', 0);
-    const evBadge = document.getElementById('ev-count');
-    if (evBadge) evBadge.textContent = '0 events';
-
-    // Reset tracking counters
-    prevCount = 0;
-    lastTimestamp = null;
-
-    fetch('/api/clear', { method: 'POST' })
-        .then(r => {
-            if (!r.ok) throw new Error('Clear request failed');
-            return r.json();
-        })
-        .then(() => {
-            showToast('Event logs cleared');
-            const announcer = document.getElementById('sr-announcer');
-            if (announcer) announcer.textContent = 'All security logs have been cleared.';
-        })
-        .catch(err => {
-            console.error('Error clearing logs:', err);
-            showToast('Failed to clear logs');
-        })
-        .finally(() => {
-            isClearing = false;
-            if (clearBtn) {
-                clearBtn.innerHTML =
-                    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg> Clear';
-            }
-            refreshStats();
-            refreshLogs();
-        });
+    let shown = '';
+    if (total) shown = matched > MAX_ROWS ? `${MAX_ROWS} of ${matched} shown` : `${matched} of ${total}`;
+    $('shown').textContent = shown;
 }
 
-// Initial fetch & interval
-refreshStats();
-refreshLogs();
-setInterval(() => { refreshStats(); refreshLogs(); }, 2000);
+function renderSkeleton() {
+    const sk = $('skeleton');
+    const widths = [['60%', '70%', '80%', '75%', '90%', '85%'], ['55%', '65%', '70%', '60%', '75%', '60%'],
+                    ['60%', '70%', '75%', '80%', '55%', '90%']];
+    for (const w of widths) {
+        const tr = el('tr', 'sk');
+        for (const x of w) {
+            const td = el('td');
+            const s = el('span');
+            s.style.width = x;
+            td.append(s);
+            tr.append(td);
+        }
+        sk.append(tr);
+    }
+}
+
+// ── Polling ──
+
+async function getJSON(url) {
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) throw new Error(url + ' ' + r.status);
+    return r.json();
+}
+
+async function refresh() {
+    try {
+        const [stats, logs] = await Promise.all([getJSON('/api/stats'), getJSON('/api/logs')]);
+        setLive('up', 'Live');
+        const sig = logs.length + '|' + (logs[0] && logs[0].timestamp) + '|' + stats.total;
+        if (sig === state.signature) return;
+
+        let newCount = 0;
+        if (state.prevCount !== null && logs.length > state.prevCount) {
+            newCount = logs.length - state.prevCount;
+            const newBlocks = logs.slice(0, newCount).filter(l => l.decision === 'BLOCK').length;
+            announce(`${newCount} new ${newCount === 1 ? 'decision' : 'decisions'}` +
+                     (newBlocks ? `, ${newBlocks} blocked` : ''));
+        }
+        state.signature = sig;
+        state.prevCount = logs.length;
+        state.logs = Array.isArray(logs) ? logs : [];
+        state.stats = stats;
+
+        if (!state.loaded) { $('skeleton').replaceChildren(); state.loaded = true; }
+        renderLedger(stats);
+        renderPath();
+        renderStream(newCount);
+    } catch (e) {
+        setLive('down', 'Disconnected, retrying');
+    }
+}
+
+async function loadInfo() {
+    try {
+        const info = await getJSON('/api/info');
+        $('m-model').textContent = info.model;
+        $('m-model').title = info.model;
+        $('m-platform').textContent = info.platform;
+        $('m-kernel').textContent = info.is_linux ? 'available' : 'Linux only';
+        if (info.is_linux !== state.isLinux) { state.isLinux = !!info.is_linux; renderPath(); }
+    } catch (e) { /* keep the server-rendered values */ }
+}
+
+// ── Clear log (two-step) ──
+
+let armTimer = null;
+function disarm() {
+    const btn = $('btn-clear');
+    btn.dataset.armed = 'false';
+    $('btn-clear-label').textContent = 'Clear log';
+    clearTimeout(armTimer);
+}
+async function onClear() {
+    const btn = $('btn-clear');
+    if (btn.getAttribute('aria-disabled') === 'true') return;
+    if (btn.dataset.armed !== 'true') {
+        btn.dataset.armed = 'true';
+        $('btn-clear-label').textContent = 'Confirm clear';
+        announce('Press again within 4 seconds to clear every logged decision.');
+        armTimer = setTimeout(disarm, 4000);
+        return;
+    }
+    disarm();
+    try {
+        const r = await fetch('/api/clear', { method: 'POST' });
+        if (!r.ok) throw new Error(String(r.status));
+        state.signature = null;
+        state.prevCount = null;
+        state.expanded.clear();
+        announce('Decision log cleared.');
+        await refresh();
+    } catch (e) {
+        announce('Could not clear the log.');
+        setLive('down', 'Clear failed');
+    }
+}
+
+// ── Wiring ──
+
+function toggleRow(tr) {
+    const key = tr.dataset.key;
+    const open = tr.getAttribute('aria-expanded') !== 'true';
+    tr.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) state.expanded.add(key); else state.expanded.delete(key);
+}
+
+$('tbody').addEventListener('click', e => {
+    const tr = e.target.closest('tr');
+    if (tr && !window.getSelection().toString()) toggleRow(tr);
+});
+$('tbody').addEventListener('keydown', e => {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('tr')) {
+        e.preventDefault();
+        toggleRow(e.target);
+    }
+});
+
+document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => {
+    state.filter = b.dataset.filter;
+    document.querySelectorAll('.seg button').forEach(x => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+    renderStream(0);
+}));
+
+let qTimer = null;
+$('q').addEventListener('input', e => {
+    clearTimeout(qTimer);
+    qTimer = setTimeout(() => { state.query = e.target.value.trim().toLowerCase(); renderStream(0); }, 120);
+});
+
+$('btn-clear').addEventListener('click', onClear);
+$('btn-clear').addEventListener('blur', disarm);
+
+$('btn-theme').addEventListener('click', () => {
+    const root = document.documentElement;
+    const current = root.dataset.theme ||
+        (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    const next = current === 'dark' ? 'light' : 'dark';
+    root.dataset.theme = next;
+    try { localStorage.setItem('guardrails-theme', next); } catch (e) { /* not persisted */ }
+});
+
+renderSkeleton();
+renderPath();
+loadInfo();
+refresh();
+setInterval(refresh, POLL_MS);
 </script>
 </body>
 </html>
