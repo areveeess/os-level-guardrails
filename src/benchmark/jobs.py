@@ -6,6 +6,19 @@ runs go through:
 
   python -m src.benchmark.jobs ollama-up | ollama-down | ollama-variants
   python -m src.benchmark.jobs run --model M --out DIR [--smoke]
+  python -m src.benchmark.jobs preflight --out DIR
+  python -m src.benchmark.jobs ollama-default-probe [--model llama3.2:3b]
+
+The preflight only reads (nvidia-smi free MiB, MemAvailable) and appends a KEEP_AWAKE
+line for D-04 (keeping the laptop on mains power and awake is the user's job; boot_id
+and uptime are logged so a VM restart is visible). The default-context probe measures
+the installed Ollama server's version and the context a plain tag gets by default on a
+temporary server of our own (first free port 11435-11440, no OLLAMA_CONTEXT_LENGTH),
+stopped again in a finally block; the 11434 server, if any, is only asked its version.
+Sources, first present wins: /api/ps context_length, the `ollama ps` CONTEXT column, the
+OLLAMA_CONTEXT_LENGTH entry of the server's startup config line; if all are missing, the
+prompt_tokens plateau of one unique long prompt. Two present sources that disagree are a
+FAIL, never resolved by guessing.
 
 Why runs are foreground processes: WSL shuts its VM down when no attached client is
 left, which kills detached background work (Phase 2 lost runs this way). `run` is
@@ -37,7 +50,9 @@ import datetime
 import json
 import os
 import re
+import secrets
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -58,6 +73,22 @@ SERVER_START_WAIT_S = 60
 STOP_WAIT_S = 30
 MINIMAL_ENV_KEYS = ("PATH", "HOME", "LANG")
 DONE_PREFLIGHT, DONE_OLLAMA_SETUP = 5, 6
+
+# Read-only GPU/RAM preflight (the src/qwen_lora/run_train.sh pattern); environment overrides are read per call
+MIN_FREE_MIB = 3584
+MIN_AVAIL_RAM_MIB = 3000
+PREFLIGHT_RECHECKS = 6
+PREFLIGHT_WAIT_S = 300
+NVIDIA_QUERY = ["nvidia-smi", "--query-gpu=name,memory.used,memory.free,memory.total",
+                "--format=csv,noheader,nounits"]
+
+# Default-context probe: a temporary server of our own on the first free port, never 11434
+PROBE_PORTS = tuple(range(11435, 11441))
+PROBE_PIDFILE = "ollama-probe.pid"
+DEFAULT_CONTEXT_FILE = "ollama_default_context.json"
+EVIDENCE_SOURCES = ("api_ps", "ps_column", "config_line", "long_prompt_plateau")
+PROBE_TARGET_TOKENS = 12000
+CALIBRATION_LINES = (20, 60)
 _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*")
 
 # Phase 1 arguments (D-05) and the 6-episode smoke subset of them
@@ -119,6 +150,21 @@ def _run(argv: list, env: Optional[dict] = None, timeout: float = 120.0, stdout_
         return 127, str(e)
     except subprocess.TimeoutExpired:
         return 124, f"timeout after {timeout}s: {argv[0]}"
+
+
+def _read_text(path: str) -> Optional[str]:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _port_busy(port: int) -> bool:
+    """True when anything accepts a TCP connection on 127.0.0.1:<port> (the holder is never touched)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1.0)
+        return s.connect_ex((HOST, port)) == 0
 
 
 def _sleep(seconds: float) -> None:
@@ -335,6 +381,233 @@ def ollama_variants(jobs_dir: str, models: Optional[list] = None, port: int = MA
     return lines
 
 
+# ── Read-only preflight (D-04) ──
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name, "")
+    return int(value) if value.isdigit() else default
+
+
+def preflight(out_dir: str) -> bool:
+    """Read the free GPU memory (nvidia-smi) and MemAvailable, append the reading and one KEEP_AWAKE line to
+    out_dir/preflight.log, and say whether both are above MIN_FREE_MIB / MIN_AVAIL_RAM_MIB (environment
+    overrides of the same names). It only reads: it never stops anything and changes no power setting; a
+    busy GPU means waiting or a human decision."""
+    os.makedirs(out_dir, exist_ok=True)
+    min_free, min_ram = _env_int("MIN_FREE_MIB", MIN_FREE_MIB), _env_int("MIN_AVAIL_RAM_MIB", MIN_AVAIL_RAM_MIB)
+    code, text = _run(NVIDIA_QUERY, timeout=30)
+    reading = (text or "").strip().splitlines()[0].strip() if code == 0 and (text or "").strip() else ""
+    parts = [p.strip() for p in reading.split(",")]
+    free = int(parts[2]) if len(parts) >= 4 and parts[2].isdigit() else None
+    meminfo = _read_text("/proc/meminfo") or ""
+    m = re.search(r"^MemAvailable:\s+(\d+)\s*kB", meminfo, re.MULTILINE)
+    avail = int(m.group(1)) // 1024 if m else 0
+    boot_id = (_read_text("/proc/sys/kernel/random/boot_id") or "unknown").strip()
+    uptime_text = (_read_text("/proc/uptime") or "").split()
+    uptime = int(float(uptime_text[0])) if uptime_text else -1
+    if free is None:
+        result = f"not-ok no usable nvidia-smi reading, {min_free} MiB required"
+    elif free < min_free:
+        result = f"not-ok {free} MiB GPU free, {min_free} MiB required"
+    elif avail < min_ram:
+        result = f"not-ok {avail} MiB RAM available, {min_ram} MiB required"
+    else:
+        result = "ok"
+    _append(os.path.join(out_dir, "preflight.log"),
+            f"=== preflight {_utc_now()} ===\n"
+            f"nvidia-smi: {reading or '<no reading>'}\n"
+            f"free_mib {free if free is not None else 'unknown'}\n"
+            f"avail_ram_mib {avail}\n"
+            f"result {result}\n"
+            f"KEEP_AWAKE D-04: keep the laptop on mains power and awake (user responsibility); "
+            f"boot_id {boot_id} uptime_s {uptime}\n")
+    print(f"PREFLIGHT {result} (free_mib {free}, avail_ram_mib {avail})")
+    return result == "ok"
+
+
+def preflight_with_rechecks(out_dir: str) -> bool:
+    """The preflight, re-checked PREFLIGHT_RECHECKS more times PREFLIGHT_WAIT_S apart; it only waits."""
+    attempts = PREFLIGHT_RECHECKS + 1
+    for attempt in range(1, attempts + 1):
+        if preflight(out_dir):
+            return True
+        if attempt < attempts:
+            print(f"preflight attempt {attempt}/{attempts} failed; checking again in {PREFLIGHT_WAIT_S} s")
+            _sleep(PREFLIGHT_WAIT_S)
+    return False
+
+
+# ── Long prompts and context readings ──
+
+def long_prompt_text(lines: int, token: str) -> str:
+    """A unique prompt (random token on the first line, so no prompt cache can shorten it) and numbered filler."""
+    body = [f"{i:05d} filler line for the context probe; nothing to do here." for i in range(1, lines + 1)]
+    return "\n".join([f"probe {token}", *body])
+
+
+def long_prompt_tokens(port: int, model: str, lines: int) -> Optional[int]:
+    """usage.prompt_tokens the server reports for one unique long prompt (max_tokens 1), or None."""
+    reply = _http_json(f"http://{HOST}:{port}/v1/chat/completions",
+                       {"model": model, "max_tokens": 1, "temperature": 0,
+                        "messages": [{"role": "user", "content": long_prompt_text(lines, secrets.token_hex(8))}]},
+                       timeout=900)
+    usage = reply.get("usage") if isinstance(reply, dict) else None
+    value = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+    return value if isinstance(value, int) else None
+
+
+def calibrate_lines(port: int, model: str) -> Optional[tuple]:
+    """(base tokens, tokens per filler line) from two short prompts well inside any default window."""
+    small, large = CALIBRATION_LINES
+    a, b = long_prompt_tokens(port, model, small), long_prompt_tokens(port, model, large)
+    if a is None or b is None or b <= a:
+        return None
+    per_line = (b - a) / (large - small)
+    return a - per_line * small, per_line
+
+
+def parse_ps_column(text: str, model: str) -> Optional[int]:
+    """The CONTEXT column of `ollama ps` for `model`, or None when the column or the row is absent."""
+    rows = [line for line in (text or "").splitlines() if line.strip()]
+    if not rows:
+        return None
+    header = re.split(r"\s{2,}", rows[0].strip())
+    if "CONTEXT" not in header:
+        return None
+    idx = header.index("CONTEXT")
+    for line in rows[1:]:
+        cells = re.split(r"\s{2,}", line.strip())
+        if cells and cells[0] in (model, f"{model}:latest") and len(cells) > idx:
+            return int(cells[idx]) if cells[idx].isdigit() else None
+    return None
+
+
+def parse_config_context(log_text: str) -> Optional[int]:
+    """OLLAMA_CONTEXT_LENGTH from the last "server config" line of a server log. 0 (an automatic default) and
+    an absent entry both give None: neither is a context length."""
+    lines = [line for line in (log_text or "").splitlines() if "server config" in line]
+    if not lines:
+        return None
+    m = re.search(r"OLLAMA_CONTEXT_LENGTH:(\d+)", lines[-1])
+    return int(m.group(1)) if m and int(m.group(1)) > 0 else None
+
+
+def _ps_entry(ps_json, model: str) -> Optional[dict]:
+    entries = ps_json.get("models") if isinstance(ps_json, dict) else None
+    for entry in entries or []:
+        if isinstance(entry, dict) and model in (entry.get("name"), entry.get("model"),
+                                                 str(entry.get("name", "")).removesuffix(":latest")):
+            return entry
+    return None
+
+
+def _ps_context(port: int, model: str) -> tuple:
+    """(/api/ps context_length, `ollama ps` CONTEXT column) of the loaded model; either may be None."""
+    entry = _ps_entry(_http_json(f"http://{HOST}:{port}/api/ps", timeout=10), model)
+    api = entry.get("context_length") if entry else None
+    _, text = _run(["ollama", "ps"], env=client_env(port), timeout=30)
+    return (api if isinstance(api, int) and api > 0 else None), parse_ps_column(text, model)
+
+
+def _version_from(text: str) -> Optional[str]:
+    m = re.search(r"client version is (\S+)", text or "") or re.search(r"version is (\S+)", text or "")
+    return m.group(1) if m else None
+
+
+def _load_model(port: int, model: str) -> None:
+    _http_json(f"http://{HOST}:{port}/api/generate",
+               {"model": model, "prompt": "ok", "stream": False, "options": {"num_predict": 1}}, timeout=600)
+
+
+# ── Default-context probe ──
+
+def _measure_default(jobs_dir: str, port: int, model: str, log_name: str) -> dict:
+    """Every reading of the temporary server; the decision on the default is made by the caller."""
+    m = {"server_version": ollama_listening(port), "client_version": None, "config_context_length": None,
+         "ps_context_length": None, "ps_column_context": None, "show_num_ctx": None, "long_prompt_tokens": None,
+         "long_prompt_sent_lines": None, "long_prompt_sent_tokens": None}
+    _, text = _run(["ollama", "--version"], env=client_env(port), timeout=30)
+    m["client_version"] = _version_from(text)
+    m["config_context_length"] = parse_config_context(_read_text(os.path.join(jobs_dir, log_name)))
+    _load_model(port, model)
+    m["ps_context_length"], m["ps_column_context"] = _ps_context(port, model)
+    if None in (m["ps_context_length"], m["ps_column_context"], m["config_context_length"]):
+        _, shown = _run(["ollama", "show", model, "--parameters"], env=client_env(port), timeout=60)
+        m["show_num_ctx"] = _show_num_ctx(shown)
+        cal = calibrate_lines(port, model)
+        if cal is not None:
+            base, per_line = cal
+            lines = max(1, int((PROBE_TARGET_TOKENS - base) / per_line))
+            m["long_prompt_sent_lines"] = lines
+            m["long_prompt_sent_tokens"] = int(base + per_line * lines)
+            m["long_prompt_tokens"] = long_prompt_tokens(port, model, lines)
+    return m
+
+
+def ollama_default_probe(jobs_dir: str = DEFAULT_JOBS_DIR, model: str = "llama3.2:3b") -> int:
+    """Measure the installed Ollama server's version and the context `model` gets by default, on a temporary
+    server this project starts (first free port 11435-11440, no OLLAMA_CONTEXT_LENGTH, ownership marker) and
+    stops again, also when a step fails. The 11434 server, if any, is only asked for its version. Writes
+    <jobs_dir>/ollama_default_context.json. Returns 0, 1 (FAIL) or 5 (preflight not ok)."""
+    model = _checked_name(model)
+    os.makedirs(jobs_dir, exist_ok=True)
+    if not preflight(jobs_dir):
+        print("FAIL ollama-default-probe: preflight not ok (see preflight.log); nothing was started")
+        return DONE_PREFLIGHT
+    main_version = ollama_listening(MAIN_PORT)
+    main_state = "none" if not main_version else (
+        "owned" if owned_pid(jobs_dir, MAIN_PIDFILE) is not None else "foreign")
+    stale = stop_owned(jobs_dir, PROBE_PIDFILE)        # only a crashed earlier probe of ours, by marker
+    if stale is not None:
+        print(f"TEMP_SERVER stale probe server stopped pid {stale}")
+    port = next((p for p in PROBE_PORTS if not _port_busy(p)), None)
+    if port is None:
+        print(f"FAIL ollama-default-probe: no free port in {PROBE_PORTS[0]}-{PROBE_PORTS[-1]} (holders left alone)")
+        return 1
+    log_name = f"ollama-probe-{port}.log"
+    pid = start_owned_server(jobs_dir, port, None, log_name, PROBE_PIDFILE)
+    stopped = None
+    try:
+        m = _measure_default(jobs_dir, port, model, log_name)
+    finally:
+        stopped = stop_owned(jobs_dir, PROBE_PIDFILE)
+        print(f"TEMP_SERVER stopped pid {stopped}")
+
+    present = [(s, v) for s, v in (("api_ps", m["ps_context_length"]), ("ps_column", m["ps_column_context"]),
+                                   ("config_line", m["config_context_length"])) if v is not None]
+    default, source, lower_bound, problem = None, None, False, None
+    if len({v for _, v in present}) > 1:
+        problem = "sources disagree: " + ", ".join(f"{s} {v}" for s, v in present)
+    elif present:
+        source, default = present[0]
+    elif m["long_prompt_tokens"] is not None:
+        source, default = "long_prompt_plateau", m["long_prompt_tokens"]
+        lower_bound = m["long_prompt_tokens"] >= 0.97 * (m["long_prompt_sent_tokens"] or 0)
+    else:
+        problem = "no source reported a context length (api_ps, ps_column, config_line, long prompt all missing)"
+    data = {"server_version": m["server_version"], "client_version": m["client_version"],
+            "port_11434": {"version": main_version, "state": main_state}, "model": model, "port": port,
+            "default_context_length": default, "default_is_lower_bound": lower_bound,
+            "evidence_source": source if problem is None else "none",
+            "ps_context_length": m["ps_context_length"], "ps_column_context": m["ps_column_context"],
+            "config_context_length": m["config_context_length"], "show_num_ctx": m["show_num_ctx"],
+            "long_prompt_tokens": m["long_prompt_tokens"], "long_prompt_sent_lines": m["long_prompt_sent_lines"],
+            "temp_server_stopped": stopped == pid and not _pid_alive(pid), "measured_at": _utc_now()}
+    if problem is not None:
+        data["finding"] = problem
+    tmp = os.path.join(jobs_dir, DEFAULT_CONTEXT_FILE + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, os.path.join(jobs_dir, DEFAULT_CONTEXT_FILE))
+    print(f"SERVER_VERSION {data['server_version']} CLIENT_VERSION {data['client_version']}")
+    if problem is not None:
+        print(f"FAIL ollama-default-probe: {problem}")
+        return 1
+    print(f"DEFAULT_CONTEXT {model} {default} source {source}"
+          + (" (lower bound: the long prompt was not cut)" if lower_bound else ""))
+    return 0
+
+
 # ── One-model run ──
 
 def benchmark_argv(model: str, out_dir: str, smoke: bool = False) -> list:
@@ -399,9 +672,19 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--model", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--smoke", action="store_true")
+    p = sub.add_parser("preflight")
+    p.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIR)
+    p.add_argument("--out", required=True)
+    p = sub.add_parser("ollama-default-probe")
+    p.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIR)
+    p.add_argument("--model", default="llama3.2:3b")
     args = parser.parse_args(argv)
 
     try:
+        if args.cmd == "preflight":
+            return 0 if preflight(args.out) else 1
+        if args.cmd == "ollama-default-probe":
+            return ollama_default_probe(args.jobs_dir, args.model)
         if args.cmd == "ollama-up":
             print(f"OLLAMA {ollama_up(args.jobs_dir)}")
             return 0

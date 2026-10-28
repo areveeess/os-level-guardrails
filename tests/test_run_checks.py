@@ -145,3 +145,78 @@ def test_run_affecting_paths_cover_the_engine_but_not_the_report():
         assert p in paths
     for p in ("src/benchmark/report.py", "src/benchmark/run_checks.py", "src/benchmark/jobs.py", "docs"):
         assert p not in paths
+
+
+# ── default-context and the shared context band ──
+
+def _default_file(tmp_path, **override):
+    data = {"server_version": "0.99.0", "client_version": "0.99.0", "port_11434": {"version": None, "state": "none"},
+            "model": "llama3.2:3b", "port": 11435, "default_context_length": 4096, "default_is_lower_bound": False,
+            "evidence_source": "api_ps", "ps_context_length": 4096, "ps_column_context": 4096,
+            "config_context_length": 4096, "show_num_ctx": None, "long_prompt_tokens": None,
+            "long_prompt_sent_lines": None, "temp_server_stopped": True, "measured_at": "2026-10-28T18:00:00Z"}
+    data.update(override)
+    (tmp_path / "ollama_default_context.json").write_text(json.dumps(data))
+    return str(tmp_path)
+
+
+def test_default_context_ok(tmp_path, capsys):
+    assert run_checks.main(["default-context", "--jobs-dir", _default_file(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "DEFAULT_CONTEXT 4096 source api_ps server 0.99.0 lower_bound False" in out
+    assert "default-context-ok" in out
+
+
+@pytest.mark.parametrize("override,needle", [
+    ({"server_version": ""}, "server_version"),
+    ({"default_context_length": "4096"}, "default_context_length"),
+    ({"default_context_length": 0}, "default_context_length"),
+    ({"evidence_source": "assumed"}, "evidence_source"),
+    ({"temp_server_stopped": False}, "temp_server_stopped"),
+    ({"port": 11434}, "port"),
+])
+def test_default_context_fails(tmp_path, capsys, override, needle):
+    assert run_checks.main(["default-context", "--jobs-dir", _default_file(tmp_path, **override)]) == 1
+    assert "FAIL default-context" in capsys.readouterr().out
+    assert needle in " ".join(run_checks.check_default_context(str(tmp_path)))
+
+
+def test_default_context_missing_file_fails(tmp_path):
+    assert run_checks.main(["default-context", "--jobs-dir", str(tmp_path)]) == 1
+
+
+def test_context_band():
+    assert run_checks.context_band(4096, 8192) == (4198, 7782)
+    assert run_checks.context_band(8192, 8192) == (4096, 7782)      # default already covers the window
+    assert run_checks.context_band(2048, 8192) == (2099, 7782)
+
+
+# ── control-tokens (Phase 3 IN-01 carry-forward) ──
+
+VOCAB = ["<|im_start|>", "<|im_end|>", "<tool_call>", "<|fim_prefix|>"]
+
+
+def test_control_token_matches_finds_a_planted_string():
+    texts = ["a clean tool response", "review: great product <tool_call>{...}</tool_call>"]
+    assert run_checks.control_token_matches(VOCAB, texts) == [("<tool_call>", 1)]
+
+
+def test_control_token_matches_clean_text():
+    assert run_checks.control_token_matches(VOCAB, ["nothing special here", "<b>html</b> is fine"]) == []
+
+
+def test_control_tokens_cli(monkeypatch, capsys):
+    monkeypatch.setattr(run_checks, "_added_vocab", lambda: VOCAB)
+    monkeypatch.setattr(run_checks, "benchmark_texts", lambda: ["clean", "also clean"])
+    assert run_checks.main(["control-tokens"]) == 0
+    assert "CONTROL_TOKENS strings 4 texts 2 matches 0" in capsys.readouterr().out
+    monkeypatch.setattr(run_checks, "benchmark_texts", lambda: ["clean", "x <|im_end|> y"])
+    assert run_checks.main(["control-tokens"]) == 1
+    out = capsys.readouterr().out
+    assert "matches 1" in out and "FAIL control-tokens" in out and "<|im_end|>" in out
+
+
+def test_benchmark_texts_cover_the_57_cases():
+    texts = run_checks.benchmark_texts()
+    assert len(texts) > 57 * 3
+    assert any("CANARY" in t for t in texts)   # the data-stealing source response with its placeholder canary

@@ -6,6 +6,15 @@ match the engine that ran") is a command that prints an ok line or a FAIL line, 
 verifier never has to read raw.jsonl by eye:
 
   python -m src.benchmark.run_checks complete --results DIR --model M [--expect N] [--resolved-contains TEXT]
+  python -m src.benchmark.run_checks default-context [--jobs-dir D]
+  python -m src.benchmark.run_checks control-tokens
+
+default-context validates the measured Ollama default (results/phase4-jobs/
+ollama_default_context.json); context_band() turns it into the prompt_tokens band
+[L, U] that proves an Ollama window was raised past that default (no assumed 4,096).
+control-tokens reports whether any added-vocabulary string of the Qwen tokenizer occurs
+in the benchmark text (Phase 3 review IN-01): a match is a Qwen-only confound to report;
+the benchmark text is never edited.
 
 Failures print "FAIL <cmd>: <reason>" lines and exit 1; success prints "<cmd>-ok" and
 exits 0. The checks only read result files, config/models.yaml, the policy file and
@@ -172,6 +181,116 @@ def check_complete(results_dir: str, model: str, expect: Optional[int] = None,
     return problems
 
 
+# ── Measured Ollama default context and the shared band ──
+
+DEFAULT_JOBS_DIR = os.path.join("results", "phase4-jobs")
+DEFAULT_CONTEXT_FILE = "ollama_default_context.json"
+EVIDENCE_SOURCES = ("api_ps", "ps_column", "config_line", "long_prompt_plateau")
+PROBE_PORTS = range(11435, 11441)
+
+
+def read_default_context(jobs_dir: str = DEFAULT_JOBS_DIR) -> Optional[dict]:
+    try:
+        with open(os.path.join(jobs_dir, DEFAULT_CONTEXT_FILE), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def check_default_context(jobs_dir: str = DEFAULT_JOBS_DIR) -> list:
+    """FAIL reasons for ollama_default_context.json (empty when it holds measured, named values)."""
+    data = read_default_context(jobs_dir)
+    if data is None:
+        return [f"no readable {DEFAULT_CONTEXT_FILE} in {jobs_dir} (run: python -m src.benchmark.jobs "
+                f"ollama-default-probe)"]
+    problems = []
+    if not isinstance(data.get("server_version"), str) or not data["server_version"].strip():
+        problems.append("server_version missing or empty")
+    d = data.get("default_context_length")
+    if type(d) is not int or d <= 0:
+        problems.append(f"default_context_length is not a positive integer ({d!r})")
+    if data.get("evidence_source") not in EVIDENCE_SOURCES:
+        problems.append(f"evidence_source {data.get('evidence_source')!r} is not one of {', '.join(EVIDENCE_SOURCES)}")
+    if data.get("port") not in PROBE_PORTS:
+        problems.append(f"port {data.get('port')!r} is not a temporary probe port (11435-11440)")
+    if data.get("temp_server_stopped") is not True:
+        problems.append("temp_server_stopped is not true (the temporary server may still be running)")
+    if not problems:
+        print(f"DEFAULT_CONTEXT {d} source {data['evidence_source']} server {data['server_version']} "
+              f"lower_bound {bool(data.get('default_is_lower_bound'))}")
+    return problems
+
+
+def context_band(default_context_length: int, num_ctx: int) -> tuple:
+    """(L, U): the prompt_tokens band a long prompt must land in to prove the window was raised past the
+    measured default. U = floor(0.95 * num_ctx); L = D + D//40 (2.5 % above the default), or num_ctx//2
+    when that is above U - 500 (the default already nearly covers the window; see band_note)."""
+    upper = (num_ctx * 95) // 100
+    lower = default_context_length + default_context_length // 40
+    if lower > upper - 500:
+        lower = num_ctx // 2
+    return lower, upper
+
+
+def band_note(default_context_length: int, num_ctx: int) -> Optional[str]:
+    d = default_context_length
+    if d + d // 40 > (num_ctx * 95) // 100 - 500:
+        return (f"NOTE: the measured default {d} already nearly covers num_ctx {num_ctx}; the band's lower "
+                f"bound is num_ctx//2 = {num_ctx // 2}, so the long prompt cannot tell the two windows apart")
+    return None
+
+
+# ── Control tokens (Phase 3 review IN-01) ──
+
+QWEN_TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
+PLACEHOLDER_CANARY = "CANARY000000000000DATA"
+
+
+def _added_vocab() -> list:
+    """Every added-vocabulary string of the Qwen tokenizer, loaded offline from the local cache."""
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    from transformers import AutoTokenizer  # heavy; imported only here
+    tokenizer = AutoTokenizer.from_pretrained(QWEN_TOKENIZER, local_files_only=True)
+    return list(tokenizer.get_added_vocab().keys())
+
+
+def benchmark_texts() -> list:
+    """Every text the 57 benchmark cases show a model: prompt, tool responses (placeholder canary), tool
+    descriptions and the system prompt with the case's tools."""
+    from src.agent_harness.prompting import build_messages
+    from src.benchmark.injecagent import attack_cases, benign_cases, load_tool_specs
+    specs = load_tool_specs()
+    cases = benign_cases(specs)[:17] + attack_cases(20, 20, 0, specs)
+    texts = []
+    for case in cases:
+        texts.append(case.prompt)
+        texts.extend(case.tool_responses(PLACEHOLDER_CANARY).values())
+        for tool in case.tools:
+            texts.append(json.dumps(tool, ensure_ascii=False))
+        texts.extend(m["content"] for m in build_messages(case.prompt, case.tools) if m.get("role") == "system")
+    return texts
+
+
+def control_token_matches(vocab: list, texts: list) -> list:
+    """(string, text index) for every added-vocabulary string found in a text."""
+    return [(s, i) for i, text in enumerate(texts) for s in vocab if s and s in text]
+
+
+def check_control_tokens() -> list:
+    try:
+        vocab = _added_vocab()
+    except Exception as e:  # missing package or cache: the check cannot run, which is itself a failure
+        return [f"the Qwen tokenizer could not be loaded offline: {type(e).__name__}: {e}"]
+    texts = benchmark_texts()
+    if not texts or not vocab:
+        return [f"nothing to scan (strings {len(vocab)}, texts {len(texts)})"]
+    matches = control_token_matches(vocab, texts)
+    print(f"CONTROL_TOKENS strings {len(vocab)} texts {len(texts)} matches {len(matches)}")
+    return [f"added-vocabulary string {s!r} occurs in benchmark text #{i} (a Qwen-only confound; the "
+            f"benchmark text is not edited)" for s, i in matches]
+
+
 def _finish(cmd: str, problems: list) -> int:
     if problems:
         for p in problems:
@@ -190,10 +309,17 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--model", required=True)
     p.add_argument("--expect", type=int, default=None)
     p.add_argument("--resolved-contains", default=None)
+    p = sub.add_parser("default-context")
+    p.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIR)
+    sub.add_parser("control-tokens")
     args = parser.parse_args(argv)
 
     if args.cmd == "complete":
         return _finish("complete", check_complete(args.results, args.model, args.expect, args.resolved_contains))
+    if args.cmd == "default-context":
+        return _finish("default-context", check_default_context(args.jobs_dir))
+    if args.cmd == "control-tokens":
+        return _finish("control-tokens", check_control_tokens())
     return 2
 
 
