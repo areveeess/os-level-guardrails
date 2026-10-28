@@ -56,6 +56,7 @@ D-09 replaces D-03's time window and its quota clause. Only the two parts below 
 
 | Field | Value |
 |-------|-------|
-| Launch UTC | (filled at launch) |
-| freeze_utc (from results/phase4-jobs/stopping_rule.json) | (filled at launch) |
-| Rule commit sha | (filled at launch) |
+| Launch UTC | 2026-10-28T18:48:03Z (`written_utc` in stopping_rule.json; hosted loop pid 10209, children 10212, 10213, 10214) |
+| freeze_utc (from results/phase4-jobs/stopping_rule.json) | 2026-10-29T15:30:00+00:00 |
+| Rule commit sha | d4ee817abc0c679ded2a28a296ef4b91e818a8fd (`rule_sha` in stopping_rule.json) |
+| Probe before launch | KEY GROQ_API_KEY set; PROBE groq-gpt-oss-120b ok, groq-gpt-oss-20b ok, groq-qwen3.8-27b ok |
