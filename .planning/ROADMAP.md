@@ -2,7 +2,7 @@
 
 ## Overview
 
-The guardrails (policy engine, namespaces, seccomp-bpf) and the InjecAgent harness already exist; what is missing is credible evidence that the guardrails hold regardless of which LLM drives the agent, including a weak, locally made one. This roadmap answers the reviewer's remark in five steps. First, harden the scoring and report and close the known shell-chaining bypass, because every later number flows through them. Second, build the shared synthetic dataset, the single rendering format and a locally trained ScratchGPT. Third, add the `hf_local` provider, the base-Qwen control row and a locally LoRA-tuned Qwen2.5-0.5B. Fourth, run every model to completion (local, added Ollama and resumed hosted) plus a layer-targeted attack suite. Fifth, freeze the data and regenerate the cross-model report, charts, README, SDD and Review-3 deck from one results directory. The one-week deadline shapes the ordering: GPU jobs are serial (scratch training, then LoRA training, then benchmark runs) and run in the background while CPU-side work proceeds, and viva notes are added in every phase rather than on the final night.
+The guardrails (policy engine, namespaces, seccomp-bpf) and the InjecAgent harness already exist; what is missing is credible evidence that the guardrails hold regardless of which LLM drives the agent, including a weak, locally made one. This roadmap answers the reviewer's remark in five steps. First, harden the scoring and report and close the known shell-chaining bypass, because every later number flows through them. Second, build the shared synthetic dataset, the single rendering format and a locally trained ScratchGPT. Third, add the `hf_local` provider, the base-Qwen control row and a locally LoRA-tuned Qwen2.5-0.5B. Fourth, run every model to completion (local, added Ollama and resumed hosted) and count the sandbox and seccomp blocks those runs record. Fifth, freeze the data and regenerate the cross-model report, charts, README, SDD and Review-3 deck from one results directory. The one-week deadline shapes the ordering: GPU jobs are serial (scratch training, then LoRA training, then benchmark runs) and run in the background while CPU-side work proceeds, and viva notes are added in every phase rather than on the final night.
 
 ## Phases
 
@@ -101,7 +101,7 @@ Plans:
 
 ### Phase 4: Full Runs - Local, Added Ollama, Hosted Resume
 
-**Goal**: Every model in the comparison has its complete, like-for-like benchmark data (or an honestly labelled partial), and the sandbox and seccomp layers are shown to fire on actions that only they can stop.
+**Goal**: Every model in the comparison has its complete, like-for-like benchmark data (or an honestly labelled partial), and the report counts, with k/n per model and pooled, the sandbox and seccomp blocks those runs recorded, stating any zero plainly and citing the Phase 1 residual-bypass table as the evidence of what those layers contain.
 **Depends on**: Phase 1, Phase 2, Phase 3
 **Requirements**: CMP-01, CMP-02, CMP-03, EVAL-08
 **Success Criteria** (what must be TRUE):
@@ -120,11 +120,11 @@ Plans:
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 04-03-PLAN.md — Local full runs (scratch-gpt, Qwen LoRA, Qwen base, qwen2.5:3b, llama3.2:3b re-check), written stopping rule, Groq resume ds-first after Ollama (wave 2)
 
-**Wave 4** *(blocked on Wave 2 completion)*
-- [ ] 04-02-PLAN.md — EVAL-08 narrowed (D-07b): report counts the recorded sandbox and seccomp blocks per model and pooled with k/n, cites 01-REVIEW-FIX.md by row number, zero stated with n; no attack suite (wave 4)
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 04-02-PLAN.md — EVAL-08 narrowed (D-07b): report counts the recorded sandbox and seccomp blocks per model and pooled with k/n, cites 01-REVIEW-FIX.md by row number, zero stated with n; no attack suite (wave 3)
 
-**Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 04-04-PLAN.md — Control re-run, hosted runs to a final state, merged Phase 4 report, viva page 04 (wave 5)
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 04-04-PLAN.md — Control re-run, hosted runs to a final state, merged Phase 4 report with the EVAL-08 counts, viva page 04 (wave 4)
 
 ### Phase 5: Comparison Report & Deliverables
 
