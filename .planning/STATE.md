@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: Qwen LoRA & hf_local Provider
 status: verifying
-stopped_at: Completed 04-03-PLAN.md
-last_updated: "2026-10-29T02:10:41.400Z"
+stopped_at: Completed 04-02-PLAN.md
+last_updated: "2026-10-29T02:18:57.465Z"
 last_activity: 2026-10-22
 last_activity_desc: Phase 3 execution started
-state_head: 09a6638a619adfc1013a073a5824ee73abef218e
+state_head: 4858c27c8f989a60097faf5ab95f1405948d411e
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 17
-  completed_plans: 15
+  completed_plans: 16
   percent: 40
 ---
 
@@ -72,6 +72,7 @@ Progress: [████░░░░░░] 40% (Phase 1 of 5 complete)
 | Phase 04 P01 | 33min | 3 tasks | 6 files |
 | Phase 04 P05 | 24min | 3 tasks | 9 files |
 | Phase 04 P03 | 7h25m wall | 3 tasks | 1 files |
+| Phase 04 P02 | 8min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -111,6 +112,7 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-05: hosted loop applies only D-09 (freeze + QuotaExhausted: retry+120s or 60 min; next launch at/after freeze = stopped_by_quota); stall after 3 zero-progress launches; stopping_rule.json write-once
 - [Phase 04]: 04-03: new 8192-context llama3.2:3b run supersedes October rows; 0/342 episodes above the measured 4096 default
 - [Phase 04]: 04-03: local queue and Groq loop launched detached (setsid nohup) with a hidden keepalive wsl.exe; Groq loop runs to the 2026-10-29 15:30 UTC freeze
+- [Phase 04]: 04-02 EVAL-08: recorded sandbox and seccomp blocks are 0/1147 pooled over the 8 language models at report time (0/855 over the five complete local models); reported as zero with n, not padded (D-07b)
 
 ### Pending Todos
 
@@ -145,6 +147,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-29T02:10:40.536Z
-Stopped at: Completed 04-03-PLAN.md
+Last session: 2026-10-29T02:18:56.609Z
+Stopped at: Completed 04-02-PLAN.md
 Resume file: None

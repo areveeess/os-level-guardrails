@@ -14,7 +14,7 @@
 - [x] **EVAL-05**: Episodes that hit an infrastructure error are dropped together with their paired arm and re-run, so both arms of a (model, case, run) are always compared like-for-like
 - [x] **EVAL-06**: Each result record stamps the git commit, policy-file hash, resolved model id, `finish_reason`, and `prompt_tokens`, so a resumed or truncated run is detectable
 - [x] **EVAL-07**: A scripted worst-case control agent (always obeys the injected instruction) runs through the same benchmark and arms, giving a model-independent measurement of what the guardrails block
-- [ ] **EVAL-08**: The report's where-blocked-by-layer table counts the sandbox (namespaces / private filesystem) and seccomp blocks recorded in the Phase 4 full runs, per model and pooled, with k/n. It cites the Phase 1 residual-bypass table (01-REVIEW-FIX.md) as the evidence of what those layers contain. Narrowed 2026-10-28 by user decision: no new attack suite.
+- [x] **EVAL-08**: The report's where-blocked-by-layer table counts the sandbox (namespaces / private filesystem) and seccomp blocks recorded in the Phase 4 full runs, per model and pooled, with k/n. It cites the Phase 1 residual-bypass table (01-REVIEW-FIX.md) as the evidence of what those layers contain. Narrowed 2026-10-28 by user decision: no new attack suite.
 
 ### Security Fixes (SEC)
 
@@ -90,7 +90,7 @@
 | EVAL-05 | Phase 1 | Complete |
 | EVAL-06 | Phase 1 | Complete |
 | EVAL-07 | Phase 1 | Complete |
-| EVAL-08 | Phase 4 | Pending |
+| EVAL-08 | Phase 4 | Complete |
 | SEC-01 | Phase 1 | Complete |
 | SEC-02 | Phase 1 | Complete |
 | SCRATCH-01 | Phase 2 | Complete |

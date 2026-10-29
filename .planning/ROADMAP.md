@@ -111,7 +111,7 @@ Plans:
   4. The report's where-blocked-by-layer table counts the sandbox (namespaces / private filesystem) and seccomp blocks recorded in the Phase 4 full runs, per model and pooled, with k/n; it cites the Phase 1 residual-bypass table (01-REVIEW-FIX.md, by row number) as the evidence of what those layers contain, and a layer that recorded no blocks is reported as zero with its n (EVAL-08 narrowed by user decision D-07b: no new attack suite).
   5. The viva page(s) for namespaces, seccomp-bpf, and local-inference confounds (quantization, context window) are added to `docs/viva/` (DOC-03 is traced to Phase 5).
 
-**Plans**: 3/5 plans executed
+**Plans**: 4/5 plans executed
 
 Plans:
 **Wave 1**
@@ -124,7 +124,7 @@ Plans:
 - [x] 04-03-PLAN.md — Local full runs (Qwen LoRA, scratch-gpt, Qwen base, qwen2.5:3b, llama3.2:3b re-check/re-run), written stopping rule, Groq re-run ds first launched concurrently with the local queue, until the 2026-10-29 15:30 UTC freeze (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 04-02-PLAN.md — EVAL-08 narrowed (D-07b): report counts the recorded sandbox and seccomp blocks per model and pooled with k/n, cites 01-REVIEW-FIX.md by row number, zero stated with n; no attack suite (wave 4)
+- [x] 04-02-PLAN.md — EVAL-08 narrowed (D-07b): report counts the recorded sandbox and seccomp blocks per model and pooled with k/n, cites 01-REVIEW-FIX.md by row number, zero stated with n; no attack suite (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 04-04-PLAN.md — Control re-run, hosted runs to a final state or the freeze, merged Phase 4 report with the EVAL-08 counts, viva page 04 (wave 5)
@@ -152,5 +152,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (the `hf_local` provi
 | 1. Evaluation Hardening & Policy Fix | 4/4 | Complete    | 2026-10-21 |
 | 2. Local Data Foundation & ScratchGPT | 4/4 | Complete    | 2026-10-22 |
 | 3. Qwen LoRA & hf_local Provider | 4/4 | In Progress | - |
-| 4. Full Runs - Local, Added Ollama, Hosted Resume | 3/5 | In Progress | - |
+| 4. Full Runs - Local, Added Ollama, Hosted Resume | 4/5 | In Progress | - |
 | 5. Comparison Report & Deliverables | 0/TBD | Not started | - |
