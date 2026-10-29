@@ -1,11 +1,13 @@
 """
 Deliverables CLI — python -m src.deliverables build | blocks | check | deck
 ===========================================================================
-  build [--results-root R] [--frozen F] [--reuse-frozen] [--no-docs] [--doc PATH ...]
+  build [--results-root R] [--frozen F] [--reuse-frozen] [--no-docs] [--doc PATH ...] [--no-deck] [--deck-out P]
       Freeze the Phase 4 directories into F (unless --reuse-frozen), regenerate the report,
       charts and numbers.json from the frozen copy, then (unless --no-docs) rewrite the
-      generated blocks of the target docs and run the check on them. The last line is
-      "BUILD ok" (exit 0) or "FAIL build: reason" (exit 1).
+      generated blocks of the target docs and run the check on them, then (unless --no-deck)
+      render and check the Review-3 deck. The last line is "BUILD ok" (exit 0), "FAIL build:
+      reason" (exit 1), or "FAIL deck: python-pptx is not importable by ..." (exit 3: everything
+      else was written, the deck was not rebuilt).
   blocks [--frozen F] [--doc PATH ...]
       Rewrite the generated blocks of the target docs (all present ones without --doc).
   check [--frozen F] [--doc PATH ...]
@@ -20,11 +22,12 @@ docs/SDD.md, docs/viva/04-..., docs/viva/05-...), as a path relative to the repo
 """
 
 import argparse
+import os
 import sys
 
 from src.deliverables import FROZEN_DIR, RESULTS_ROOT, slides
 from src.deliverables.blocks import DOC_TARGETS
-from src.deliverables.build import REPO_ROOT, DeliverablesError, apply_docs, build
+from src.deliverables.build import REPO_ROOT, DeckUnavailable, DeliverablesError, apply_docs, build
 from src.deliverables.consistency import load_numbers, run_check, select_docs
 
 
@@ -60,10 +63,14 @@ def main(argv: list = None) -> int:
     b.add_argument("--results-root", default=RESULTS_ROOT, help="directory holding the phase4-* directories")
     b.add_argument("--reuse-frozen", action="store_true", help="keep the existing frozen copy; only re-render")
     b.add_argument("--no-docs", action="store_true", help="do not touch or check the target docs")
+    b.add_argument("--no-deck", action="store_true", help="do not render or check the Review-3 deck")
+    b.add_argument("--deck-out", default=None,
+                   help="the deck to write (default docs/OS_Level_Guardrails_Review_3.pptx in the repository)")
     others = [sub.add_parser("blocks", help="rewrite the generated blocks of the target docs"),
               sub.add_parser("check", help="check every target doc against numbers.json")]
     d = sub.add_parser("deck", help="render and check the Review-3 slide deck (python-pptx)")
-    d.add_argument("--out", default=slides.DEFAULT_OUT, help="the deck to write (default docs/OS_Level_Guardrails_Review_3.pptx)")
+    d.add_argument("--out", default=slides.DEFAULT_OUT,
+                   help="the deck to write (default docs/OS_Level_Guardrails_Review_3.pptx)")
     d.add_argument("--template", default=slides.DEFAULT_TEMPLATE, help="the template deck (default docs/template.pptx)")
     d.add_argument("--check", action="store_true", help="only check the existing deck")
     d.add_argument("--frozen", default=FROZEN_DIR, help="frozen directory (default results/phase5-final)")
@@ -75,8 +82,13 @@ def main(argv: list = None) -> int:
 
     if args.command == "build":
         docs = None if args.no_docs else (args.doc or list(DOC_TARGETS))
+        deck_out = args.deck_out or os.path.join(REPO_ROOT, slides.DEFAULT_OUT)
         try:
-            build(args.results_root, args.frozen, reuse=args.reuse_frozen, say=_say, docs=docs)
+            build(args.results_root, args.frozen, reuse=args.reuse_frozen, say=_say, docs=docs, deck_out=deck_out,
+                  no_deck=args.no_deck)
+        except DeckUnavailable as e:
+            _say(str(e))
+            return 3
         except (DeliverablesError, OSError, ValueError, KeyError) as e:
             return _fail("build", e)
         return 0

@@ -329,3 +329,82 @@ def test_check_rejects_a_stale_chart_and_a_number_edited_by_hand(frozen_numbers,
     (frozen / numbers["charts"][0]["file"]).write_bytes(tiny_png(200))
     problems, counts = slides.check_deck(str(out), numbers, str(frozen))
     assert counts["charts"] == 2 and any(p.startswith("slide 9:") for p in problems)
+
+
+# ── The deck step of the one-command build ──
+
+FAKE_COUNTS = {"slides": len(slides.SLIDE_TITLES), "notes": len(slides.SLIDE_TITLES), "charts": 3}
+
+
+def build_args(tmp_path, *extra):
+    root = make_results_root(tmp_path)
+    return ["build", "--results-root", str(root), "--frozen", str(tmp_path / "frozen"), "--no-docs",
+            "--deck-out", str(tmp_path / "deck.pptx")] + list(extra)
+
+
+def test_build_renders_and_checks_the_deck_before_build_ok(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_render(spec, out_path, frozen_dir, template):
+        calls.append((len(spec), out_path, template))
+        with open(out_path, "wb") as f:
+            f.write(b"deck")
+        return "docs/template.pptx"
+    monkeypatch.setattr(slides, "render_deck", fake_render)
+    monkeypatch.setattr(slides, "check_deck", lambda path, numbers, frozen_dir: ([], dict(FAKE_COUNTS)))
+    root = make_results_root(tmp_path)
+    out = tmp_path / "deck.pptx"
+    lines = build_module.build(str(root), str(tmp_path / "frozen"), now=BEFORE, deck_out=str(out))
+    assert lines[-1] == "BUILD ok"
+    assert lines[-2] == slides.deck_line(str(out), FAKE_COUNTS)
+    assert calls and calls[0][0] == len(slides.SLIDE_TITLES) and calls[0][2].endswith("template.pptx")
+
+
+def test_build_library_call_without_deck_out_has_no_deck_step(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("the deck must not be rendered")
+    monkeypatch.setattr(slides, "render_deck", boom)
+    root = make_results_root(tmp_path)
+    lines = build_module.build(str(root), str(tmp_path / "frozen"), now=BEFORE)
+    assert lines[-1] == "BUILD ok" and not any(line.startswith("DECK") for line in lines)
+
+
+def test_build_without_pptx_writes_the_rest_exits_3_and_calls_the_old_deck_stale(tmp_path, monkeypatch, capsys):
+    from src.deliverables.__main__ import main
+
+    def missing():
+        raise slides.PptxUnavailable("python-pptx is not importable")
+    monkeypatch.setattr(slides, "_import_pptx", missing)
+    old = tmp_path / "deck.pptx"
+    old.write_bytes(b"old deck")
+    code = main(build_args(tmp_path))
+    out = capsys.readouterr().out.strip().splitlines()
+    assert code == 3
+    assert any(line.startswith("REPORT ") for line in out) and "CHARTS 3" in out
+    assert (tmp_path / "frozen" / "numbers.json").is_file()
+    fails = [line for line in out if line.startswith("FAIL deck: python-pptx is not importable by ")]
+    assert len(fails) == 1 and out[-1] == fails[0]
+    assert "stale" in fails[0] and str(old).replace("\\", "/") in fails[0]
+    assert old.read_bytes() == b"old deck" and "BUILD ok" not in out
+
+
+def test_build_no_deck_prints_the_skipped_line(tmp_path, capsys):
+    from src.deliverables.__main__ import main
+
+    code = main(build_args(tmp_path, "--no-deck"))
+    out = capsys.readouterr().out.strip().splitlines()
+    assert code == 0 and out[-1] == "BUILD ok" and out.count("DECK skipped (--no-deck)") == 1
+    assert not (tmp_path / "deck.pptx").exists()
+
+
+def test_a_deck_check_problem_fails_the_build(tmp_path, monkeypatch, capsys):
+    from src.deliverables.__main__ import main
+
+    monkeypatch.setattr(slides, "render_deck", lambda spec, out_path, frozen_dir, template: "docs/template.pptx")
+    monkeypatch.setattr(slides, "check_deck",
+                        lambda path, numbers, frozen_dir: (["slide 3: the title differs from the spec"],
+                                                           dict(FAKE_COUNTS)))
+    code = main(build_args(tmp_path))
+    out = capsys.readouterr().out.strip().splitlines()
+    assert code == 1
+    assert "FAIL deck: slide 3: the title differs from the spec" in out and out[-1].startswith("FAIL build: ")

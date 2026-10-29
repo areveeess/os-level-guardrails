@@ -15,7 +15,11 @@ render  Regenerates summary.md, summary.csv and layer_blocks.csv through
         the frozen directory: nothing in it depends on the clock or git state at render
         time, so re-rendering a frozen directory rewrites it byte-identically.
 build   freeze (unless reuse) then render; then, for the selected target docs, rewrite their
-        generated blocks and run the consistency check (D-03); returns the printed lines.
+        generated blocks and run the consistency check (D-03); then (when a deck path is given)
+        render and check the Review-3 deck (D-08). An interpreter without python-pptx still writes
+        everything else and then fails loudly with DeckUnavailable (exit 3 in the CLI), naming the
+        existing deck as stale, so an old deck is never left looking current (D-01).
+        Returns the printed lines.
 """
 
 import datetime
@@ -25,6 +29,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from collections import Counter
 
 from src.benchmark.outcomes import classify_llm_error, classify_outcome
@@ -32,7 +37,7 @@ from src.benchmark.report import (CONTROL_PROVIDER, DEFAULT_EXPECTED_EPISODES, L
                                   control_summary, generate_report, kind_breakdown, layer_block_summary,
                                   load_rows_counted, read_manifest, summarize)
 from src.benchmark.stats import prop_fields
-from src.deliverables import charts, sections
+from src.deliverables import charts, sections, slides
 from src.deliverables.blocks import BlockError, apply_blocks, data_line
 from src.deliverables.consistency import load_numbers, run_check, select_docs
 from src.deliverables import (CONTROL_MODEL, COPY_FILES, CURRENT_SOURCES, FREEZE_UTC, FROZEN_DIR,
@@ -51,6 +56,10 @@ PROP_KEYS = ("k", "n", "pct", "lo", "hi")
 
 class DeliverablesError(Exception):
     """Any failure of the deliverables build; the CLI prints it as one 'FAIL build:' line."""
+
+
+class DeckUnavailable(DeliverablesError):
+    """python-pptx is not importable, so the deck step could not run; the message is the 'FAIL deck:' line."""
 
 
 # ── Time and paths ──
@@ -432,10 +441,38 @@ def apply_docs(repo_root: str, frozen_dir: str, docs, numbers: dict) -> list:
     return lines
 
 
+def _display(path: str, repo_root: str) -> str:
+    """A path as printed: relative to the repository root when inside it, forward slashes."""
+    rel = os.path.relpath(os.path.abspath(path), os.path.abspath(repo_root))
+    return posix(path if rel.startswith("..") or os.path.isabs(rel) else rel)
+
+
+def deck_step(numbers: dict, frozen_dir: str, deck_out: str, template: str, repo_root: str) -> list:
+    """Render and check the Review-3 deck; returns the DECK line. A check problem raises DeliverablesError after
+    the FAIL deck lines (in the error's `lines`); a missing python-pptx raises DeckUnavailable."""
+    display = _display(deck_out, repo_root)
+    try:
+        slides.render_deck(slides.deck_spec(numbers), deck_out, frozen_dir, template)
+        problems, counts = slides.check_deck(deck_out, numbers, frozen_dir)
+    except slides.PptxUnavailable:
+        line = slides.missing_line(sys.executable)
+        if os.path.exists(deck_out):
+            line += f"; {display} was not rebuilt and is stale"
+        raise DeckUnavailable(line)
+    if problems:
+        error = DeliverablesError("the deck check failed (see the FAIL deck lines)")
+        error.lines = [f"FAIL deck: {p}" for p in problems]
+        raise error
+    return [slides.deck_line(display, counts)]
+
+
 def build(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, reuse: bool = False, now=None,
-          say=None, repo_root: str = REPO_ROOT, docs=None) -> list:
+          say=None, repo_root: str = REPO_ROOT, docs=None, deck_out: str = None, no_deck: bool = False,
+          template: str = None) -> list:
     """freeze (unless reuse) and render, then (when `docs` is a list of target docs) apply their blocks and run
-    the check on them; returns the printed lines (each also passed to `say`). docs=None skips the doc step."""
+    the check on them, then (when `deck_out` is given and not no_deck) render and check the deck; returns the
+    printed lines (each also passed to `say`). docs=None skips the doc step and deck_out=None the deck step;
+    no_deck prints 'DECK skipped (--no-deck)'."""
     lines = []
 
     def emit(line: str):
@@ -466,5 +503,20 @@ def build(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, reuse:
             emit(line)
         if code:
             raise DeliverablesError("the deliverables check failed (see the FAIL check lines)")
+    if no_deck:
+        emit("DECK skipped (--no-deck)")
+    elif deck_out is not None:
+        numbers = load_numbers(frozen_dir)
+        template = template or os.path.join(repo_root, slides.DEFAULT_TEMPLATE)
+        try:
+            deck_lines = deck_step(numbers, frozen_dir, deck_out, template, repo_root)
+        except DeckUnavailable:
+            raise
+        except DeliverablesError as e:
+            for line in getattr(e, "lines", []):
+                emit(line)
+            raise
+        for line in deck_lines:
+            emit(line)
     emit("BUILD ok")
     return lines
