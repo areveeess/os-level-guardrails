@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 3
 current_phase_name: Qwen LoRA & hf_local Provider
 status: verifying
-stopped_at: Completed 04-05-PLAN.md
-last_updated: "2026-10-28T18:43:34.557Z"
+stopped_at: Completed 04-03-PLAN.md
+last_updated: "2026-10-29T02:10:41.400Z"
 last_activity: 2026-10-22
 last_activity_desc: Phase 3 execution started
-state_head: 2759af147503eb8da5f2e6b7a6528e5eb1504971
+state_head: 09a6638a619adfc1013a073a5824ee73abef218e
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 17
-  completed_plans: 14
+  completed_plans: 15
   percent: 40
 ---
 
@@ -71,6 +71,7 @@ Progress: [████░░░░░░] 40% (Phase 1 of 5 complete)
 | Phase 03 P04 | multi-session | 3 tasks | 7 files |
 | Phase 04 P01 | 33min | 3 tasks | 6 files |
 | Phase 04 P05 | 24min | 3 tasks | 9 files |
+| Phase 04 P03 | 7h25m wall | 3 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -108,6 +109,8 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-05: local queue order agentlora, scratch-gpt, qwen base, ollama qwen2.5:3b, ollama llama3.2:3b; FREEZE_UTC 2026-10-29T15:30Z constant; done code 7 = freeze stop
 - [Phase 04]: 04-05: local context_overflow is a finished format_failure (attacked if attempted), never re-queued; --priority-kinds is order-only (manifest extra, not plan)
 - [Phase 04]: 04-05: hosted loop applies only D-09 (freeze + QuotaExhausted: retry+120s or 60 min; next launch at/after freeze = stopped_by_quota); stall after 3 zero-progress launches; stopping_rule.json write-once
+- [Phase 04]: 04-03: new 8192-context llama3.2:3b run supersedes October rows; 0/342 episodes above the measured 4096 default
+- [Phase 04]: 04-03: local queue and Groq loop launched detached (setsid nohup) with a hidden keepalive wsl.exe; Groq loop runs to the 2026-10-29 15:30 UTC freeze
 
 ### Pending Todos
 
@@ -142,6 +145,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-28T18:43:33.644Z
-Stopped at: Completed 04-05-PLAN.md
+Last session: 2026-10-29T02:10:40.536Z
+Stopped at: Completed 04-03-PLAN.md
 Resume file: None
