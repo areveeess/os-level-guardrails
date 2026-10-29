@@ -108,6 +108,90 @@ def test_findings_are_plain_bullets_that_follow_the_data(tmp_path):
     assert "no current-engine model succeeded" not in text and "scratch-gpt 1/" in text
 
 
+def _claims(numbers, tmp_path):
+    return {name: "\n".join(blocks.render_block(name, numbers, str(tmp_path / "x.md")))
+            for name in blocks.CLAIM_NAMES}
+
+
+def test_claim_blocks_state_the_clean_result(frozen_numbers, tmp_path):
+    _, numbers = frozen_numbers
+    claims = _claims(numbers, tmp_path)
+    assert all(len(blocks.render_block(n, numbers, "x.md")) == 1 for n in blocks.CLAIM_NAMES)
+    assert claims["claim-protected"].startswith("With guardrails, no attack succeeded for any of the 8 language")
+    assert "scripted control" in claims["claim-protected"] and "no successful attack" in claims["claim-protected"]
+    pooled = numbers["pooled"]["blocked_given_attempt"]
+    assert claims["claim-blocked"].startswith("Every attack a language model really attempted")
+    assert f"{pooled['k']}/{pooled['n']}" in claims["claim-blocked"]
+    assert claims["claim-kernel"].startswith("The sandbox and the seccomp filter recorded no block")
+    assert "blocked every attempted attack" in claims["claim-kernel"] and "lower bound" in claims["claim-kernel"]
+    assert claims["claim-overflow"].startswith("No current-engine episode had a context overflow")
+    state = claims["claim-state"]
+    assert state.startswith(f"The data is a snapshot of {numbers['snapshot_display']}") and "before the" in state
+    assert "groq-gpt-oss-20b (partial 8/12)" in state and "not final" in state
+
+
+def test_claim_blocks_follow_the_data(tmp_path):
+    root = make_results_root(tmp_path)
+    rows = model_rows("scratch-gpt", "scratch", attack_success=("dh-00",), overflow=1)
+    for r in rows:
+        if r["arm"] == "protected" and r["case_id"] == "dh-00":
+            r.update(succeeded=True, attack_blocked=False, blocked_by={"sandbox": 1})
+    write_raw(root / "phase4-scratch-gpt", rows)
+    frozen = root / "phase5-final"
+    build_module.build(str(root), str(frozen), now=BEFORE)
+    numbers = load_json(frozen / "numbers.json")
+    claims = _claims(numbers, tmp_path)
+    assert claims["claim-protected"].startswith("With guardrails, attacks still succeeded for 1 of the 8")
+    assert "scratch-gpt 1/" in claims["claim-protected"] and "no attack succeeded" not in claims["claim-protected"]
+    assert claims["claim-blocked"].startswith("Not every attempted attack was blocked")
+    assert "scratch-gpt 0/1 blocked" in claims["claim-blocked"]
+    assert claims["claim-kernel"].startswith("Kernel-layer blocks were recorded: the sandbox in 1/")
+    assert claims["claim-overflow"].startswith("Context overflows occurred") and "scratch-gpt 1" in claims[
+        "claim-overflow"]
+    final = dict(numbers, data_state="final", snapshot_display="2026-10-29T15:40Z")
+    state = "\n".join(blocks.render_block("claim-state", final, "x.md"))
+    assert state.startswith("The data is final") and "stopped at the freeze or on their quota" in state
+    late = dict(numbers, snapshot_display="2026-10-29T15:40Z")
+    assert "after the D-09 freeze" in "\n".join(blocks.render_block("claim-state", late, "x.md"))
+
+
+def test_claim_blocks_may_repeat_but_other_blocks_may_not(frozen_numbers, tmp_path):
+    frozen, numbers = frozen_numbers
+    path = tmp_path / "doc.md"
+    path.write_bytes(marker_doc(["claim-protected", "status", "claim-protected"]))
+    assert blocks.apply_blocks(str(path), numbers, str(frozen)) == (3, True)
+    assert path.read_text(encoding="utf-8").count("With guardrails, no attack succeeded") == 2
+    with pytest.raises(blocks.BlockError, match="duplicate"):
+        blocks.find_blocks(marker_doc(["headline", "headline"]).decode(), "x.md")
+
+
+@pytest.mark.parametrize("prose", [
+    "With guardrails, no attack succeeded for any model.",
+    "The Success (guardrails) column is zero in every row.",
+    "The sandbox and seccomp recorded zero blocks across the run.",
+    "The tool broker and the policy engine stopped every\nattempted attack first.",      # wrapped across lines
+    "No current episode had a context\noverflow, so nothing changes.",
+    "The hosted rows were still running when the data was frozen.",
+])
+def test_an_outcome_stated_outside_a_block_fails(frozen_numbers, tmp_path, prose):
+    frozen, numbers = frozen_numbers
+    repo = make_repo(tmp_path, page04=f"# Page 04\n\nIntro line.\n{prose}\n".encode())
+    lines, code = _check(repo, frozen, [DOC_04])
+    fails = [line for line in lines if line.startswith("FAIL check:")]
+    assert code == 1 and len(fails) == 1 and fails[0].startswith(f"FAIL check: {DOC_04}:4: outcome stated")
+    assert prose.splitlines()[0] not in fails[0]              # the reason never echoes the text
+
+
+def test_outcome_words_inside_a_claim_block_and_neutral_prose_pass(frozen_numbers, tmp_path):
+    frozen, numbers = frozen_numbers
+    page = marker_doc(["claim-protected", "claim-kernel"], before="# Page 04\n\nThe sentence below says whether "
+                      "any attack succeeded with guardrails.", after="A zero there means no attack action reached them.")
+    repo = make_repo(tmp_path, page04=page)
+    blocks.apply_blocks(str(repo / DOC_04), numbers, str(frozen))
+    lines, code = _check(repo, frozen, [DOC_04])
+    assert code == 0, lines
+
+
 def test_only_the_legacy_block_has_legacy_rows(frozen_numbers, tmp_path):
     frozen, numbers = frozen_numbers
     for name in blocks.BLOCK_NAMES:

@@ -756,7 +756,7 @@ The October 2026 Gemini 3.5 Flash-Lite and Gemma 4 31B rows were produced by an 
 
 **Metrics per model.** Attack attempted %, success % without guardrails, success % with guardrails, ASR over format-valid episodes, conditional block rate (blocked given an attempted attack), refusal %, blocks by layer, retries after a block, benign task completion % (both arms), false-positive %, parse-error rate per step, latency per step. Every proportion is printed with its 95% Wilson interval.
 
-**Expected result (hypothesis).** Attempted % varies widely between models; success % with guardrails is 0 for every model; benign completion is close to the unprotected arm with no false positives.
+**Expected result (hypothesis).** We expect attempted % to vary widely between models, success % with guardrails to be 0 for every model, and benign completion to stay close to the unprotected arm with no false positives. Section 7.3 gives what the data shows.
 
 ## 7.3 Results (frozen Phase 5 data)
 

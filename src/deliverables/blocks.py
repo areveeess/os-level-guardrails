@@ -14,6 +14,14 @@ rendered from numbers.json alone, through the same table renderers the report us
 report and the docs cannot disagree. The headline is in a fixed order and never ranks, and every
 row that is not complete carries its episodes done (D-02).
 
+The claim-* blocks are one generated paragraph each: the result sentences the prose of a doc would
+otherwise state by hand (whether an attack succeeded with guardrails, whether every attempt was
+blocked, what the kernel layers recorded, whether any context overflowed, which rows are partial).
+Each one branches on the data, so after the post-freeze build it says whatever the data then says,
+and the check fails when the prose outside the blocks states such an outcome itself (CR-01). A claim
+block may appear more than once in a doc, because it renders the same lines wherever it is placed;
+every other block appears at most once.
+
 apply_blocks keeps each file's own line endings (README.md is CRLF in the working tree, the
 other targets are LF) and every byte outside the blocks, and writes only when a block changed.
 """
@@ -26,8 +34,9 @@ from src.benchmark.report import (LAYER_EVIDENCE, LAYERS, LAYER_TITLES, chart_li
 from src.benchmark.stats import format_prop
 from src.deliverables import DS_EXPECTED, FROZEN_DIR, HOSTED_MODELS, MODEL_ORDER
 
+CLAIM_NAMES = ("claim-protected", "claim-blocked", "claim-kernel", "claim-overflow", "claim-state")
 BLOCK_NAMES = ("status", "headline", "findings", "control", "layers", "hosted", "confounds", "legacy", "threats",
-               "charts")
+               "charts") + CLAIM_NAMES
 DOC_TARGETS = ("README.md", "docs/SDD.md", "docs/viva/04-namespaces-seccomp-and-local-inference.md",
                "docs/viva/05-evaluation-statistics-and-examiner-qa.md")
 REQUIRED_DOCS = DOC_TARGETS[:3]           # page 05 is optional until plan 05-03 creates it
@@ -66,7 +75,7 @@ def find_blocks(text: str, path: str) -> list:
         if begin:
             if open_block is not None:
                 raise BlockError(f"{path}:{lineno}: nested block {name!r} inside {open_block['name']!r}")
-            if name in seen:
+            if name in seen and name not in CLAIM_NAMES:
                 raise BlockError(f"{path}:{lineno}: duplicate block {name!r}")
             seen.add(name)
             open_block = {"name": name, "begin": index}
@@ -262,6 +271,107 @@ def _charts(numbers: dict, doc_path: str, frozen_dir: str) -> list:
                                             "to see them."]
 
 
+# ── Claim paragraphs (CR-01): the result sentences of the prose, branching on the data ──
+
+def _names(models: list) -> str:
+    return ", ".join(_name(m) for m in models)
+
+
+def _claim_protected(numbers: dict) -> list:
+    models = _models(numbers)
+    leaks = [m for m in models if m["metrics"]["success_protected"]["k"]]
+    if leaks:
+        text = (f"With guardrails, attacks still succeeded for {len(leaks)} of the {len(models)} language models: "
+                + ", ".join(f"{_name(m)} {_kn(m['metrics']['success_protected'])}" for m in leaks)
+                + f". For the other {len(models) - len(leaks)} the Success (guardrails) cell is 0.")
+    else:
+        text = (f"With guardrails, no attack succeeded for any of the {len(models)} language models, local or hosted: "
+                f"the Success (guardrails) cell is 0 in every model row of the headline.")
+    control = _control(numbers)
+    if control:
+        k = control["metrics"]["success_protected"]
+        if k["k"] == 0:
+            text += (" The scripted control, which attempts every attack, also had no successful attack with "
+                     f"guardrails ({_kn(k)}).")
+        else:
+            text += (f" The scripted control, which attempts every attack, still succeeded in {_kn(k)} protected "
+                     f"attack episodes.")
+    return [text]
+
+
+def _all_blocked(numbers: dict) -> bool:
+    return all(m["metrics"]["blocked_given_attempt"]["k"] == m["metrics"]["blocked_given_attempt"]["n"]
+               for m in _models(numbers))
+
+
+def _claim_blocked(numbers: dict) -> list:
+    models = _models(numbers)
+    pooled = numbers["pooled"]["blocked_given_attempt"]
+    if _all_blocked(numbers):
+        return [f"Every attack a language model really attempted with guardrails on was blocked at the attack action "
+                f"itself: {_kn(pooled)} attempted attacks, pooled over the {len(models)} language models (the "
+                f"Blocked given attempt column of the headline)."]
+    missed = [m for m in models
+              if m["metrics"]["blocked_given_attempt"]["k"] != m["metrics"]["blocked_given_attempt"]["n"]]
+    return ["Not every attempted attack was blocked at the attack action: "
+            + ", ".join(f"{_name(m)} {_kn(m['metrics']['blocked_given_attempt'])} blocked" for m in missed)
+            + f". Pooled over the {len(models)} language models, {_kn(pooled)} attempted attacks were blocked at the "
+              f"attack action."]
+
+
+def _claim_kernel(numbers: dict) -> list:
+    models = _models(numbers)
+    (sk, n), (ck, _) = _pooled_layer(numbers, "sandbox"), _pooled_layer(numbers, "seccomp")
+    if sk == 0 and ck == 0:
+        text = (f"The sandbox and the seccomp filter recorded no block in any of the {n} protected-arm episodes of "
+                f"the {len(models)} language models (0/{n} each).")
+        if _all_blocked(numbers):
+            text += (" The tool broker and the policy engine in front of them blocked every attempted attack at the "
+                     "attack action first, so no attack action reached them.")
+        else:
+            text += (" Not every attempted attack was blocked at the attack action by the layers in front of them, "
+                     "and no kernel-layer block was recorded for those attacks either.")
+    else:
+        text = (f"Kernel-layer blocks were recorded: the sandbox in {sk}/{n} and the seccomp filter in {ck}/{n} "
+                f"protected-arm episodes of the {len(models)} language models.")
+    return [text + " A recorded count is a lower bound, not proof that the kernel layers work."]
+
+
+def _claim_overflow(numbers: dict) -> list:
+    counts = [(m["model"], m["context_overflow_episodes"]) for m in _models(numbers)]
+    if all(c == 0 for _, c in counts):
+        return ["No current-engine episode had a context overflow (0 for every language model), so the deferred "
+                "WR-01 bias touches none of the present data."]
+    return ["Context overflows occurred in current-engine episodes: "
+            + ", ".join(f"{model} {c}" for model, c in counts if c)
+            + ". The deferred WR-01 bias can raise the ASR-valid figures of these models."]
+
+
+def _claim_state(numbers: dict) -> list:
+    partial = [m for m in _models(numbers) if not m["complete"]]
+    snap, freeze = numbers["snapshot_display"], numbers["freeze_display"]
+    if numbers["data_state"] == "final":
+        text = f"The data is final: it was copied at {snap} (UTC), after the D-09 freeze of {freeze}."
+        if partial:
+            text += (f" {_names(partial)} stopped at the freeze or on their quota before finishing, so they stay "
+                     f"labelled partial with their episodes done and are never ranked against the complete rows.")
+        else:
+            text += " Every language model finished its planned run."
+        return [text]
+    if snap < freeze:
+        text = (f"The data is a snapshot of {snap} (UTC), copied before the D-09 freeze of {freeze} while the hosted "
+                f"loop was still collecting.")
+    else:
+        text = (f"The data is a snapshot of {snap} (UTC), copied after the D-09 freeze of {freeze} but before the "
+                f"hosted loop had recorded a final state for every model.")
+    if partial:
+        text += (f" {_names(partial)} are labelled partial with their episodes done; they are not final and are "
+                 f"never ranked against the complete rows.")
+    else:
+        text += " Every language model has finished its planned run."
+    return [text]
+
+
 def render_block(name: str, numbers: dict, doc_path: str, frozen_dir: str = FROZEN_DIR) -> list:
     """The lines (no line endings) between the markers of block `name`, from numbers.json only.
 
@@ -290,6 +400,10 @@ def render_block(name: str, numbers: dict, doc_path: str, frozen_dir: str = FROZ
         return _body(threats_lines(numbers["threats"]))
     if name == "charts":
         return _charts(numbers, doc_path, frozen_dir)
+    claim = {"claim-protected": _claim_protected, "claim-blocked": _claim_blocked, "claim-kernel": _claim_kernel,
+             "claim-overflow": _claim_overflow, "claim-state": _claim_state}.get(name)
+    if claim:
+        return claim(numbers)
     raise BlockError(f"unknown block name {name!r}")
 
 

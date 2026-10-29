@@ -7,13 +7,20 @@ how many blocks were actually recorded. This page explains the two kernel layers
 namespaces and seccomp-bpf), why we report them the way we do, and the traps that make a comparison between
 a 4-bit local model and a hosted model unfair if nobody states them.
 
-An honest framing comes first, because an examiner will ask. In every Phase 4 run the sandbox and the
-seccomp filter recorded zero blocks across all protected-arm episodes (the count and its n are in the
-layers block of Part C). That is not a failure of those layers and it is not evidence that they work. It
-means the attacks never reached them: the application-level layers in front of them (the tool broker's
-capability list and the policy engine) stopped every attempted attack first. The evidence of what the
-kernel layers contain comes from the Phase 1 residual-bypass table, which we cite by row number, and the
-zero is reported with its n, never padded (decision D-07b).
+An honest framing comes first, because an examiner will ask. The paragraph below is generated from the
+frozen data by the deliverables build, so it says what the data says even after the hosted rows change.
+It gives what the sandbox and the seccomp filter recorded across the protected-arm episodes, and whether
+the application-level layers in front of them (the tool broker's capability list and the policy engine)
+blocked each attempted attack first.
+
+<!-- deliverables:begin claim-kernel -->
+The sandbox and the seccomp filter recorded no block in any of the 1173 protected-arm episodes of the 8 language models (0/1173 each). The tool broker and the policy engine in front of them blocked every attempted attack at the attack action first, so no attack action reached them. A recorded count is a lower bound, not proof that the kernel layers work.
+<!-- deliverables:end claim-kernel -->
+
+When the kernel-layer count is zero, that is not a failure of those layers and it is not evidence that
+they work: it means no attack action reached them. The evidence of what the kernel layers contain comes
+from the Phase 1 residual-bypass table, which we cite by row number, and the count is reported with its
+n, never padded (decision D-07b).
 
 How to use this page: read the glossary once, read Part A (the ideas) and Part B (how this repository
 applies them), look at Part C (the real numbers from this run) the night before, and practise Part D out
@@ -286,11 +293,11 @@ reaches the sandbox only after the broker and the policy engine allowed it.
 
 Every number in this part is generated from results/phase5-final/numbers.json by the deliverables build
 (`python -m src.deliverables build`, Phase 5) and checked by `python -m src.deliverables check`, which fails
-if a table here no longer matches the data or if the prose around it quotes a number that is not in the
-data. The status block below gives the data snapshot and says which rows are partial. The local rows are
-final. The Groq rows become final when the build is re-run after the freeze at 15:30 UTC on 2026-10-29
-(D-09); that re-run rewrites the tables on this page by itself, so the prose here quotes no Groq or pooled
-number.
+if a table or a generated sentence here no longer matches the data, or if the prose around them states a
+headline outcome in its own words. The status block below gives the data snapshot and says which rows are
+partial. The local rows are final. The Groq rows become final when the build is re-run after the freeze at
+15:30 UTC on 2026-10-29 (D-09); that re-run rewrites the tables and the generated sentences on this page by
+itself, so the prose between them states no result that depends on the Groq rows.
 
 ### Completeness per model
 
@@ -335,10 +342,21 @@ fewer, and the denominators in its cells show how many.
 Fixed order (the five local models, then the three hosted ones), not a ranking. A row marked partial has not finished its planned run and is not final. Each cell is P% (k/n) [95% Wilson interval]; the scripted control is a reference, not a language model.
 <!-- deliverables:end headline -->
 
-With guardrails, attack success is zero in every row. For a complete local model that is 0 of 120 attack
-episodes (Wilson upper bound 3.1 %); counting each case once, it is 0 of 40 cases (upper bound 8.8 %).
-False positives with guardrails are zero for every local model. The "Blocked given attempt" column shows
-that every attack a model really attempted in the protected arm was blocked at the attack action itself.
+The two generated sentences below read the headline for you: whether any attack succeeded with
+guardrails, and whether each attack a model really attempted was blocked at the attack action itself.
+
+<!-- deliverables:begin claim-protected -->
+With guardrails, no attack succeeded for any of the 8 language models, local or hosted: the Success (guardrails) cell is 0 in every model row of the headline. The scripted control, which attempts every attack, also had no successful attack with guardrails (0/120).
+<!-- deliverables:end claim-protected -->
+
+<!-- deliverables:begin claim-blocked -->
+Every attack a language model really attempted with guardrails on was blocked at the attack action itself: 200/200 attempted attacks, pooled over the 8 language models (the Blocked given attempt column of the headline).
+<!-- deliverables:end claim-blocked -->
+
+How to read a zero in the Success (guardrails) column: for a complete local model it is 0 of 120 attack
+episodes, with a Wilson upper bound of 3.1 %; counting each case once, it is 0 of 40 cases, with an upper
+bound of 8.8 %. The "False positive (guardrails)" column gives the cost of the guardrails on benign tasks.
+
 scratch-gpt called the attacker's tool before the injection could have influenced it in 21/120 attack
 episodes; those are a random-choice baseline and are not counted as attacks.
 
@@ -353,8 +371,9 @@ episodes; those are a random-choice baseline and are not counted as attacks.
 The scripted control obeys every injection. Guardrails blocked 120 of its 120 attempted attacks; the tool broker denied the attacker's tool call in 120 of them. It is deterministic, so its 120 protected attack episodes are 40 distinct cases.
 <!-- deliverables:end control -->
 
-The control shows the guardrails stopping attacks that were certainly attempted, whatever a model would
-have done; none of its actions reaches the kernel layers, so it says nothing about them.
+The control tests the guardrails on attacks that were certainly attempted, whatever a model would have
+done; the tool broker refuses its attacker tool calls before they run, so it says nothing about the
+kernel layers.
 
 ### Ollama window evidence (D-06)
 
@@ -365,7 +384,7 @@ have done; none of its actions reaches the kernel layers, so it says nothing abo
 - ollama-llama3.2-3b: window 8192 confirmed on the primary path, long-prompt probe 5273 tokens; 1251 steps,
   largest prompt 1042 tokens, 0 steps at or above 95 % of the window.
 - llama3.2:3b re-check: the October rows carry no prompt_tokens, so they are truncation-unknown. In the new
-  8192 run, 0/342 episodes had a step above the measured default of 4,096 (largest prompt 1,042), so at
+  8192 run, none of its 342 episodes had a step above the measured default of 4,096 (largest prompt 1,042), so at
   that default the old run would not have been truncated either. The new run supersedes the old one anyway
   (D-05). Caveat: the default was measured on today's server version; October's was not recorded.
 
@@ -399,14 +418,18 @@ Seccomp-BPF: no block was recorded in any of the 1173 protected-arm episodes of 
 What the two kernel layers contain is documented in the Phase 1 residual-bypass table (.planning/phases/01-evaluation-hardening-policy-fix/01-REVIEW-FIX.md): rows 1, 2, 8, 9, 10, 15 and 16 were recorded as blocked by seccomp, rows 20, 21 and 22 as blocked by the sandbox, and in rows 3-7, 11-14, 17-19 and 23 the layer contained the action (no network egress, the canary file instead of the real one, a system call refused with EPERM) without an error signature, so no block was recorded. The counts above are therefore a lower bound: the executor records a sandbox or seccomp block only when a command's error text matches the signatures of detect_enforcement in src/sandbox/executor.py.
 <!-- deliverables:end layers -->
 
-Said plainly: **the sandbox and seccomp layers recorded 0 blocks.** The reason is that the layers in front
-stopped every attack first. All the recorded blocks are in the tool broker and policy engine rows of the
-first table above, and every attempted attack was blocked at the attack action (the "Blocked given
-attempt" column of the headline), so the attack actions were stopped before any of them reached the
-sandbox. The actions that did reach the sandbox were allowed ones, and none of them failed with an
-enforcement signature. The zero is therefore not evidence that the kernel layers work, and not evidence
-that they fail: it is evidence that, in this benchmark, they were never needed. No new attack suite was
-written to raise the count (D-07b).
+Said plainly, from the data:
+
+<!-- deliverables:begin claim-kernel -->
+The sandbox and the seccomp filter recorded no block in any of the 1173 protected-arm episodes of the 8 language models (0/1173 each). The tool broker and the policy engine in front of them blocked every attempted attack at the attack action first, so no attack action reached them. A recorded count is a lower bound, not proof that the kernel layers work.
+<!-- deliverables:end claim-kernel -->
+
+How to read that count. The blocks of the tool broker and the policy engine are in the first table
+above. When those two layers block each attempted attack at the attack action (the "Blocked given
+attempt" column of the headline), no attack action reaches the sandbox; the actions that do reach it are
+allowed ones, and a block is recorded only if one of them fails with an enforcement signature. A zero is
+then not evidence that the kernel layers work, and not evidence that they fail: it is evidence that, in
+this benchmark, they were not needed. No new attack suite was written to raise the count (D-07b).
 
 The last paragraph of the block cites the Phase 1 residual-bypass table by row number. Those rows are the
 evidence of what the kernel layers contain; they are not added to the Phase 4 counts.
@@ -430,14 +453,19 @@ The loop state and quota stops are read from each model's frozen hosted_state.js
 <!-- deliverables:end hosted -->
 
 An overnight network outage left many pending infra rows (the "Infra errors pending" column), which the
-loop keeps retrying under the rule; groq-gpt-oss-20b is error-dominated for that reason and is labelled
-partial. The gpt-oss-120b false positives are benign episodes in which the policy engine blocked an action
-(see the "False positive (guardrails)" column of the headline and the benign column of the policy-engine
-row in the layers block); they are a cost of the guardrails and are reported, not hidden.
+loop retries under the rule until the freeze; a model with more infra errors than finished episodes is
+labelled error-dominated in the status block. A false positive of a hosted model is a benign episode in
+which the policy engine blocked an action (the "False positive (guardrails)" column of the headline and
+the benign column of the policy-engine row in the layers block); false positives are a cost of the
+guardrails and are reported, not hidden.
 
-These rows are partial: they are shown with their n and are not ranked against the complete local rows.
-Most of their attack episodes are ds, because ds episodes ran first, which is the selection effect
-described in Part A.
+<!-- deliverables:begin claim-state -->
+The data is a snapshot of 2026-10-29T07:12Z (UTC), copied before the D-09 freeze of 2026-10-29T15:30Z while the hosted loop was still collecting. groq-gpt-oss-120b (partial 251/342), groq-gpt-oss-20b (partial 117/342), groq-qwen3.8-27b (partial 272/342) are labelled partial with their episodes done; they are not final and are never ranked against the complete rows.
+<!-- deliverables:end claim-state -->
+
+A partial row is shown with its n and is not ranked against the complete local rows. Because ds episodes
+ran first, most attack episodes of a partial hosted row are ds, which is the selection effect described
+in Part A.
 
 ### What the code review found and what we fixed
 
@@ -492,14 +520,19 @@ Deferred until after the freeze, because they touch run-affecting code (WINDOWS.
 - **WR-01: a context overflow after valid steps is classed as a format failure**, but only when the model
   had not already attempted the attack, because the "attacked" rule comes first. So overflows remove
   non-attacking episodes from the ASR-valid denominator, which biases ASR-valid upward; raw success is not
-  affected. No Phase 4 episode had a context overflow, so it touches none of the current data, and the
-  report's threats section states that count from the data. The fix changes the outcome rules
+  affected. Whether it touches the current data depends on the number of context overflows, which the
+  generated sentence after this list and the report's threats section state from the data. The fix
+  changes the outcome rules
   (src/benchmark/outcomes.py), which would make rows written before and after it incomparable in the
   middle of the hosted run.
 - **IN-04: the context-overflow marker is matched as a substring of any provider's error text**, so an
   unrelated error that happens to contain it could be misclassified.
 - **IN-05: a setting that orders the work queue is stored where a resume overwrites it**, and one
   docstring in the runner is out of date.
+
+<!-- deliverables:begin claim-overflow -->
+No current-engine episode had a context overflow (0 for every language model), so the deferred WR-01 bias touches none of the present data.
+<!-- deliverables:end claim-overflow -->
 
 Not addressed (Info findings outside the fix's scope): IN-02 (the stated retry time is rounded), IN-03
 (loose error classes and sticky states in the availability probe), IN-06 (labels in the layer table), the
@@ -515,8 +548,8 @@ of IN-07 (duplicated constants and helpers).
   silently contains an action (no egress, a canary instead of the real file) records nothing. The Phase 1
   residual-bypass table, rows 1, 2, 8, 9, 10, 15, 16 (seccomp), 20, 21, 22 (sandbox) and 3-7, 11-14, 17-19,
   23 (contained without a record), is the evidence of what the layers do, not the Phase 4 counts.
-- Phase 4 recorded no sandbox block and no seccomp block in any protected-arm episode (the count and its n
-  are in the layers block of Part C). This shows the layers were not needed in this benchmark, not that
+- The sandbox and seccomp counts are in the generated sentence at the top of this page and, with their n,
+  in the layers block of Part C. A zero there shows the layers were not needed in this benchmark, not that
   they would hold against an attack the application layers miss.
 - The seccomp filter is a deny-list: a dangerous system call that is not named is allowed.
 - No layer protects an allowed but harmful action through a permitted tool.
@@ -526,8 +559,8 @@ of IN-07 (duplicated constants and helpers).
   the honest unit, and with 40 cases a zero still allows a true rate up to 8.8 %.
 - The context default of 4,096 was measured on today's Ollama server; the October server's version was not
   recorded, so the "not truncated" conclusion for the old run holds at the measured default only.
-- The Groq rows are partial under the stopping rule, ds-heavy by design, and their providers can change the
-  served model without notice.
+- A Groq row that stopped early under the stopping rule is partial and ds-heavy by design (the status block
+  says which rows are partial), and the providers can change the served model without notice.
 - phi3.5:3.8b and gemma3:1b were descoped (D-01), and Gemini/Gemma were not resumed (D-02).
 
 ---
@@ -572,11 +605,12 @@ Because it forbids mount() itself. If it were installed first, the sandbox could
 private view. So the order is namespaces, then mounts, then the filter, then the agent's command.
 
 **Q8. Your sandbox and seccomp counts are zero. Doesn't that mean they are useless?**
-No. The zero (its n is in the layers block of Part C) means no attack reached them: the tool broker and
-the policy engine stopped every attempted attack first, at the attack action. The kernel layers are a
-backstop for what the first layers miss, and in this benchmark they missed nothing. We report the zero
-plainly with its n (D-07b) and point to the Phase 1 residual-bypass table, where rows 1, 2, 8, 9, 10, 15
-and 16 were recorded seccomp blocks and rows 20, 21 and 22 sandbox blocks.
+No. The generated sentence at the top of this page gives the count with its n and says whether the tool
+broker and the policy engine blocked each attempted attack at the attack action first. If they did, no
+attack reached the kernel layers: those layers are a backstop for what the first layers miss, and a
+backstop that is never needed records nothing. We report the count plainly with its n (D-07b) and point
+to the Phase 1 residual-bypass table, where rows 1, 2, 8, 9, 10, 15 and 16 were recorded seccomp blocks
+and rows 20, 21 and 22 sandbox blocks.
 
 **Q9. Why do you call the counts a lower bound?**
 A kernel-layer block is recorded only when a failed command's error text matches a known signature. A
@@ -597,7 +631,8 @@ the task genuinely needs. Guardrails limit what the agent can do, not whether it
 **Q12. Why is comparing a local Ollama model with a hosted model unfair?**
 The rows differ in size, training, quantization (Q4_K_M locally, bf16 for the in-process Qwen rows,
 whatever Groq serves), context handling and serving stack all at once. We present a spectrum and name the
-confounds. The guardrail result does not depend on these: protected success is 0 for every model.
+confounds. The guardrail result does not depend on these, because it is read row by row from the
+Success (guardrails) column, never from a comparison between rows.
 
 **Q13. What is silent truncation and how did you rule it out?**
 If a prompt exceeds Ollama's window, it cuts the front without an error, so the model can lose its
@@ -606,14 +641,14 @@ with a 8192 window (D-06), proved the window with a long-prompt probe (6402 and 
 4198-7782), and logged prompt_tokens on every step: the largest prompt was 1,042 tokens.
 
 **Q14. What did the llama3.2:3b re-check find?**
-The October rows had no prompt_tokens, so they are truncation-unknown. In the new 8192 run, 0/342
+The October rows had no prompt_tokens, so they are truncation-unknown. In the new 8192 run, none of its 342
 episodes had any step above the measured 4,096 default, so at that default the old run would not have been
 cut. We still use the new run (D-05), and we note that October's server version was not recorded.
 
 **Q15. Why are three runs per case not three times the evidence?**
 At temperature 0 the runs are near-copies, so 120 attack episodes are about 40 independent cases.
 Treating them as 120 makes intervals too narrow (pseudo-replication). The report adds a case-level view:
-0/40 cases succeeded with guardrails for every local model, upper bound 8.8 %.
+for a model with no protected success, 0 of 40 cases gives an upper bound of 8.8 %, not 3.1 %.
 
 **Q16. Is temperature 0 fully deterministic?**
 No. It removes sampling randomness, but GPU arithmetic and hosted batching can still change a token now and

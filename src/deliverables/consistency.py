@@ -10,11 +10,19 @@ re-run keeps adding episodes until the freeze). This check makes the drift loud:
                  accepts either model's; a line saying "pooled" accepts the pooled fractions
   timestamp      an ISO timestamp (minute precision) other than the snapshot or the freeze
   percentage     'P% (k/n' whose P is not k/n rounded to P's decimals
+  outcome        a paragraph outside the blocks that states a headline outcome in its own words
+                 (OUTCOME_PATTERNS: "no attack succeeded", "zero in every row", "every attempted attack
+                 was blocked", "recorded no block", "no episode had a context overflow", "were still
+                 running when" and the like). Such a sentence would stay true-looking after the data
+                 changes, so it must come from a claim-* block, which branches on the data (CR-01).
+                 The patterns are a fixed list of the forms the docs used, not a language model: a new
+                 wording of an outcome is caught only once it is added here.
   key-shaped     text matching the fixed key regex, in a checked doc (inside blocks too) or in any
                  text file under the frozen directory; reported as path:line only, never the text
 
-Lines inside blocks are exempt from the fraction, timestamp and percentage rules: the
-stale-block rule covers them. SECRET_RE is a copy of src.benchmark.run_checks.SECRET_RE (pinned
+Lines inside blocks are exempt from the fraction, timestamp, percentage and outcome rules: the
+stale-block rule covers them. A paragraph is a run of plain lines outside the blocks; a blank
+line, a heading, a list item, a table row, a code fence and a block marker each start a new one. SECRET_RE is a copy of src.benchmark.run_checks.SECRET_RE (pinned
 by a test), not an import: run_checks imports the provider registry, which loads API keys.
 """
 
@@ -48,6 +56,29 @@ PERCENT_RE = re.compile(r"(?<![\w.])(\d+(?:\.(\d+))?)% \((\d+)/(\d+)")
 POOLED_RE = re.compile(r"\bpooled\b", re.IGNORECASE)
 _ALIAS_RES = {model: [re.compile(rf"(?<![\w.-]){re.escape(a)}(?![\w-]|\.\w)", re.IGNORECASE) for a in aliases]
               for model, aliases in MODEL_ALIASES.items()}
+
+# Headline outcomes stated as prose (CR-01); matched case-insensitively over a whole paragraph, so a sentence
+# wrapped across lines is still found
+OUTCOME_PATTERNS = (
+    r"no attack (?:\w+ )?succeeded",
+    r"not one attack succeeded",
+    r"attacks? (?:still )?never succeeded",
+    r"succeeded zero times",
+    r"(?:zero|0) in every (?:model )?row",
+    r"(?:is|are|was|were) (?:zero|0) for every",
+    r"every attempted attack (?:was|were) (?:blocked|stopped)",
+    r"every attack a model really (?:tried|attempted) was (?:blocked|stopped)",
+    r"stopped every (?:attempted )?attack",
+    r"stopped every attempt",
+    r"recorded (?:no|zero|0) blocks?\b",
+    r"recorded no (?:sandbox|seccomp) block",
+    r"no block at all",
+    r"no (?:current(?:-engine)? |phase 4 )?episode had a context overflow",
+    r"(?:were|was) still running when",
+    r"they missed nothing",
+)
+OUTCOME_RE = re.compile(r"\b(?:" + "|".join(OUTCOME_PATTERNS) + r")", re.IGNORECASE)
+_PARAGRAPH_START_RE = re.compile(r"^\s*(?:#|[-*+] |\d+\. |\||```)")
 
 
 def _add_metrics(out: set, metrics: dict):
@@ -149,6 +180,38 @@ def scan_text(lines: list, numbers: dict) -> list:
     return out
 
 
+def paragraphs(lines: list, inside: set) -> list:
+    """[[line index, ...]] of the plain paragraphs: runs of non-blank lines outside the blocks, split at
+    headings, list items, table rows and code fences."""
+    out, current = [], []
+    for index, line in enumerate(lines):
+        if index in inside or not line.strip():
+            if current:
+                out.append(current)
+            current = []
+            continue
+        if current and _PARAGRAPH_START_RE.match(line):
+            out.append(current)
+            current = []
+        current.append(index)
+    if current:
+        out.append(current)
+    return out
+
+
+def outcome_problems(lines: list, para: list) -> list:
+    """[(line index, reason)] for headline outcomes stated in one paragraph (CR-01), never echoing the text."""
+    joined, starts = "", []
+    for index in para:
+        starts.append((len(joined), index))
+        joined += lines[index].strip() + " "
+    out = []
+    for m in OUTCOME_RE.finditer(joined):
+        index = [i for offset, i in starts if offset <= m.start()][-1]
+        out.append((index, "outcome stated outside a generated block (use a claim-* block, CR-01)"))
+    return out
+
+
 def check_doc(path: str, display: str, numbers: dict, frozen_dir: str) -> tuple:
     """(block count, ['display:line: reason']) for one document."""
     with open(path, "rb") as f:
@@ -165,11 +228,16 @@ def check_doc(path: str, display: str, numbers: dict, frozen_dir: str) -> tuple:
             problems.append(f"{display}:{block['begin'] + 1}: block {block['name']} is stale "
                             f"(run python -m src.deliverables blocks)")
     allowed = allowed_fractions(numbers)
+    reasons = {}
     for index, line in enumerate(lines):
-        reasons = _key_problem(line)
+        reasons[index] = _key_problem(line)
         if index not in inside:
-            reasons += _line_problems(line, numbers, allowed)
-        problems += [f"{display}:{index + 1}: {reason}" for reason in reasons]
+            reasons[index] += _line_problems(line, numbers, allowed)
+    for para in paragraphs(lines, inside):
+        for index, reason in outcome_problems(lines, para):
+            reasons[index].append(reason)
+    for index in range(len(lines)):
+        problems += [f"{display}:{index + 1}: {reason}" for reason in dict.fromkeys(reasons[index])]
     return len(found), problems
 
 

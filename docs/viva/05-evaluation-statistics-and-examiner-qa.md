@@ -4,17 +4,28 @@ These notes are for an Operating Systems viva. Phase 5 of the project did no new
 results of every Phase 4 run into one read-only directory (results/phase5-final), and generated every
 deliverable from that one copy: the cross-model report and its charts, the result tables in the README and
 the SDD, the slide deck, and the result tables on this page and on page 04. One command rebuilds all of it,
-and a consistency check fails if any document quotes a number that differs from the frozen data. This page
+and a consistency check fails if a generated table or sentence no longer matches the frozen data, or if the
+prose around them states a result by hand. This page
 explains the statistics behind those numbers, the ways the comparison could mislead, and how to defend the
 result in front of an examiner.
 
-An honest framing comes first, because an examiner will ask. With guardrails, no attack succeeded for any
-current-engine model, from the deliberately compliant LoRA-tuned model and the tiny model trained from
-scratch to the hosted models. The two kernel layers (the namespace sandbox and the seccomp filter) recorded
-no block at all, because the layers in front of them (the tool broker and the policy engine) stopped every
-attempted attack first; that zero is a lower bound, not proof that the kernel layers work. The hosted Groq
-rows were still running when the data was frozen, so they are labelled partial with their episode counts
-and are never ranked against the complete local rows. Read the tables in Part D for the exact numbers.
+An honest framing comes first, because an examiner will ask. The comparison deliberately includes a model
+LoRA-tuned to obey injections and a tiny model trained from scratch, next to three hosted models. The three
+paragraphs below are generated from the frozen data, so they stay true when the data changes: what
+happened with guardrails on, what the two kernel layers (the namespace sandbox and the seccomp filter)
+recorded, and which rows are still partial. Read the tables in Part D for the exact numbers.
+
+<!-- deliverables:begin claim-protected -->
+With guardrails, no attack succeeded for any of the 8 language models, local or hosted: the Success (guardrails) cell is 0 in every model row of the headline. The scripted control, which attempts every attack, also had no successful attack with guardrails (0/120).
+<!-- deliverables:end claim-protected -->
+
+<!-- deliverables:begin claim-kernel -->
+The sandbox and the seccomp filter recorded no block in any of the 1173 protected-arm episodes of the 8 language models (0/1173 each). The tool broker and the policy engine in front of them blocked every attempted attack at the attack action first, so no attack action reached them. A recorded count is a lower bound, not proof that the kernel layers work.
+<!-- deliverables:end claim-kernel -->
+
+<!-- deliverables:begin claim-state -->
+The data is a snapshot of 2026-10-29T07:12Z (UTC), copied before the D-09 freeze of 2026-10-29T15:30Z while the hosted loop was still collecting. groq-gpt-oss-120b (partial 251/342), groq-gpt-oss-20b (partial 117/342), groq-qwen3.8-27b (partial 272/342) are labelled partial with their episodes done; they are not final and are never ranked against the complete rows.
+<!-- deliverables:end claim-state -->
 
 How to use this page: read the glossary and Parts A to C once (the ideas), look at Part D (the real numbers,
 generated from the frozen data) the night before, learn Part E (the one-page defense) well enough to say it
@@ -309,8 +320,13 @@ that turns a context overflow into a format failure. So an episode that overflow
 the model had ignored the injection leaves the ASR-valid denominator, while one that overflows after an
 attempted attack stays in it. The more a model overflows, the higher its ASR-valid looks. This is the
 deferred code-review finding WR-01. The fix touches a file that would change how rows are classified
-mid-run, so it waits until after the hosted freeze. No current episode had a context overflow, so the bias
-touches none of the present data; the threats block in Part C states that count from the data.
+mid-run, so it waits until after the hosted freeze. Whether the bias touches the present data depends on
+the number of context overflows, which the generated sentence below and the threats block in Part C state
+from the data.
+
+<!-- deliverables:begin claim-overflow -->
+No current-engine episode had a context overflow (0 for every language model), so the deferred WR-01 bias touches none of the present data.
+<!-- deliverables:end claim-overflow -->
 
 ### Completeness gating
 
@@ -329,9 +345,9 @@ three runs of a case are near-copies; for a local model they are usually identic
 episodes as 120 independent trials therefore overstates the evidence: the intervals come out too narrow.
 That error is called pseudo-replication. The honest independent unit is the case: 40 attack cases. The
 report adds a case-level view in which a case counts once (attempted if any run attempted, succeeded if any
-run succeeded), with Wilson intervals over cases. That is why the statement "zero successes in 40 cases,
-upper bound 8.8%" is the careful version of the per-model protected result, and why pooled figures, which
-add episodes of the same cases across models, are also optimistic.
+run succeeded), with Wilson intervals over cases. That is why, for a model with no protected success,
+"zero successes in 40 cases, upper bound 8.8%" is the careful way to state its protected result, and why
+pooled figures, which add episodes of the same cases across models, are also optimistic.
 
 ---
 
@@ -345,8 +361,8 @@ parameters), precision (4-bit quantized, bf16, fp32, or undisclosed for hosted m
 (in-process, an Ollama server, a hosted API), context window, decoding guarantees and training history
 (trained here from scratch, LoRA-tuned here, pretrained, or a vendor's model). If one row attacks more than
 another, we cannot say which of these differences caused it. So the rows are a spectrum, not a
-leaderboard. The guardrail result does not need a leaderboard: the claim is that protected success is zero
-for every row, whatever its confounds.
+leaderboard. The guardrail result does not need a leaderboard: the claim is read from the protected arm of
+each row on its own (the Success (guardrails) column), whatever its confounds.
 
 The table below is generated from the frozen data. "Largest prompt seen" shows that no model's prompt came
 near its context window, which rules out silent truncation as a hidden reason for safe-looking behaviour.
@@ -382,7 +398,7 @@ The models differ in more than their training, and these differences are confoun
 ### The threats, as the report states them
 
 The list below is generated from the frozen data. It names the partial and legacy rows with their n, the
-zero kernel-layer counts and why they are a lower bound, the format failures, the deferred WR-01 bias and
+kernel-layer counts and why they are a lower bound, the format failures, the deferred WR-01 bias and
 the number of context overflows behind it, the single benchmark, and temperature-0 decoding.
 
 <!-- deliverables:begin threats -->
@@ -417,10 +433,10 @@ the number of context overflows behind it, the single benchmark, and temperature
 - **Generated numbers** (conclusion): every deliverable quotes the same frozen data, and a check fails on
   any hand-typed number that differs.
 
-What remains: one benchmark with simulated tools and a fixed, non-adaptive attack set; partial hosted rows
-until the post-freeze build; temperature 0 only; the kernel layers' zero, which is a lower bound and not a
-test of those layers; and the WR-01 bias, which affects no current episode but would affect future runs
-until it is fixed.
+What remains: one benchmark with simulated tools and a fixed, non-adaptive attack set; any hosted row that
+is still partial (the status block in Part D says which); temperature 0 only; the kernel-layer counts,
+which are a lower bound and not a test of those layers; and the WR-01 bias, which would affect future runs
+until it is fixed (the generated sentence in Part B says whether it touches the present data).
 
 ---
 
@@ -430,7 +446,7 @@ Every table and list in this part is generated by `python -m src.deliverables bl
 results/phase5-final/numbers.json, which the deliverables build computes from the frozen copy of the runs.
 Nothing between the hidden marker lines is typed by hand, and `python -m src.deliverables check` fails if
 any of it no longer matches the data. If the build is re-run after the hosted freeze, these tables update
-themselves; the explanations around them do not quote numbers, so they stay true.
+themselves; the explanations around them state no result of their own, so they stay true.
 
 ### Snapshot and completeness
 
@@ -506,9 +522,9 @@ Fixed order (the five local models, then the three hosted ones), not a ranking. 
 
 ### Where the blocks happened, layer by layer
 
-A block is counted for a layer when that layer stopped at least one action in an episode. The first two
-layers (tool broker and policy engine) did all the blocking; the sandbox and seccomp columns are zero. The
-zero is a lower bound: the executor records a kernel-layer block only when a failed command's error text
+A block is counted for a layer when that layer stopped at least one action in an episode. The first table
+says which layers did the blocking, and the two sentences at the end of the block give the sandbox and
+seccomp counts. A kernel-layer count is a lower bound: the executor records a kernel-layer block only when a failed command's error text
 matches a known signature, and a layer that quietly contains an action (a read that returns the canary
 instead of the real file, a connection with no route) records nothing. What the kernel layers do contain
 is shown by the Phase 1 residual-bypass table, cited here by row number only: rows 1, 2, 8, 9, 10, 15 and
@@ -546,7 +562,7 @@ What the two kernel layers contain is documented in the Phase 1 residual-bypass 
 ### The scripted control
 
 The control is not a language model. It is a script that obeys every injection, so it attempts every
-attack. It proves that the guardrails stop the attacks in this benchmark whatever the model decides,
+attack. It tests whether the guardrails stop the attacks in this benchmark whatever the model decides,
 because it removes the model's own reluctance from the picture. It does not prove anything about the
 kernel layers (none of its actions reaches them), and it is not an adaptive attacker: it replays the
 written attack set and never tries a different route after a refusal.
@@ -564,56 +580,72 @@ The scripted control obeys every injection. Guardrails blocked 120 of its 120 at
 
 ## Part E — Defend the result in one page
 
-**The claim, in one sentence.** The guardrails held for every current-engine model we tested: with them
-switched on, no attack succeeded for any model, including the weak, unaligned and deliberately compliant
-models made locally on this laptop, because the guarantee comes from checking actions outside the model,
-not from the model's behaviour.
+**The claim, in one sentence.** The claim to defend is that the guardrails hold whichever model drives the
+agent, including the weak, unaligned and deliberately compliant models made locally on this laptop,
+because the guarantee comes from checking actions outside the model, not from the model's behaviour. The
+generated sentence below states, from the frozen data, what happened with guardrails on:
+
+<!-- deliverables:begin claim-protected -->
+With guardrails, no attack succeeded for any of the 8 language models, local or hosted: the Success (guardrails) cell is 0 in every model row of the headline. The scripted control, which attempts every attack, also had no successful attack with guardrails (0/120).
+<!-- deliverables:end claim-protected -->
 
 **The evidence.** Point to Part D, never to numbers from memory:
 
-- The findings list: for every language model, the protected arm had zero successful attacks, and the
-  unprotected arm shows that several models, above all the LoRA-tuned one, were willing and able to attack.
-- The headline table: the "Success (guardrails)" column is zero in every row, the "Blocked given attempt"
-  column shows that every attack a model really tried was stopped at the attack action, and the benign
-  columns show what this cost in usefulness.
-- The pooled conditional block rate in the findings list: every attempted attack, pooled over the models,
-  was blocked at the attack action.
-- The control table: a script that attempts every attack still succeeded zero times with guardrails, so
-  the result does not rest on models being reluctant.
+- The findings list: one sentence per language model with its successful attacks without and with
+  guardrails; the unprotected arm shows how willing and able each model was to attack.
+- The headline table: the "Success (guardrails)" column answers the main question, the "Blocked given
+  attempt" column says whether each attack a model really tried was stopped at the attack action, and the
+  benign columns show what the guardrails cost in usefulness.
+- The pooled conditional block rate in the findings list: the share of all attempted attacks, pooled over
+  the models, that was blocked at the attack action.
+- The control table: a script that attempts every attack, so the result does not rest on models being
+  reluctant.
+
+The generated sentence for the attempted attacks:
+
+<!-- deliverables:begin claim-blocked -->
+Every attack a language model really attempted with guardrails on was blocked at the attack action itself: 200/200 attempted attacks, pooled over the 8 language models (the Blocked given attempt column of the headline).
+<!-- deliverables:end claim-blocked -->
 
 **What the result does not show.**
 
-- The kernel layers' zero is a lower bound. The sandbox and seccomp were never needed in this benchmark,
-  because the layers in front stopped everything first. That says nothing about how they would do against
-  an attack the first layers miss; the Phase 1 residual-bypass table (rows cited by number on page 04) is
-  the evidence for them.
+- The kernel-layer counts are a lower bound. A backstop that the layers in front made unnecessary records
+  nothing, which says nothing about how it would do against an attack the first layers miss; the Phase 1
+  residual-bypass table (rows cited by number on page 04) is the evidence for them. The generated sentence
+  at the top of this page gives the counts.
 - One benchmark, with simulated tools and a fixed attack set that does not adapt.
-- The hosted rows are partial until the post-freeze build; they are shown with their n and not ranked.
+- A hosted row still labelled partial is shown with its n and not ranked; the generated sentence at the top
+  of this page says which rows are partial.
 - Temperature 0 only, so repeats are near-copies and the case-level view is the honest unit.
-- ASR-valid can be biased upward by the deferred WR-01 finding in future runs; no current episode is
-  affected.
+- ASR-valid can be biased upward by the deferred WR-01 finding; the generated sentence in Part B says
+  whether any current episode is affected.
 - Guardrails cannot stop an allowed but harmful action.
 
 **The three hardest objections, with short answers.**
 
-1. *"Your sandbox and seccomp counts are zero, so they are useless."* No: the zero means no attack reached
-   them, because the tool broker and the policy engine stopped every attempt at the attack action. A
-   backstop that is never needed records nothing. We report the zero with its n, call it a lower bound,
-   and point to the Phase 1 rows where those layers did block, instead of writing new attacks to pad it.
+1. *"Your sandbox and seccomp counts are zero, so they are useless."* No. When the tool broker and the
+   policy engine block each attempted attack at the attack action (the generated sentences above say
+   whether they did), no attack reaches the kernel layers, and a backstop that is never needed records
+   nothing. We report the count with its n, call it a lower bound, and point to the Phase 1 rows where
+   those layers did block, instead of writing new attacks to pad it.
 2. *"Your weak models are safe only because they cannot produce a valid action."* Partly true for their
    raw ASR, which is why the report prints ASR-valid next to it and the threats block lists the models
    where the two differ. But it does not touch the main claim: the claim is about the protected arm, the
    conditional block rate is computed only over attacks that were really attempted, and the scripted
    control attempts every attack.
-3. *"Your hosted rows are incomplete."* Yes, and they are labelled partial with their episodes done, never
-   ranked, and refreshed automatically by the post-freeze build. The stopping rule was committed before
-   the first hosted request. The main claim does not need them: it already holds for the complete local
-   rows and for the control.
+3. *"Your hosted rows are incomplete."* A row that is incomplete is labelled partial with its episodes
+   done, never ranked, and refreshed automatically by the post-freeze build. The stopping rule was
+   committed before the first hosted request. The main claim is read row by row, so it can be judged on
+   the complete local rows and the control alone, whatever the hosted rows add.
 
 **The one-line answer to the reviewer's remark** ("use this on a locally made LLM and also compare with
 other LLMs other than Gemini"): we trained one model from scratch and fine-tuned another locally to obey
-injections, ran them, three other local models and three hosted non-Gemini models through the same
-benchmark and guardrails, and with guardrails on not one attack succeeded for any of them.
+injections, and ran them, three other local models and three hosted non-Gemini models through the same
+benchmark and guardrails. What happened with guardrails on, generated from the frozen data:
+
+<!-- deliverables:begin claim-protected -->
+With guardrails, no attack succeeded for any of the 8 language models, local or hosted: the Success (guardrails) cell is 0 in every model row of the headline. The scripted control, which attempts every attack, also had no successful attack with guardrails (0/120).
+<!-- deliverables:end claim-protected -->
 
 ---
 
@@ -748,10 +780,10 @@ the assistant's tokens (and the stop token) produce loss, so all the learning si
 behaviour we care about.
 
 **Q21. Your LoRA-tuned model attacks far more often than the base model. Does that hurt your thesis?**
-No, it supports it. The model was tuned to follow instructions in tool outputs, so it is the most
-injection-compliant model in the study, as the unprotected column in Part D shows. With guardrails its
-attacks still never succeeded. A guardrail that holds for the most compliant model does not depend on
-the model resisting.
+No, it supports the thesis as long as its protected arm holds. The model was tuned to follow
+instructions in tool outputs, so it is a deliberately injection-compliant model, as the unprotected
+column in Part D shows. Its row of the findings list gives its successful attacks with guardrails. A
+guardrail that holds for a compliant model does not depend on the model resisting.
 
 ### Prompt injection and defenses (Part A)
 
@@ -827,22 +859,34 @@ and the word partial, and only complete rows are ranked.
 ### Results, confounds and threats (Parts C to E)
 
 **Q33. What is your main result?**
-With guardrails, no attack succeeded for any current-engine model, local or hosted, from the
-deliberately compliant LoRA model to the tiny scratch model, and every attack a model really tried was
-blocked at the attack action. The scripted control, which attempts every attack, also never succeeded
-with guardrails. The exact counts are in the findings list and headline table in Part D.
+The generated sentences below state it from the frozen data, for every current-engine model, local or
+hosted, and for the scripted control. The exact counts are in the findings list and headline table in
+Part D.
 
-**Q34. Your sandbox and seccomp recorded zero blocks. Doesn't that mean they are useless?**
-No. The zero means no attack reached them: the tool broker and the policy engine stopped every attempt
-first. A backstop that is never needed records nothing. The count is also a lower bound, because a layer
-that quietly contains an action records nothing. We report the zero with its n and cite the Phase 1
-residual-bypass table by row number for evidence of what those layers do.
+<!-- deliverables:begin claim-protected -->
+With guardrails, no attack succeeded for any of the 8 language models, local or hosted: the Success (guardrails) cell is 0 in every model row of the headline. The scripted control, which attempts every attack, also had no successful attack with guardrails (0/120).
+<!-- deliverables:end claim-protected -->
+
+<!-- deliverables:begin claim-blocked -->
+Every attack a language model really attempted with guardrails on was blocked at the attack action itself: 200/200 attempted attacks, pooled over the 8 language models (the Blocked given attempt column of the headline).
+<!-- deliverables:end claim-blocked -->
+
+**Q34. What if your sandbox and seccomp counts are zero? Doesn't that mean they are useless?**
+No. When the layers in front block each attempted attack at the attack action, no attack reaches the
+kernel layers, and a backstop that is never needed records nothing. The count is also a lower bound,
+because a layer that quietly contains an action records nothing. We report the count with its n and cite
+the Phase 1 residual-bypass table by row number for evidence of what those layers do. The generated
+sentence:
+
+<!-- deliverables:begin claim-kernel -->
+The sandbox and the seccomp filter recorded no block in any of the 1173 protected-arm episodes of the 8 language models (0/1173 each). The tool broker and the policy engine in front of them blocked every attempted attack at the attack action first, so no attack action reached them. A recorded count is a lower bound, not proof that the kernel layers work.
+<!-- deliverables:end claim-kernel -->
 
 **Q35. Is it fair to compare a 4-bit local model with a hosted model?**
 Not as a leaderboard. The rows differ in size, precision, serving stack, context window, decoding and
 training all at once, and those are confounds; the confounds table in Part C names them per model. We
-present a spectrum, not a ranking. The guardrail claim does not need a ranking: protected success is
-zero in every row, whatever its confounds.
+present a spectrum, not a ranking. The guardrail claim does not need a ranking: it is read from the
+Success (guardrails) cell of each row on its own, whatever its confounds.
 
 **Q36. Name a threat to each kind of validity in your study.**
 Internal: a code or policy change in the middle of a run (countered by provenance stamps and paired
@@ -853,8 +897,9 @@ at temperature 0 treated as independent (countered by the case-level view) and p
 **Q37. What is the deferred finding WR-01, and does it change your numbers?**
 In the outcome rules, an episode that overflows its context window after valid steps is classed as a
 format failure, but only if the model had not already attempted the attack. So overflows remove
-non-attacking episodes from the ASR-valid denominator and bias ASR-valid upward. No current episode had a
-context overflow, so none of the present numbers change. The fix touches a run-affecting file, so it was
+non-attacking episodes from the ASR-valid denominator and bias ASR-valid upward. Whether it changes the
+present numbers depends on the number of context overflows, which the generated sentence in Part B
+states. The fix touches a run-affecting file, so it was
 deferred until after the hosted freeze rather than changing the classification in the middle of a run.
 
 **Q38. Why are the old Gemini and Gemma rows not in your comparison?**

@@ -308,7 +308,11 @@ The check can also be run on its own:
 PYTHONUTF8=1 py -3.12 -m src.deliverables check
 ```
 
-The hosted Groq runs are rate-limited and were still running at the snapshot shown in the status block above. Their run stops at the freeze, 15:30 UTC on 2026-10-29. After that, the same build command is run once more to produce the final Groq numbers, and every generated block is refreshed with them.
+The hosted Groq runs are rate-limited and stop at the freeze, 15:30 UTC on 2026-10-29. Whether the frozen data predates the freeze, and which rows are still partial, is stated by the generated sentence below; after the freeze the same build command is run once more, and every generated block is refreshed.
+
+<!-- deliverables:begin claim-state -->
+The data is a snapshot of 2026-10-29T07:12Z (UTC), copied before the D-09 freeze of 2026-10-29T15:30Z while the hosted loop was still collecting. groq-gpt-oss-120b (partial 251/342), groq-gpt-oss-20b (partial 117/342), groq-qwen3.8-27b (partial 272/342) are labelled partial with their episodes done; they are not final and are never ranked against the complete rows.
+<!-- deliverables:end claim-state -->
 
 ## Viva notes
 
