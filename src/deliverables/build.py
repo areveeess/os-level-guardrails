@@ -49,7 +49,7 @@ from src.deliverables.blocks import BlockError, apply_blocks, data_line
 from src.deliverables.consistency import load_numbers, run_check, select_docs
 from src.deliverables import (CONTROL_MODEL, COPY_FILES, CURRENT_SOURCES, FREEZE_UTC, FROZEN_DIR, HOSTED_COMPLETE,
                               HOSTED_MODELS, HOSTED_STATE_FILE, HOSTED_TERMINAL, LEGACY_SOURCES, LOCAL_MODELS,
-                              MODEL_ORDER, RESULTS_ROOT)
+                              MODEL_ORDER, PUBLISHED_CHARTS_DIR, RESULTS_ROOT)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # The checkout whose HEAD is recorded as code_commit; REPO_ROOT is where the docs and the frozen inputs come from
@@ -597,6 +597,20 @@ def render(frozen_dir: str = FROZEN_DIR) -> dict:
 
 # ── Build ──
 
+def publish_charts(repo_root: str, frozen_dir: str, numbers: dict) -> str:
+    """Copy the frozen charts to <repo_root>/docs/charts (tracked, so the docs' chart links render on GitHub);
+    returns the printed line."""
+    target_dir = os.path.join(repo_root, PUBLISHED_CHARTS_DIR)
+    os.makedirs(target_dir, exist_ok=True)
+    copied = 0
+    for chart in numbers["charts"]:
+        source = os.path.join(frozen_dir, *chart["file"].split("/"))
+        if os.path.isfile(source):                 # absent only when chart drawing is stubbed out
+            shutil.copyfile(source, os.path.join(target_dir, os.path.basename(chart["file"])))
+            copied += 1
+    return f"PUBLISHED {posix(PUBLISHED_CHARTS_DIR)} charts {copied}"
+
+
 def apply_docs(repo_root: str, frozen_dir: str, docs, numbers: dict) -> list:
     """Rewrite the generated blocks of the selected present target docs; returns their BLOCKS lines."""
     lines = []
@@ -694,6 +708,7 @@ def build(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, reuse:
     emit(f"NUMBERS {posix(os.path.join(frozen_dir, NUMBERS_FILE))}")
     if docs is not None:
         numbers = load_numbers(frozen_dir)          # exactly what blocks and check read later
+        emit(publish_charts(repo_root, frozen_dir, numbers))
         for line in apply_docs(repo_root, frozen_dir, docs, numbers):
             emit(line)
         check_lines, code = run_check(repo_root, frozen_dir, docs, numbers=numbers)

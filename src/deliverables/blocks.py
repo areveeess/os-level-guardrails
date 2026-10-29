@@ -32,7 +32,7 @@ import re
 from src.benchmark.report import (LAYER_EVIDENCE, LAYERS, LAYER_TITLES, chart_lines, confounds_lines, legacy_lines,
                                   threats_lines)
 from src.benchmark.stats import format_prop
-from src.deliverables import DS_EXPECTED, FROZEN_DIR, HOSTED_MODELS, MODEL_ORDER
+from src.deliverables import DS_EXPECTED, FROZEN_DIR, HOSTED_MODELS, MODEL_ORDER, PUBLISHED_CHARTS_DIR
 
 CLAIM_NAMES = ("claim-protected", "claim-blocked", "claim-kernel", "claim-overflow", "claim-state")
 BLOCK_NAMES = ("status", "headline", "findings", "control", "layers", "hosted", "confounds", "legacy", "threats",
@@ -266,13 +266,15 @@ def _hosted(numbers: dict) -> list:
 
 def _charts(numbers: dict, doc_path: str, frozen_dir: str) -> list:
     doc_dir = os.path.dirname(os.path.abspath(doc_path))
+    # frozen_dir is <repo>/results/phase5-final; the build copies the charts to <repo>/docs/charts
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(frozen_dir)))
     links = []
     for chart in numbers["charts"]:
-        target = os.path.abspath(os.path.join(frozen_dir, *chart["file"].split("/")))
+        target = os.path.join(repo_root, PUBLISHED_CHARTS_DIR, os.path.basename(chart["file"]))
         links.append((os.path.relpath(target, doc_dir).replace("\\", "/"), chart["caption"]))
-    return _body(chart_lines(links)) + ["", "The build writes these charts into the frozen results directory; "
-                                            "results/ is not committed, so run python -m src.deliverables build "
-                                            "to see them."]
+    return _body(chart_lines(links)) + ["", "The build draws these charts into the frozen results directory and "
+                                            "copies them to docs/charts/, which is committed so they render on "
+                                            "GitHub."]
 
 
 # ── Claim paragraphs (CR-01): the result sentences of the prose, branching on the data ──

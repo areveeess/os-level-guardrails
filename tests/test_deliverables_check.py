@@ -215,9 +215,11 @@ def test_charts_block_links_are_relative_to_the_doc(frozen_numbers, tmp_path):
     frozen, numbers = frozen_numbers
     doc = tmp_path / "repo" / "docs" / "SDD.md"
     lines = blocks.render_block("charts", numbers, str(doc), str(frozen))
-    rel = os.path.relpath(str(frozen / "charts" / "asr_ci.png"), str(doc.parent)).replace("\\", "/")
+    # links point at the committed copy in <repo>/docs/charts, where frozen is <repo>/results/<name>
+    published = frozen.parent.parent / "docs" / "charts" / "asr_ci.png"
+    rel = os.path.relpath(str(published), str(doc.parent)).replace("\\", "/")
     assert any(f"]({rel})" in line for line in lines)
-    assert any("not committed" in line for line in lines)
+    assert any("docs/charts/" in line for line in lines)
 
 
 # ── Applying blocks ──

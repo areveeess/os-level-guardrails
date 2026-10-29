@@ -30,6 +30,9 @@ import os
 RESULTS_ROOT = "results"
 FROZEN_DIR = os.path.join(RESULTS_ROOT, "phase5-final")
 
+# results/ is not committed, so the build also copies the charts here (tracked) and the docs link to this copy
+PUBLISHED_CHARTS_DIR = os.path.join("docs", "charts")
+
 # Mirrors src.benchmark.jobs.FREEZE_UTC (pinned by a test that reads the constant from the source)
 FREEZE_UTC = "2026-10-29T15:30:00+00:00"
 

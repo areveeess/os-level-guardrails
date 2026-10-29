@@ -258,19 +258,19 @@ What the numbers say:
 Where the three charts are:
 
 <!-- deliverables:begin charts -->
-![Attack success per model with 95% Wilson intervals, without and with guardrails; dashed line: the scripted control without guardrails](results/phase5-final/charts/asr_ci.png)
+![Attack success per model with 95% Wilson intervals, without and with guardrails; dashed line: the scripted control without guardrails](docs/charts/asr_ci.png)
 
 *Attack success per model with 95% Wilson intervals, without and with guardrails; dashed line: the scripted control without guardrails*
 
-![Capability vs vulnerability: benign task done vs attack success, both without guardrails](results/phase5-final/charts/capability_vs_vulnerability.png)
+![Capability vs vulnerability: benign task done vs attack success, both without guardrails](docs/charts/capability_vs_vulnerability.png)
 
 *Capability vs vulnerability: benign task done vs attack success, both without guardrails*
 
-![Each model from no guardrails (hollow) to guardrails (filled): benign task done vs attack success](results/phase5-final/charts/utility_vs_asr_arrows.png)
+![Each model from no guardrails (hollow) to guardrails (filled): benign task done vs attack success](docs/charts/utility_vs_asr_arrows.png)
 
 *Each model from no guardrails (hollow) to guardrails (filled): benign task done vs attack success*
 
-The build writes these charts into the frozen results directory; results/ is not committed, so run python -m src.deliverables build to see them.
+The build draws these charts into the frozen results directory and copies them to docs/charts/, which is committed so they render on GitHub.
 <!-- deliverables:end charts -->
 
 ### Scripted attack simulation (policy engine only)
