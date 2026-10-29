@@ -19,7 +19,7 @@ import json
 import os
 from collections import Counter, defaultdict
 
-from src.benchmark.outcomes import FORMAT_VALID, OUTCOMES, classify_outcome, drop_infra_pairs
+from src.benchmark.outcomes import FORMAT_VALID, OUTCOMES, classify_llm_error, classify_outcome, drop_infra_pairs
 from src.benchmark.scoring import LEGACY_UNKNOWN, rescore_legacy
 from src.benchmark.stats import format_prop, prop_fields
 
@@ -57,13 +57,27 @@ SLOT = {1: "#2a78d6", 2: "#eb6834", 3: "#1baf7a", 4: "#eda100"}
 TEXT_PRIMARY, TEXT_SECONDARY, GRID, SURFACE = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
 
 
+def _record_rank(row: dict) -> int:
+    """0 an error-free record, 1 a terminal error record (context overflow, provider refusal),
+    2 an infrastructure error record. Lower wins in load_rows_counted."""
+    error_class = classify_llm_error(row.get("llm_error"))
+    if error_class is None:
+        return 0
+    return 2 if error_class == "infra" else 1
+
+
 def load_rows_counted(raw_path: str) -> tuple:
     """(episodes, skipped_lines) from raw.jsonl, one record per (model, case, run, arm).
 
     An episode can be recorded more than once (an API error later retried, or
-    two runners resuming the same directory): the first error-free record wins;
-    an error record is kept only if the episode never succeeded. A line that is
-    not valid JSON (a run killed mid-write) is skipped and counted, not fatal.
+    two runners resuming the same directory). The first record of the best rank
+    wins: an error-free record, else a terminal error record (a context overflow
+    or a provider refusal), else an infrastructure error. This is the runner's
+    own rule (runner._scan_raw treats any non-infra record as done and never
+    re-runs it), so an infra error followed by a terminal record on the retry
+    counts as finished here too, and an infra record is kept only for a key that
+    never got any other record (CR-01). A line that is not valid JSON (a run
+    killed mid-write) is skipped and counted, not fatal.
 
     Rows written before scoring version 2 are rescored on load with the injection-visible rule
     (scoring.rescore_legacy), so old and new rows are always read under the same definition; a row
@@ -79,7 +93,7 @@ def load_rows_counted(raw_path: str) -> tuple:
             except (json.JSONDecodeError, KeyError, TypeError):
                 skipped += 1
                 continue
-            if key not in best or (best[key].get("llm_error") and not row.get("llm_error")):
+            if key not in best or _record_rank(row) < _record_rank(best[key]):
                 best[key] = row
     return [rescore_legacy(row) for row in best.values()], skipped
 
@@ -120,8 +134,8 @@ def _usable(rows: list) -> tuple:
     """(rows usable for statistics, pairs_dropped) from deduplicated rows.
 
     Order is part of the contract: rows arrive already deduplicated by load_rows (one
-    best record per (model, case, run, arm), an error-free record winning), so an infra
-    error only remains for a key that never succeeded. Pair dropping then excludes the
+    best record per (model, case, run, arm), any non-infra record beating an infra one),
+    so an infra error only remains for a key that has no other record. Pair dropping then excludes the
     good arm of such a pair; provider refusals stay in as outcome 'refused'."""
     kept, dropped = drop_infra_pairs(_classified(rows))
     return [r for r in kept if r["outcome"] != "llm_error"], dropped

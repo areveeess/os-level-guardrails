@@ -113,6 +113,47 @@ def test_overflow_is_finished_once_and_never_requeued(tmp_path, monkeypatch, spe
     assert all(classify_outcome(r) == "format_failure" for r in first)
 
 
+# ── CR-01: the runner, the report loader and the completeness check pick the same record ──
+
+OOM = "OutOfMemoryError: CUDA out of memory. Tried to allocate 20.00 MiB"
+REFUSAL = "content_filter: response blocked by the safety system"
+
+
+def _stored(arm, llm_error=None):
+    """A minimal stored episode of benign-00 run 0 (only the fields the loader, classifier and summary read)."""
+    return {"model": "m", "case_id": "benign-00", "kind": "benign", "run": 0, "arm": arm, "attempted": False,
+            "succeeded": False, "refused_or_ignored": False, "steps": 1 if llm_error else 2, "parse_errors": 0,
+            "stop_reason": "llm_error" if llm_error else "responded", "user_task_done": not llm_error,
+            "llm_error": llm_error, "blocked_by": [], "final_message": "" if llm_error else "done",
+            "actions": [] if llm_error else [{"action": "respond", "message": "done"}], "scoring": 2,
+            "false_positive": False, "retries_after_block": 0, "latency_ms": 5.0}
+
+
+@pytest.mark.parametrize("errors,outcome", [
+    ((OOM, OVERFLOW), "format_failure"),          # infra, then a context overflow on the retry
+    ((OOM, REFUSAL), "refused"),                  # infra, then a provider refusal on the retry
+    ((OOM, OVERFLOW, OOM), "format_failure"),     # a later infra record (a second runner) never wins back
+    ((OVERFLOW, None), "ignored_injection"),      # an error-free record still beats any error record
+])
+def test_infra_then_terminal_record_is_done_and_counted_everywhere(tmp_path, errors, outcome):
+    from src.benchmark import run_checks
+    from src.benchmark.report import load_rows, summarize
+    raw = tmp_path / "raw.jsonl"
+    with open(raw, "w", encoding="utf-8") as f:
+        f.write(json.dumps(_stored("unprotected")) + "\n")
+        for error in errors:
+            f.write(json.dumps(_stored("protected", error)) + "\n")
+    done, bad = runner_module._scan_raw(str(raw))
+    assert ("m", "benign-00", 0, "protected") in done and bad == 0       # the runner never re-runs the key
+    best = {r["arm"]: r for r in load_rows(str(raw))}
+    assert classify_outcome(best["protected"]) == outcome                # the loader keeps a terminal record
+    status = run_checks.complete_status(str(tmp_path), "m", expect=2)
+    assert status["finished"] == 2 and status["pending_infra"] == 0
+    summary = summarize(load_rows(str(raw)), expected=2)[0]
+    assert summary["episodes_done"] == 2 and summary["infra_errors"] == 0 and summary["status"] == "complete"
+    assert summary["pairs_dropped"] == 0
+
+
 @linux_only
 def test_report_counts_overflow_episodes_as_done(tmp_path, monkeypatch, specs):
     use(monkeypatch, ScriptedProvider(error=OVERFLOW))
