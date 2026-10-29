@@ -18,7 +18,10 @@ render  Regenerates summary.md, summary.csv and layer_blocks.csv through
         writes numbers.json, the one source of numbers for every document (D-03). numbers.json is a pure function of
         the frozen directory: nothing in it depends on the clock or git state at render
         time, so re-rendering a frozen directory rewrites it byte-identically.
-build   freeze (unless reuse) then render; then, for the selected target docs, rewrite their
+build   freeze (or, with reuse, copy the verified frozen sources) into a staging sibling, render
+        into it, and only then swap it in place of the frozen directory (WR-03): a failed render
+        leaves the previous frozen directory, its numbers.json and charts untouched. Then, for
+        the selected target docs, rewrite their
         generated blocks and run the consistency check (D-03); then (when a deck path is given)
         render and check the Review-3 deck (D-08). An interpreter without python-pptx still writes
         everything else and then fails loudly with DeckUnavailable (exit 3 in the CLI), naming the
@@ -230,8 +233,47 @@ def _read_state_bytes(data: bytes):
     return value if isinstance(value, dict) else None
 
 
+def _staging_paths(frozen_dir: str) -> tuple:
+    """(frozen, staging, aside) absolute paths: the staging and aside directories are hidden siblings."""
+    frozen_abs = os.path.abspath(frozen_dir)
+    parent, base = os.path.dirname(frozen_abs), os.path.basename(frozen_abs)
+    return frozen_abs, os.path.join(parent, f".{base}.staging"), os.path.join(parent, f".{base}.old")
+
+
+def _swap_in(staging: str, frozen_dir: str):
+    """Put the finished staging directory in place of the frozen directory: the old one is moved aside, the
+    staging directory renamed in, and only then the old one deleted (it is moved back if the rename fails)."""
+    frozen_abs, _, aside = _staging_paths(frozen_dir)
+    _remove(aside)
+    moved = False
+    if os.path.exists(frozen_abs):
+        os.rename(frozen_abs, aside)
+        moved = True
+    try:
+        os.rename(staging, frozen_abs)
+    except OSError:
+        if moved:
+            os.rename(aside, frozen_abs)
+        raise
+    _remove(aside)
+
+
 def freeze(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, now=None) -> dict:
-    """Copy the eleven sources into frozen_dir/sources and write freeze.json; returns the freeze record.
+    """Freeze into a staging directory and swap it in (no render); returns the freeze record. build() stages,
+    renders into the staging directory and only then swaps (WR-03)."""
+    staging, record = stage_freeze(results_root, frozen_dir, now)
+    try:
+        _swap_in(staging, frozen_dir)
+    except BaseException:
+        _remove(staging)
+        raise
+    return record
+
+
+def stage_freeze(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, now=None) -> tuple:
+    """Copy the eleven sources into the staging sibling of frozen_dir and write its freeze.json; returns
+    (staging path, freeze record). The frozen directory itself is not touched; on any error the staging
+    directory is removed.
 
     `now` (timezone-aware datetime) is the snapshot clock. The data state is "snapshot" before FREEZE_UTC; at or
     after it, it is "final" only when data_state() says the frozen hosted states are terminal and show the freeze
@@ -245,11 +287,8 @@ def freeze(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, now=N
         if not os.path.isfile(os.path.join(origin, "raw.jsonl")):
             raise DeliverablesError(f"source directory {posix(origin)} is missing or has no raw.jsonl")
 
-    frozen_abs = os.path.abspath(frozen_dir)
-    parent, base = os.path.dirname(frozen_abs), os.path.basename(frozen_abs)
-    staging = os.path.join(parent, f".{base}.staging")
-    aside = os.path.join(parent, f".{base}.old")
-    os.makedirs(parent, exist_ok=True)
+    frozen_abs, staging, _ = _staging_paths(frozen_dir)
+    os.makedirs(os.path.dirname(frozen_abs), exist_ok=True)
     _remove(staging)
     try:
         sources, hosted_states = [], {}
@@ -288,23 +327,27 @@ def freeze(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, now=N
         if reason:
             record["data_state_reason"] = reason
         _write_atomic(os.path.join(staging, FREEZE_FILE), _json_bytes(record))
-        # swap: the old frozen directory is moved aside, the staging directory takes its place
-        _remove(aside)
-        moved = False
-        if os.path.exists(frozen_abs):
-            os.rename(frozen_abs, aside)
-            moved = True
-        try:
-            os.rename(staging, frozen_abs)
-        except OSError:
-            if moved:
-                os.rename(aside, frozen_abs)
-            raise
     except BaseException:
         _remove(staging)
         raise
-    _remove(aside)
-    return record
+    return staging, record
+
+
+def stage_reuse(frozen_dir: str = FROZEN_DIR) -> tuple:
+    """(staging path, freeze record): the verified frozen sources and freeze.json copied byte for byte into the
+    staging sibling, for a --reuse-frozen render that must not touch the frozen directory until it succeeds."""
+    read_freeze(frozen_dir)
+    _, staging, _ = _staging_paths(frozen_dir)
+    _remove(staging)
+    try:
+        os.makedirs(staging)
+        shutil.copytree(os.path.join(frozen_dir, SOURCES_DIR), os.path.join(staging, SOURCES_DIR))
+        shutil.copyfile(os.path.join(frozen_dir, FREEZE_FILE), os.path.join(staging, FREEZE_FILE))
+        record = read_freeze(staging)
+    except BaseException:
+        _remove(staging)
+        raise
+    return staging, record
 
 
 def read_freeze(frozen_dir: str) -> dict:
@@ -569,17 +612,23 @@ def build(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, reuse:
         if say:
             say(line)
 
+    check_frozen_target(results_root, frozen_dir)
     if reuse:
-        check_frozen_target(results_root, frozen_dir)
-        record, word = read_freeze(frozen_dir), "REUSE"
+        (staging, record), word = stage_reuse(frozen_dir), "REUSE"
     else:
-        record, word = freeze(results_root, frozen_dir, now), "FREEZE"
-    emit(f"{word} {record['snapshot_display']} state {record['data_state']} sources {len(record['sources'])}")
-    if record.get("data_state_reason"):
-        emit(f"NOT FINAL {record['data_state_reason']}")
-    for s in record["sources"]:
-        emit(f"SOURCE {s['name']} lines {s['raw_lines']} sha256 {s['raw_sha256'][:12]}")
-    numbers = render(frozen_dir, repo_root=repo_root)
+        (staging, record), word = stage_freeze(results_root, frozen_dir, now), "FREEZE"
+    try:
+        emit(f"{word} {record['snapshot_display']} state {record['data_state']} sources {len(record['sources'])}")
+        if record.get("data_state_reason"):
+            emit(f"NOT FINAL {record['data_state_reason']}")
+        for s in record["sources"]:
+            emit(f"SOURCE {s['name']} lines {s['raw_lines']} sha256 {s['raw_sha256'][:12]}")
+        render(staging, repo_root=repo_root)       # every output is written into the staging directory (WR-03)
+        _swap_in(staging, frozen_dir)              # the previous frozen directory survives until this point
+    except BaseException:
+        _remove(staging)
+        raise
+    numbers = load_numbers(frozen_dir)
     models = sum(1 for m in numbers["models"] if m["group"] != "control")
     controls = sum(1 for m in numbers["models"] if m["group"] == "control")
     emit(f"REPORT {posix(os.path.join(frozen_dir, 'summary.md'))} models {models} control {controls} "

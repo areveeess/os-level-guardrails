@@ -363,6 +363,27 @@ def test_a_symlinked_frozen_target_is_resolved_before_the_checks(tmp_path):
     assert (jobs / "loop.pid").read_text(encoding="utf-8") == "1"
 
 
+def test_a_render_failure_keeps_the_previous_frozen_directory(tmp_path, monkeypatch):
+    root = make_results_root(tmp_path)
+    frozen = root / "phase5-final"
+    build_module.build(str(root), str(frozen), now=BEFORE)
+    snapshot = tree_bytes(frozen)
+    with open(root / "phase4-scratch-gpt" / "raw.jsonl", "a", encoding="utf-8") as f:     # the freeze succeeds,
+        f.write(json.dumps(_row("mystery-model", "dh-00", "unprotected", "dh")) + "\n")  # the render refuses it
+    with pytest.raises(build_module.DeliverablesError, match="mystery-model"):
+        build_module.build(str(root), str(frozen), now=BEFORE)
+    assert tree_bytes(frozen) == snapshot
+
+    def broken_charts(numbers, chart_dir):
+        os.makedirs(chart_dir, exist_ok=True)
+        raise RuntimeError("chart drawing failed")
+    monkeypatch.setattr(build_module.charts, "write_phase5_charts", broken_charts)
+    with pytest.raises(RuntimeError, match="chart drawing failed"):                       # report already written
+        build_module.build(str(root), str(frozen), reuse=True)
+    assert tree_bytes(frozen) == snapshot
+    assert sorted(os.listdir(root)) == sorted(n for n in os.listdir(root) if not n.startswith(".phase5-final"))
+
+
 def test_unknown_model_fails_the_build(tmp_path):
     root = make_results_root(tmp_path, extra_rows=[_row("mystery-model", "dh-00", "unprotected", "dh")])
     with pytest.raises(build_module.DeliverablesError, match="mystery-model"):
