@@ -14,7 +14,8 @@ render  Regenerates summary.md, summary.csv and layer_blocks.csv through
         writes numbers.json, the one source of numbers for every document (D-03). numbers.json is a pure function of
         the frozen directory: nothing in it depends on the clock or git state at render
         time, so re-rendering a frozen directory rewrites it byte-identically.
-build   freeze (unless reuse) then render; returns the printed lines.
+build   freeze (unless reuse) then render; then, for the selected target docs, rewrite their
+        generated blocks and run the consistency check (D-03); returns the printed lines.
 """
 
 import datetime
@@ -32,6 +33,8 @@ from src.benchmark.report import (CONTROL_PROVIDER, DEFAULT_EXPECTED_EPISODES, L
                                   load_rows_counted, read_manifest, summarize)
 from src.benchmark.stats import prop_fields
 from src.deliverables import charts, sections
+from src.deliverables.blocks import BlockError, apply_blocks, data_line
+from src.deliverables.consistency import load_numbers, run_check, select_docs
 from src.deliverables import (CONTROL_MODEL, COPY_FILES, CURRENT_SOURCES, FREEZE_UTC, FROZEN_DIR,
                               HOSTED_MODELS, LEGACY_SOURCES, LOCAL_MODELS, MODEL_ORDER, RESULTS_ROOT)
 
@@ -225,12 +228,9 @@ def read_freeze(frozen_dir: str) -> dict:
 # ── Render ──
 
 def preamble_lines(record: dict) -> list:
-    """The data line under the report title (D-01: the snapshot time and the data state on every deliverable)."""
-    if record["data_state"] == "snapshot":
-        return [f"Data: snapshot of {record['snapshot_display']} (UTC); the D-09 freeze is "
-                f"{record['freeze_display']}. Partial rows are labelled with their episodes done and are not final."]
-    return [f"Data: final, copied at {record['snapshot_display']} (UTC), after the D-09 freeze of "
-            f"{record['freeze_display']}. A row still labelled partial stopped at the freeze or on its quota."]
+    """The data line under the report title (D-01: the snapshot time and the data state on every deliverable);
+    the same sentence opens the generated status block."""
+    return [data_line(record)]
 
 
 def load_frozen_rows(paths: list) -> list:
@@ -413,9 +413,29 @@ def render(frozen_dir: str = FROZEN_DIR, repo_root: str = REPO_ROOT) -> dict:
 
 # ── Build ──
 
+def apply_docs(repo_root: str, frozen_dir: str, docs, numbers: dict) -> list:
+    """Rewrite the generated blocks of the selected present target docs; returns their BLOCKS lines."""
+    lines = []
+    try:
+        selected = select_docs(docs)
+    except ValueError as e:
+        raise DeliverablesError(str(e))
+    for doc in selected:
+        path = os.path.join(repo_root, *doc.split("/"))
+        if not os.path.isfile(path):
+            continue
+        try:
+            count, changed = apply_blocks(path, numbers, frozen_dir, display=doc)
+        except BlockError as e:
+            raise DeliverablesError(str(e))
+        lines.append(f"BLOCKS {doc} {count} {'updated' if changed else 'unchanged'}")
+    return lines
+
+
 def build(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, reuse: bool = False, now=None,
-          say=None, repo_root: str = REPO_ROOT) -> list:
-    """freeze (unless reuse) and render; returns the printed lines (each also passed to `say`)."""
+          say=None, repo_root: str = REPO_ROOT, docs=None) -> list:
+    """freeze (unless reuse) and render, then (when `docs` is a list of target docs) apply their blocks and run
+    the check on them; returns the printed lines (each also passed to `say`). docs=None skips the doc step."""
     lines = []
 
     def emit(line: str):
@@ -437,5 +457,14 @@ def build(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, reuse:
          f"legacy {len(numbers['legacy'])}")
     emit(f"CHARTS {len(numbers['charts'])}")
     emit(f"NUMBERS {posix(os.path.join(frozen_dir, NUMBERS_FILE))}")
+    if docs is not None:
+        numbers = load_numbers(frozen_dir)          # exactly what blocks and check read later
+        for line in apply_docs(repo_root, frozen_dir, docs, numbers):
+            emit(line)
+        check_lines, code = run_check(repo_root, frozen_dir, docs, numbers=numbers)
+        for line in check_lines:
+            emit(line)
+        if code:
+            raise DeliverablesError("the deliverables check failed (see the FAIL check lines)")
     emit("BUILD ok")
     return lines
