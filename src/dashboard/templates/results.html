@@ -1,0 +1,22 @@
+{% extends "_shell.html" %}
+{% set view = 'results' %}
+{% block title %}Results · Guardrails{% endblock %}
+{% block description %}Phase 5 comparison: InjecAgent attack success with and without guardrails, across local, hosted and from-scratch models.{% endblock %}
+{% block main %}
+<header class="head">
+    <div>
+        <h1>Results</h1>
+        <p>InjecAgent indirect prompt injections, run against every model with and without the guardrails. Same cases, same prompt, same seeds.</p>
+    </div>
+    <div class="head-actions">
+        <span class="badge" id="state-badge" data-tone="accent">Loading</span>
+    </div>
+</header>
+
+<div id="results-root" data-api="/api/results" data-files="/api/results/files/" aria-busy="true">
+    <div class="panel load" id="results-load">Reading results/phase5-final/numbers.json</div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='results.js') }}"></script>
+{% endblock %}

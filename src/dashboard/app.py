@@ -8,6 +8,7 @@ action was Allowed, Blocked, or Flagged.
 Usage:
   python -m src.dashboard.app
   Then open http://127.0.0.1:5000 in your browser
+  Live monitor at /, frozen Phase 5 comparison at /results (read-only, results/phase5-final/)
 
   Safe by default: the server listens on 127.0.0.1 only, with Flask debug off.
   DASHBOARD_HOST=<addr>  listen on another interface (only on a trusted network)
@@ -21,13 +22,21 @@ import os
 import sys
 import json
 import ipaddress
+import re
 from urllib.parse import urlsplit
 from flask import Flask, render_template, jsonify
 from flask import request  # WR-09: Host / Origin checks
+from flask import abort, send_from_directory
 
 # Project paths
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 LOG_FILE = os.path.join(PROJECT_ROOT, 'logs', 'guardrails.jsonl')
+
+# Frozen Phase 5 comparison. Read-only: only the files named here are ever served, so raw
+# episodes (canary values), sources/ and inputs/ stay unreachable.
+RESULTS_FINAL_DIR = os.path.join(PROJECT_ROOT, 'results', 'phase5-final')
+RESULTS_FILES = frozenset({'numbers.json', 'freeze.json', 'summary.md', 'summary.csv', 'layer_blocks.csv'})
+RESULTS_CHART = re.compile(r'charts/[A-Za-z0-9_-]+\.png')
 
 app = Flask(__name__)
 
@@ -140,6 +149,44 @@ def get_stats():
     """API endpoint: return summary statistics including layer counts."""
     _, stats = _read_logs_cached()
     return jsonify(stats)
+
+
+@app.route('/results')
+def results_page():
+    """Serve the Phase 5 comparison view; its data comes from /api/results."""
+    info = {
+        "model": _get_model_name(),
+        "platform": sys.platform,
+        "is_linux": sys.platform.startswith('linux')
+    }
+    return render_template('results.html', info=info)
+
+
+@app.route('/api/results')
+def get_results():
+    """Return results/phase5-final/numbers.json unchanged. The dashboard only reads the
+    frozen data; rebuilding it is `src.deliverables build`, never a web request."""
+    path = os.path.join(RESULTS_FINAL_DIR, 'numbers.json')
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return jsonify({"error": "no frozen results", "path": "results/phase5-final/numbers.json"}), 404
+    except (OSError, ValueError):
+        return jsonify({"error": "results/phase5-final/numbers.json is unreadable"}), 500
+    return jsonify(data)
+
+
+@app.route('/api/results/files/<path:name>')
+def get_results_file(name):
+    """Serve one file of the frozen results by allow list. '..', absolute paths, backslashes
+    and anything outside the list (raw.jsonl, sources/, inputs/) never match, so a request
+    cannot leave results/phase5-final/ or read the episode data."""
+    if name not in RESULTS_FILES and not RESULTS_CHART.fullmatch(name):
+        abort(404)
+    response = send_from_directory(RESULTS_FINAL_DIR, name, max_age=0)
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
 
 
 def _is_loopback(host: str) -> bool:

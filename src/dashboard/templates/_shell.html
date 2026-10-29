@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}Guardrails{% endblock %}</title>
+<meta name="description" content="{% block description %}OS-level guardrails for LLM agents{% endblock %}">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5.3.0/400.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5.3.0/500.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5.3.0/600.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-mono@5.3.0/400.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-mono@5.3.0/500.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.48.0/dist/tabler-icons.min.css">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+<script>
+    // Apply a remembered theme before first paint so the page does not flash.
+    try {
+        const t = localStorage.getItem('guardrails-theme');
+        if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+    } catch (e) { /* storage unavailable: follow the system theme */ }
+</script>
+</head>
+<body>
+<div id="sr-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+<div class="shell">
+    <aside class="rail">
+        <div class="mark">
+            <span class="mark-name">Guardrails</span>
+            <span class="mark-tag">OS-level mediation for LLM agents</span>
+        </div>
+        <nav class="nav" aria-label="Views">
+            <a href="/" {% if view == 'monitor' %}aria-current="page"{% endif %}><i class="ti ti-activity" aria-hidden="true"></i>Live monitor</a>
+            <a href="/results" {% if view == 'results' %}aria-current="page"{% endif %}><i class="ti ti-chart-dots" aria-hidden="true"></i>Results</a>
+        </nav>
+        <div class="facts">
+            <div class="fact">
+                <span class="fact-k">Agent model</span>
+                <span class="fact-v" id="m-model" title="{{ info.model }}">{{ info.model }}</span>
+            </div>
+            <div class="fact">
+                <span class="fact-k">Monitor host</span>
+                <span class="fact-v" id="m-platform">{{ info.platform }}</span>
+            </div>
+            <div class="fact">
+                <span class="fact-k">Kernel layers</span>
+                <span class="fact-v" id="m-kernel">{{ 'available' if info.is_linux else 'need Linux or WSL2' }}</span>
+            </div>
+        </div>
+        <div class="rail-foot">
+            <button class="theme-btn" id="btn-theme" type="button" aria-label="Switch to dark theme">
+                <i class="ti ti-moon" aria-hidden="true"></i><span class="theme-label">Dark theme</span>
+            </button>
+            <span class="credit">Raj Vardhan Singh (24BDS0200)<br>BCSE303P Operating Systems Lab</span>
+        </div>
+    </aside>
+    <main class="content" id="main">
+        <div class="page">
+{% block main %}{% endblock %}
+        </div>
+    </main>
+</div>
+<script>
+'use strict';
+(function () {
+    // Theme toggle, shared by both views.
+    const root = document.documentElement;
+    const btn = document.getElementById('btn-theme');
+    function current() {
+        return root.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    }
+    function paint() {
+        const next = current() === 'dark' ? 'light' : 'dark';
+        btn.querySelector('i').className = 'ti ' + (next === 'dark' ? 'ti-moon' : 'ti-sun');
+        btn.querySelector('.theme-label').textContent = next === 'dark' ? 'Dark theme' : 'Light theme';
+        btn.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+    }
+    btn.addEventListener('click', () => {
+        root.dataset.theme = current() === 'dark' ? 'light' : 'dark';
+        try { localStorage.setItem('guardrails-theme', root.dataset.theme); } catch (e) { /* not persisted */ }
+        paint();
+        document.dispatchEvent(new CustomEvent('themechange'));
+    });
+    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', paint);
+    paint();
+})();
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
