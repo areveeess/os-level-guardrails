@@ -7,6 +7,10 @@ freeze  Copies every source directory into a sibling staging directory, then swa
         the Groq loop is still writing is never copied half-way and nothing is ever
         written into results/phase4-* or results/final-20261011 (T-05-01). On any
         error the staging directory is removed and the old frozen directory is kept.
+        The frozen directory itself must be a phase5-* directory directly under the
+        results root (symlinks resolved) that overlaps no source and, if it exists and
+        is not empty, holds a freeze.json; anything else is refused before any write,
+        because the swap deletes the directory it replaces (CR-02).
 render  Regenerates summary.md, summary.csv and layer_blocks.csv through
         src/benchmark/report.py from the frozen current-engine copies only (the legacy
         copies reach only their own labelled table, D-02), with the confounds, legacy,
@@ -49,6 +53,7 @@ SCHEMA = 1
 FREEZE_FILE = "freeze.json"
 NUMBERS_FILE = "numbers.json"
 SOURCES_DIR = "sources"
+FROZEN_PREFIX = "phase5-"
 CONTROL_SOURCE = "phase4-control"
 KINDS = ("dh", "ds", "benign")
 PROP_KEYS = ("k", "n", "pct", "lo", "hi")
@@ -89,8 +94,13 @@ def posix(path: str) -> str:
     return str(path).replace("\\", "/")
 
 
+def _real(path: str) -> str:
+    """The path with every symlink resolved (IN-02), case-normalised, for comparisons only."""
+    return os.path.normcase(os.path.realpath(path))
+
+
 def _under(path: str, root: str) -> bool:
-    p, r = os.path.normcase(os.path.abspath(path)), os.path.normcase(os.path.abspath(root))
+    p, r = _real(path), _real(root)
     return p == r or p.startswith(r.rstrip(os.sep) + os.sep)
 
 
@@ -150,16 +160,37 @@ def _remove(path: str):
         shutil.rmtree(path)
 
 
+def check_frozen_target(results_root: str, frozen_dir: str):
+    """Refuse a frozen directory the build must not replace (CR-02).
+
+    The build moves the old frozen directory aside and deletes it, so the target must be a direct child of the
+    results root named phase5-* (after resolving symlinks, so a link cannot point it elsewhere), must not overlap
+    any source directory, and, when it already exists and is not empty, must hold a freeze.json. That keeps the
+    build away from results/phase4-*, results/final-20261011, docs/ and anything else."""
+    real = os.path.realpath(frozen_dir)
+    if not os.path.basename(real).startswith(FROZEN_PREFIX) or _real(os.path.dirname(real)) != _real(results_root):
+        raise DeliverablesError(f"the frozen directory {posix(frozen_dir)} must be a {FROZEN_PREFIX}* directory "
+                                f"directly under the results root {posix(results_root)}; refusing it")
+    for _, origin, label, _ in source_specs(results_root):
+        if _under(frozen_dir, origin) or _under(origin, frozen_dir):
+            raise DeliverablesError(f"the frozen directory {posix(frozen_dir)} overlaps the source {label}")
+    if os.path.lexists(frozen_dir):
+        if os.path.islink(frozen_dir) or not os.path.isdir(frozen_dir):
+            raise DeliverablesError(f"{posix(frozen_dir)} is not a plain directory; refusing to replace it")
+        if os.listdir(frozen_dir) and not os.path.isfile(os.path.join(frozen_dir, FREEZE_FILE)):
+            raise DeliverablesError(f"{posix(frozen_dir)} exists and is not a frozen directory (no {FREEZE_FILE}); "
+                                    f"refusing to replace it")
+
+
 def freeze(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, now=None) -> dict:
     """Copy the eleven sources into frozen_dir/sources and write freeze.json; returns the freeze record.
 
     `now` (timezone-aware datetime) is the snapshot clock; the data state is "snapshot" before FREEZE_UTC and
     "final" at or after it."""
     snapshot = _utc(now or datetime.datetime.now(datetime.timezone.utc))
+    check_frozen_target(results_root, frozen_dir)
     specs = source_specs(results_root)
     for name, origin, label, _ in specs:
-        if _under(frozen_dir, origin) or _under(origin, frozen_dir):
-            raise DeliverablesError(f"the frozen directory {posix(frozen_dir)} overlaps the source {label}")
         if not os.path.isfile(os.path.join(origin, "raw.jsonl")):
             raise DeliverablesError(f"source directory {posix(origin)} is missing or has no raw.jsonl")
 
@@ -481,6 +512,7 @@ def build(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, reuse:
             say(line)
 
     if reuse:
+        check_frozen_target(results_root, frozen_dir)
         record, word = read_freeze(frozen_dir), "REUSE"
     else:
         record, word = freeze(results_root, frozen_dir, now), "FREEZE"

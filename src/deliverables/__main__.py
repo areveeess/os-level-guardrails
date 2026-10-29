@@ -17,6 +17,9 @@ Deliverables CLI — python -m src.deliverables build | blocks | check | deck
       then check it; ends with "DECK P slides S notes N charts C ok" (exit 0), FAIL deck lines (exit 1), or
       "FAIL deck: python-pptx is not importable by ..." (exit 3: this interpreter cannot draw the deck).
 
+--frozen for build must name a phase5-* directory directly under the results root that is empty, absent or
+an earlier frozen directory (it is replaced); any other path, a source directory included, is refused.
+
 One fact per printed line, ASCII only. --doc must name one of the target docs (README.md,
 docs/SDD.md, docs/viva/04-..., docs/viva/05-...), as a path relative to the repository root.
 """

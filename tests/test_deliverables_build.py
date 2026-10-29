@@ -129,7 +129,7 @@ def no_chart_drawing(monkeypatch):
 @pytest.fixture
 def built(tmp_path):
     root = make_results_root(tmp_path)
-    frozen = tmp_path / "phase5-final"
+    frozen = tmp_path / "results" / "phase5-final"
     lines = build_module.build(str(root), str(frozen), now=BEFORE)
     return root, frozen, lines
 
@@ -190,14 +190,14 @@ def test_partial_last_line_is_not_copied(tmp_path):
     complete = raw.read_bytes()
     with open(raw, "ab") as f:
         f.write(b'{"model": "groq-gpt-oss-20b", "case_')
-    frozen = tmp_path / "frozen"
+    frozen = tmp_path / "results" / "phase5-frozen"
     build_module.freeze(str(root), str(frozen), now=BEFORE)
     assert (frozen / "sources" / "phase4-groq-gpt-oss-20b" / "raw.jsonl").read_bytes() == complete
 
 
 def test_data_state_follows_the_freeze(tmp_path):
     root = make_results_root(tmp_path)
-    frozen = tmp_path / "frozen"
+    frozen = tmp_path / "results" / "phase5-frozen"
     assert build_module.freeze(str(root), str(frozen), now=BEFORE)["data_state"] == "snapshot"
     assert build_module.freeze(str(root), str(frozen), now=AFTER)["data_state"] == "final"
     assert load_json(frozen / "freeze.json")["data_state"] == "final"
@@ -211,12 +211,12 @@ def test_build_reads_read_only_sources_without_changing_them(tmp_path):
             path = os.path.join(dirpath, name)
             before[path] = sha256(path)
             os.chmod(path, 0o444)
-    listings = {d: sorted(os.listdir(d)) for d, _, _ in os.walk(root)}
-    dirs = [d for d, _, _ in os.walk(root)]
+    dirs = [d for d, _, _ in os.walk(root) if d != str(root)]   # the root stays writable: the frozen dir lives in it
+    listings = {d: sorted(os.listdir(d)) for d in dirs}
     for d in dirs:
         os.chmod(d, 0o555)
     try:
-        build_module.build(str(root), str(tmp_path / "frozen"), now=BEFORE)
+        build_module.build(str(root), str(tmp_path / "results" / "phase5-frozen"), now=BEFORE)
         assert {p: sha256(p) for p in before} == before
         assert {d: sorted(os.listdir(d)) for d in dirs} == listings
     finally:
@@ -228,7 +228,7 @@ def test_build_reads_read_only_sources_without_changing_them(tmp_path):
 
 def test_missing_source_fails_and_keeps_the_frozen_directory(tmp_path, capsys):
     root = make_results_root(tmp_path)
-    frozen = tmp_path / "frozen"
+    frozen = tmp_path / "results" / "phase5-frozen"
     build_module.build(str(root), str(frozen), now=BEFORE)
     snapshot = tree_bytes(frozen)
     for path in (root / "phase4-groq-qwen3.8-27b").iterdir():
@@ -241,10 +241,57 @@ def test_missing_source_fails_and_keeps_the_frozen_directory(tmp_path, capsys):
     assert tree_bytes(frozen) == snapshot
 
 
+@pytest.mark.parametrize("target", ["phase4-jobs", "phase4-scratch-gpt", "final-20261011", "../docs",
+                                    "phase5-final/inner", "."])
+def test_frozen_target_outside_results_phase5_is_refused_and_untouched(tmp_path, target, capsys):
+    root = make_results_root(tmp_path)
+    for name in ("phase4-jobs", "../docs"):
+        d = root / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "keep.txt").write_text("not a frozen directory", encoding="utf-8")
+    before = tree_bytes(tmp_path)
+    frozen = root / target
+    with pytest.raises(build_module.DeliverablesError, match="refusing"):
+        build_module.freeze(str(root), str(frozen), now=BEFORE)
+    with pytest.raises(build_module.DeliverablesError, match="refusing"):
+        build_module.build(str(root), str(frozen), now=BEFORE)
+    code = main(["build", "--results-root", str(root), "--frozen", str(frozen), "--no-docs", "--no-deck"])
+    assert code == 1 and capsys.readouterr().out.strip().splitlines()[-1].startswith("FAIL build: ")
+    assert tree_bytes(tmp_path) == before
+
+
+def test_existing_phase5_directory_without_freeze_json_is_refused(tmp_path):
+    root = make_results_root(tmp_path)
+    other = root / "phase5-notes"
+    other.mkdir()
+    (other / "draft.md").write_text("hand-written notes", encoding="utf-8")
+    with pytest.raises(build_module.DeliverablesError, match="not a frozen directory"):
+        build_module.build(str(root), str(other), now=BEFORE)
+    assert (other / "draft.md").read_text(encoding="utf-8") == "hand-written notes"
+    empty = root / "phase5-empty"
+    empty.mkdir()
+    build_module.build(str(root), str(empty), now=BEFORE)          # an empty directory is a fine target
+    assert (empty / "freeze.json").is_file()
+    build_module.build(str(root), str(empty), now=BEFORE)          # and so is a frozen directory, again
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink") or sys.platform == "win32", reason="symlinks need POSIX")
+def test_a_symlinked_frozen_target_is_resolved_before_the_checks(tmp_path):
+    root = make_results_root(tmp_path)
+    jobs = root / "phase4-jobs"
+    jobs.mkdir()
+    (jobs / "loop.pid").write_text("1", encoding="utf-8")
+    link = root / "phase5-final"
+    os.symlink(str(jobs), str(link))
+    with pytest.raises(build_module.DeliverablesError, match="refusing"):
+        build_module.build(str(root), str(link), now=BEFORE)
+    assert (jobs / "loop.pid").read_text(encoding="utf-8") == "1"
+
+
 def test_unknown_model_fails_the_build(tmp_path):
     root = make_results_root(tmp_path, extra_rows=[_row("mystery-model", "dh-00", "unprotected", "dh")])
     with pytest.raises(build_module.DeliverablesError, match="mystery-model"):
-        build_module.build(str(root), str(tmp_path / "frozen"), now=BEFORE)
+        build_module.build(str(root), str(tmp_path / "results" / "phase5-frozen"), now=BEFORE)
 
 
 # ── Report from the frozen copy ──
@@ -327,7 +374,7 @@ def test_context_overflow_and_error_dominated_labels(tmp_path):
     for r in rows[:8]:
         r["llm_error"] = "HTTP 503 upstream"
     write_raw(root / "phase4-groq-gpt-oss-120b", rows)
-    frozen = tmp_path / "frozen"
+    frozen = tmp_path / "results" / "phase5-frozen"
     build_module.build(str(root), str(frozen), now=BEFORE)
     by_model = {m["model"]: m for m in load_json(frozen / "numbers.json")["models"]}
     assert by_model["qwen2.5-0.5b-base"]["context_overflow_episodes"] == 1

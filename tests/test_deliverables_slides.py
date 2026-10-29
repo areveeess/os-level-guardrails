@@ -48,7 +48,7 @@ def no_chart_drawing(monkeypatch):
 @pytest.fixture
 def frozen_numbers(tmp_path):
     root = make_results_root(tmp_path)
-    frozen = tmp_path / "phase5-final"
+    frozen = tmp_path / "results" / "phase5-final"
     build_module.build(str(root), str(frozen), now=BEFORE)
     return frozen, load_json(frozen / "numbers.json")
 
@@ -338,7 +338,7 @@ FAKE_COUNTS = {"slides": len(slides.SLIDE_TITLES), "notes": len(slides.SLIDE_TIT
 
 def build_args(tmp_path, *extra):
     root = make_results_root(tmp_path)
-    return ["build", "--results-root", str(root), "--frozen", str(tmp_path / "frozen"), "--no-docs",
+    return ["build", "--results-root", str(root), "--frozen", str(tmp_path / "results" / "phase5-frozen"), "--no-docs",
             "--deck-out", str(tmp_path / "deck.pptx")] + list(extra)
 
 
@@ -354,7 +354,7 @@ def test_build_renders_and_checks_the_deck_before_build_ok(tmp_path, monkeypatch
     monkeypatch.setattr(slides, "check_deck", lambda path, numbers, frozen_dir: ([], dict(FAKE_COUNTS)))
     root = make_results_root(tmp_path)
     out = tmp_path / "deck.pptx"
-    lines = build_module.build(str(root), str(tmp_path / "frozen"), now=BEFORE, deck_out=str(out))
+    lines = build_module.build(str(root), str(tmp_path / "results" / "phase5-frozen"), now=BEFORE, deck_out=str(out))
     assert lines[-1] == "BUILD ok"
     assert lines[-2] == slides.deck_line(str(out), FAKE_COUNTS)
     assert calls and calls[0][0] == len(slides.SLIDE_TITLES) and calls[0][2].endswith("template.pptx")
@@ -365,7 +365,7 @@ def test_build_library_call_without_deck_out_has_no_deck_step(tmp_path, monkeypa
         raise AssertionError("the deck must not be rendered")
     monkeypatch.setattr(slides, "render_deck", boom)
     root = make_results_root(tmp_path)
-    lines = build_module.build(str(root), str(tmp_path / "frozen"), now=BEFORE)
+    lines = build_module.build(str(root), str(tmp_path / "results" / "phase5-frozen"), now=BEFORE)
     assert lines[-1] == "BUILD ok" and not any(line.startswith("DECK") for line in lines)
 
 
@@ -381,7 +381,7 @@ def test_build_without_pptx_writes_the_rest_exits_3_and_calls_the_old_deck_stale
     out = capsys.readouterr().out.strip().splitlines()
     assert code == 3
     assert any(line.startswith("REPORT ") for line in out) and "CHARTS 3" in out
-    assert (tmp_path / "frozen" / "numbers.json").is_file()
+    assert (tmp_path / "results" / "phase5-frozen" / "numbers.json").is_file()
     fails = [line for line in out if line.startswith("FAIL deck: python-pptx is not importable by ")]
     assert len(fails) == 1 and out[-1] == fails[0]
     assert "stale" in fails[0] and str(old).replace("\\", "/") in fails[0]

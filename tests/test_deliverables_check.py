@@ -51,7 +51,7 @@ def make_repo(tmp_path, readme=b"# Readme\r\n\r\nNo numbers here.\r\n", sdd=b"# 
 @pytest.fixture
 def frozen_numbers(tmp_path):
     root = make_results_root(tmp_path)
-    frozen = tmp_path / "phase5-final"
+    frozen = tmp_path / "results" / "phase5-final"
     build_module.build(str(root), str(frozen), now=BEFORE)
     return frozen, load_json(frozen / "numbers.json")
 
@@ -91,7 +91,7 @@ def test_headline_block_is_fixed_order_with_partial_labels_and_the_control_last(
 
 def test_findings_are_plain_bullets_that_follow_the_data(tmp_path):
     root = make_results_root(tmp_path)
-    frozen = tmp_path / "frozen"
+    frozen = tmp_path / "results" / "phase5-frozen"
     build_module.build(str(root), str(frozen), now=BEFORE)
     numbers = load_json(frozen / "numbers.json")
     lines = blocks.render_block("findings", numbers, str(tmp_path / "x.md"), str(frozen))
@@ -426,7 +426,7 @@ def test_build_applies_blocks_and_checks_only_the_selected_docs(tmp_path):
     root = make_results_root(tmp_path)
     repo = make_repo(tmp_path, readme=marker_doc(["status"], eol="\r\n"), sdd=marker_doc(["headline"]),
                      page04=b"# Page 04\n\nOld snapshot 2026-10-29T03:06Z.\n")
-    frozen = tmp_path / "frozen"
+    frozen = tmp_path / "results" / "phase5-frozen"
     lines = build_module.build(str(root), str(frozen), now=BEFORE, docs=["README.md", "docs/SDD.md"],
                                repo_root=str(repo))
     assert "BLOCKS README.md 1 updated" in lines and "BLOCKS docs/SDD.md 1 updated" in lines

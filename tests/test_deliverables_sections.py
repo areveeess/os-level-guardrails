@@ -68,7 +68,7 @@ def fake_repo(tmp_path):
 @pytest.fixture
 def frozen(tmp_path):
     root = make_results_root(tmp_path)
-    frozen = tmp_path / "phase5-final"
+    frozen = tmp_path / "results" / "phase5-final"
     build_module.freeze(str(root), str(frozen), now=BEFORE)
     return frozen
 
@@ -147,7 +147,7 @@ def test_legacy_summary_is_only_the_legacy_sources(frozen):
 
 def _numbers(tmp_path, **kw):
     root = make_results_root(tmp_path, **kw)
-    frozen = tmp_path / "frozen"
+    frozen = tmp_path / "results" / "phase5-frozen"
     build_module.build(str(root), str(frozen), now=BEFORE)
     return root, frozen, load_json(frozen / "numbers.json")
 
@@ -173,7 +173,7 @@ def test_threat_items_follow_the_data(tmp_path):
         if r["case_id"] == "ds-01" and r["arm"] == "unprotected":
             r.update(actions=[], steps=0)          # a format failure
     write_raw(root / "phase4-scratch-gpt", rows)
-    frozen = tmp_path / "frozen"
+    frozen = tmp_path / "results" / "phase5-frozen"
     build_module.build(str(root), str(frozen), now=BEFORE)
     numbers = load_json(frozen / "numbers.json")
     text = "\n".join(numbers["threats"])
