@@ -1,18 +1,18 @@
 ---
 gsd_state_version: "1.0"
-current_phase: 3
-current_phase_name: Qwen LoRA & hf_local Provider
+current_phase: 4
+current_phase_name: Full Runs - Local, Added Ollama, Hosted Resume
 status: verifying
-stopped_at: Completed 04-02-PLAN.md
-last_updated: "2026-10-29T02:18:57.465Z"
-last_activity: 2026-10-22
-last_activity_desc: Phase 3 execution started
-state_head: 4858c27c8f989a60097faf5ab95f1405948d411e
+stopped_at: Completed 04-04-PLAN.md (Groq snapshot; final regeneration after the freeze pending)
+last_updated: "2026-10-29T03:22:00.544Z"
+last_activity: 2026-10-29
+last_activity_desc: Phase 4 executed (5/5 plans), awaiting review; Groq final regeneration after the 15:30 UTC freeze pending
+state_head: 0a3881ba6b1bccc2bb1ceac52ed0b65ff34d4112
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 17
-  completed_plans: 16
+  completed_plans: 17
   percent: 40
 ---
 
@@ -23,16 +23,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-22)
 
 **Core value:** The guardrails must be shown to hold independently of which LLM drives the agent, including a weak, unaligned, locally made model, backed by a fair, reproducible comparison table the student can defend in a viva.
-**Current focus:** Phase 3 — Qwen LoRA & hf_local Provider
+**Current focus:** Phase 4 — Full Runs - Local, Added Ollama, Hosted Resume (executed, awaiting review)
 
 ## Current Position
 
-Phase: 3 (Qwen LoRA & hf_local Provider) — EXECUTING
-Plan: 4 of 4
-Status: Phase complete — ready for verification
-Last activity: 2026-10-22 — Phase 3 execution started
+Phase: 4 (Full Runs - Local, Added Ollama, Hosted Resume) — EXECUTED, awaiting review
+Plan: 5 of 5 (all plans have a SUMMARY)
+Status: Phase 4 executed — awaiting code review and verification; the Groq re-run continues until the 2026-10-29 15:30 UTC freeze, after which results/phase4-report is regenerated and viva Part C updated (CMP-03 open)
+Last activity: 2026-10-29 — 04-04 complete on the 03:06Z Groq snapshot; full suite 1242 passed, 1 skipped
 
-Progress: [████░░░░░░] 40% (Phase 1 of 5 complete)
+Progress: [████░░░░░░] 40% (Phases 1-2 complete; Phases 3-4 executed, awaiting verification)
 
 ## Performance Metrics
 
@@ -73,6 +73,7 @@ Progress: [████░░░░░░] 40% (Phase 1 of 5 complete)
 | Phase 04 P05 | 24min | 3 tasks | 9 files |
 | Phase 04 P03 | 7h25m wall | 3 tasks | 1 files |
 | Phase 04 P02 | 8min | 3 tasks | 3 files |
+| Phase 04 P04 | 1h05m | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -113,6 +114,8 @@ Recent decisions affecting current work:
 - [Phase 04]: 04-03: new 8192-context llama3.2:3b run supersedes October rows; 0/342 episodes above the measured 4096 default
 - [Phase 04]: 04-03: local queue and Groq loop launched detached (setsid nohup) with a hidden keepalive wsl.exe; Groq loop runs to the 2026-10-29 15:30 UTC freeze
 - [Phase 04]: 04-02 EVAL-08: recorded sandbox and seccomp blocks are 0/1147 pooled over the 8 language models at report time (0/855 over the five complete local models); reported as zero with n, not padded (D-07b)
+- [Phase 4]: Phase 4 Task 3 ran on a 2026-10-29T03:06Z snapshot by user decision; the Groq loop runs on to the 15:30 UTC freeze and the report is regenerated afterwards
+- [Phase 4]: CMP-01 and CMP-02 complete (five local models 342/342); CMP-03 open until the post-freeze Groq regeneration
 
 ### Pending Todos
 
@@ -124,6 +127,7 @@ None yet.
 - [Phase 2→3] Reuse the Phase 2 dataset (sha a2586548c7f7) for Qwen LoRA; WSL now 11 GB + 8 GB swap and shared with another project's CPU job — keep GPU preflight + resumable training
 - [Phase 2→5] Smoke behaviour (3/10 unprotected attempts) and ds dev accuracy 0.68 are disclosures for Phase 4/5, not Phase 2 gaps
 - [Phase 4] Hosted Groq quota may not allow completing all three models within the week; stopping rule must be written before resuming
+- [Phase 4] Pending follow-up: after the 2026-10-29 15:30 UTC freeze, regenerate results/phase4-report, run secret-scan and run_checks hosted, update viva Part C Groq rows and EVAL-08 pooled n, re-run run_checks viva, then tick CMP-03 (WINDOWS.md entry 2)
 - [Phase 4] Existing llama3.2:3b and gemma-4-31b rows may be affected by context truncation or API timeouts; re-score from `raw.jsonl`
 - [Phase 4] GPU is serial: stop Ollama during training; scratch training, then LoRA training, then benchmark runs
 - [Docs] REQUIREMENTS.md originally stated 26 v1 requirements; the actual count is 27 (corrected at roadmap creation)
@@ -147,6 +151,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-29T02:18:56.609Z
-Stopped at: Completed 04-02-PLAN.md
+Last session: 2026-10-29T03:21:59.648Z
+Stopped at: Completed 04-04-PLAN.md (Groq snapshot; final regeneration after the freeze pending)
 Resume file: None

@@ -38,8 +38,8 @@
 
 ### Multi-LLM Comparison (CMP)
 
-- [ ] **CMP-01**: qwen2.5:3b runs through the full benchmark via Ollama with the context window raised so prompts are not truncated, and llama3.2:3b is re-checked for truncation (phi3.5:3.8b and gemma3:1b moved to v2 by user decision 2026-10-22 to save ~2 h of GPU time)
-- [ ] **CMP-02**: scratch-gpt, Qwen base and Qwen LoRA complete the full benchmark (57 cases × 3 runs × 2 arms)
+- [x] **CMP-01**: qwen2.5:3b runs through the full benchmark via Ollama with the context window raised so prompts are not truncated, and llama3.2:3b is re-checked for truncation (phi3.5:3.8b and gemma3:1b moved to v2 by user decision 2026-10-22 to save ~2 h of GPU time)
+- [x] **CMP-02**: scratch-gpt, Qwen base and Qwen LoRA complete the full benchmark (57 cases × 3 runs × 2 arms)
 - [ ] **CMP-03**: Hosted non-Gemini models (Groq gpt-oss-120b, gpt-oss-20b, qwen3.8-27b) are re-run fresh under the current engine with data-stealing episodes prioritised, under a written stopping rule (hard freeze 2026-10-29 15:30 UTC); whatever remains incomplete is reported as partial with its n. The October partial rows are superseded (decision 2026-10-28).
 
 ### Report & Deliverables (DOC)
@@ -102,8 +102,8 @@
 | LORA-02 | Phase 3 | Complete |
 | LORA-03 | Phase 3 | Complete |
 | LORA-04 | Phase 3 | Complete |
-| CMP-01 | Phase 4 | Pending |
-| CMP-02 | Phase 4 | Pending |
+| CMP-01 | Phase 4 | Complete |
+| CMP-02 | Phase 4 | Complete |
 | CMP-03 | Phase 4 | Pending |
 | DOC-01 | Phase 5 | Pending |
 | DOC-02 | Phase 5 | Pending |
