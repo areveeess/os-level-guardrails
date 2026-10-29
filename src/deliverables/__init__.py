@@ -33,6 +33,12 @@ FROZEN_DIR = os.path.join(RESULTS_ROOT, "phase5-final")
 # Mirrors src.benchmark.jobs.FREEZE_UTC (pinned by a test that reads the constant from the source)
 FREEZE_UTC = "2026-10-29T15:30:00+00:00"
 
+# Mirror src.benchmark.jobs.HOSTED_COMPLETE and HOSTED_TERMINAL (pinned by a test that reads the source): a hosted
+# model in a terminal state is never relaunched, so its directory gets no new row (CR-03)
+HOSTED_COMPLETE = ("complete", "complete_with_problems")
+HOSTED_TERMINAL = HOSTED_COMPLETE + ("stopped_by_quota", "stopped_at_freeze", "stalled", "unavailable")
+HOSTED_STATE_FILE = "hosted_state.json"
+
 # Mirrors src.benchmark.run_checks.HOSTED_DS_EXPECTED: 20 ds cases x 3 runs x 2 arms (pinned by a test)
 DS_EXPECTED = 120
 

@@ -44,8 +44,9 @@ from src.benchmark.stats import prop_fields
 from src.deliverables import charts, sections, slides
 from src.deliverables.blocks import BlockError, apply_blocks, data_line
 from src.deliverables.consistency import load_numbers, run_check, select_docs
-from src.deliverables import (CONTROL_MODEL, COPY_FILES, CURRENT_SOURCES, FREEZE_UTC, FROZEN_DIR,
-                              HOSTED_MODELS, LEGACY_SOURCES, LOCAL_MODELS, MODEL_ORDER, RESULTS_ROOT)
+from src.deliverables import (CONTROL_MODEL, COPY_FILES, CURRENT_SOURCES, FREEZE_UTC, FROZEN_DIR, HOSTED_COMPLETE,
+                              HOSTED_MODELS, HOSTED_STATE_FILE, HOSTED_TERMINAL, LEGACY_SOURCES, LOCAL_MODELS,
+                              MODEL_ORDER, RESULTS_ROOT)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -182,11 +183,61 @@ def check_frozen_target(results_root: str, frozen_dir: str):
                                     f"refusing to replace it")
 
 
+_ISO_SECONDS_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+
+
+def _state_times(obj) -> list:
+    """Every ISO UTC timestamp (seconds, Z) in a hosted_state.json, stop reasons included, as datetimes."""
+    out = []
+    if isinstance(obj, dict):
+        for value in obj.values():
+            out += _state_times(value)
+    elif isinstance(obj, list):
+        for value in obj:
+            out += _state_times(value)
+    elif isinstance(obj, str):
+        out += [parse_utc(t) for t in _ISO_SECONDS_RE.findall(obj)]
+    return out
+
+
+def data_state(snapshot: datetime.datetime, freeze_at: datetime.datetime, hosted: dict) -> tuple:
+    """("final" or "snapshot", reason or None) of a freeze (CR-03); `hosted` is {model: parsed frozen
+    hosted_state.json or None}.
+
+    "final" needs all three: the snapshot clock is at or after the freeze; every hosted model's frozen state is
+    terminal (jobs.HOSTED_TERMINAL), so its loop has stopped the model's children and will append no row; and the
+    frozen states themselves show the freeze was reached on the loop's own clock (a recorded time at or after it,
+    or a model the loop ended as stopped_at_freeze), unless every hosted model completed its run. The build clock
+    (Windows) and the loop clock (WSL) can differ, so the wall clock alone never makes the data final. The reason
+    says why a post-freeze snapshot is not final; it is None before the freeze."""
+    if snapshot < freeze_at:
+        return "snapshot", None
+    states = {m: (h.get("state") if isinstance(h, dict) else None) for m, h in hosted.items()}
+    open_models = [f"{m} {states[m] or 'no hosted_state.json'}" for m in hosted if states[m] not in HOSTED_TERMINAL]
+    if open_models:
+        return "snapshot", "hosted loop not terminal: " + ", ".join(open_models)
+    reached = any(t >= freeze_at for h in hosted.values() for t in _state_times(h))         or any(s == "stopped_at_freeze" for s in states.values())         or all(s in HOSTED_COMPLETE for s in states.values())
+    if not reached:
+        return "snapshot", "no frozen hosted_state.json shows that the loop reached the freeze"
+    return "final", None
+
+
+def _read_state_bytes(data: bytes):
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def freeze(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, now=None) -> dict:
     """Copy the eleven sources into frozen_dir/sources and write freeze.json; returns the freeze record.
 
-    `now` (timezone-aware datetime) is the snapshot clock; the data state is "snapshot" before FREEZE_UTC and
-    "final" at or after it."""
+    `now` (timezone-aware datetime) is the snapshot clock. The data state is "snapshot" before FREEZE_UTC; at or
+    after it, it is "final" only when data_state() says the frozen hosted states are terminal and show the freeze
+    (CR-03), else "snapshot" with a data_state_reason. Each source's hosted_state.json is copied before its
+    raw.jsonl: a terminal state is written only after the loop's child for that model has exited, so a terminal
+    state copied first guarantees the raw.jsonl copied after it holds every row."""
     snapshot = _utc(now or datetime.datetime.now(datetime.timezone.utc))
     check_frozen_target(results_root, frozen_dir)
     specs = source_specs(results_root)
@@ -201,12 +252,12 @@ def freeze(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, now=N
     os.makedirs(parent, exist_ok=True)
     _remove(staging)
     try:
-        sources = []
+        sources, hosted_states = [], {}
         for name, origin, label, group in specs:
             target = os.path.join(staging, SOURCES_DIR, name)
             os.makedirs(target)
             copied = []
-            for filename in COPY_FILES:
+            for filename in sorted(COPY_FILES, key=lambda f: f != HOSTED_STATE_FILE):    # the state first
                 src = os.path.join(origin, filename)
                 if not os.path.isfile(src):
                     continue
@@ -214,21 +265,28 @@ def freeze(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, now=N
                 if filename == "raw.jsonl":
                     data = data[:data.rfind(b"\n") + 1]      # complete lines only
                     raw_lines, raw_sha = data.count(b"\n"), hashlib.sha256(data).hexdigest()
+                if filename == HOSTED_STATE_FILE:
+                    hosted_states[name] = _read_state_bytes(data)
                 _write_bytes(os.path.join(target, filename), data)
                 copied.append(filename)
+            copied.sort(key=COPY_FILES.index)
             sources.append({"name": name, "origin": label, "group": group, "files": copied,
                             "raw_lines": raw_lines, "raw_sha256": raw_sha})
         freeze_at = parse_utc(FREEZE_UTC)
+        state, reason = data_state(snapshot, freeze_at,
+                                   {m: hosted_states.get(model_source(m)) for m in HOSTED_MODELS})
         record = {
             "schema": SCHEMA,
             "snapshot_utc": utc_seconds(snapshot),
             "snapshot_display": utc_display(snapshot),
             "freeze_utc": utc_seconds(freeze_at),
             "freeze_display": utc_display(freeze_at),
-            "data_state": "final" if snapshot >= freeze_at else "snapshot",
+            "data_state": state,
             "code_commit": _git_head(),
             "sources": sources,
         }
+        if reason:
+            record["data_state_reason"] = reason
         _write_atomic(os.path.join(staging, FREEZE_FILE), _json_bytes(record))
         # swap: the old frozen directory is moved aside, the staging directory takes its place
         _remove(aside)
@@ -517,6 +575,8 @@ def build(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, reuse:
     else:
         record, word = freeze(results_root, frozen_dir, now), "FREEZE"
     emit(f"{word} {record['snapshot_display']} state {record['data_state']} sources {len(record['sources'])}")
+    if record.get("data_state_reason"):
+        emit(f"NOT FINAL {record['data_state_reason']}")
     for s in record["sources"]:
         emit(f"SOURCE {s['name']} lines {s['raw_lines']} sha256 {s['raw_sha256'][:12]}")
     numbers = render(frozen_dir, repo_root=repo_root)

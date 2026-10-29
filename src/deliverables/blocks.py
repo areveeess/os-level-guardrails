@@ -94,6 +94,10 @@ def find_blocks(text: str, path: str) -> list:
 
 def data_line(numbers: dict) -> str:
     """The snapshot time and data state (D-01), the same sentence as the report's data line."""
+    if numbers["data_state"] == "snapshot" and numbers["snapshot_display"] >= numbers["freeze_display"]:
+        return (f"Data: snapshot of {numbers['snapshot_display']} (UTC), copied after the D-09 freeze of "
+                f"{numbers['freeze_display']} before the hosted loop recorded a final state for every model. "
+                f"Partial rows are labelled with their episodes done and are not final.")
     if numbers["data_state"] == "snapshot":
         return (f"Data: snapshot of {numbers['snapshot_display']} (UTC); the D-09 freeze is "
                 f"{numbers['freeze_display']}. Partial rows are labelled with their episodes done and are not final.")

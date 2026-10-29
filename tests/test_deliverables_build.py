@@ -150,8 +150,22 @@ def _constant(rel_path, name):
     raise AssertionError(f"{name} not found in {rel_path}")
 
 
+def _terminal_states():
+    """jobs.HOSTED_TERMINAL, written there as HOSTED_COMPLETE + (...)."""
+    with open(os.path.join(REPO_ROOT, "src", "benchmark", "jobs.py"), encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    node = next(n for n in tree.body if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "HOSTED_TERMINAL" for t in n.targets))
+    value = node.value
+    assert isinstance(value, ast.BinOp) and isinstance(value.left, ast.Name) and value.left.id == "HOSTED_COMPLETE"
+    return _constant("src/benchmark/jobs.py", "HOSTED_COMPLETE") + ast.literal_eval(value.right)
+
+
 def test_constants_mirror_jobs_and_run_checks():
     assert deliverables.FREEZE_UTC == _constant("src/benchmark/jobs.py", "FREEZE_UTC")
+    assert deliverables.HOSTED_COMPLETE == _constant("src/benchmark/jobs.py", "HOSTED_COMPLETE")
+    assert deliverables.HOSTED_TERMINAL == _terminal_states()
+    assert deliverables.HOSTED_STATE_FILE == _constant("src/benchmark/jobs.py", "HOSTED_STATE_FILE")
     assert deliverables.DS_EXPECTED == _constant("src/benchmark/run_checks.py", "HOSTED_DS_EXPECTED")
     assert deliverables.MODEL_ORDER[:5] == LOCAL and deliverables.MODEL_ORDER[5:] == HOSTED
     assert deliverables.CURRENT_SOURCES[-1] == "phase4-control"
@@ -195,12 +209,73 @@ def test_partial_last_line_is_not_copied(tmp_path):
     assert (frozen / "sources" / "phase4-groq-gpt-oss-20b" / "raw.jsonl").read_bytes() == complete
 
 
-def test_data_state_follows_the_freeze(tmp_path):
+def set_hosted_states(root, states, launches=None):
+    """Write each hosted model's hosted_state.json with the given state (and launch records)."""
+    for model, state in zip(HOSTED, states):
+        (root / f"phase4-{model}" / "hosted_state.json").write_text(json.dumps({
+            "state": state, "next_launch_utc": None,
+            "launches": launches if launches is not None else
+            [{"start": "2026-10-29T12:00:00Z", "end": "2026-10-29T13:00:00Z", "quota_stop": True,
+              "stop_reason": "quota stop; waiting until 2026-10-29T14:00:00Z"}]}), encoding="utf-8")
+
+
+def test_data_state_before_the_freeze_is_a_snapshot_whatever_the_loop_says(tmp_path):
     root = make_results_root(tmp_path)
-    frozen = tmp_path / "results" / "phase5-frozen"
-    assert build_module.freeze(str(root), str(frozen), now=BEFORE)["data_state"] == "snapshot"
-    assert build_module.freeze(str(root), str(frozen), now=AFTER)["data_state"] == "final"
-    assert load_json(frozen / "freeze.json")["data_state"] == "final"
+    frozen = root / "phase5-frozen"
+    set_hosted_states(root, ["stopped_at_freeze"] * 3)
+    record = build_module.freeze(str(root), str(frozen), now=BEFORE)
+    assert record["data_state"] == "snapshot" and "data_state_reason" not in record
+
+
+def test_the_wall_clock_alone_never_makes_the_data_final(tmp_path):
+    root = make_results_root(tmp_path)                      # every hosted loop is waiting_quota
+    frozen = root / "phase5-frozen"
+    record = build_module.freeze(str(root), str(frozen), now=AFTER)
+    assert record["data_state"] == "snapshot"
+    assert record["data_state_reason"].startswith("hosted loop not terminal: groq-gpt-oss-120b waiting_quota")
+    assert load_json(frozen / "freeze.json")["data_state"] == "snapshot"
+    lines = build_module.build(str(root), str(frozen), now=AFTER)
+    assert lines[0].endswith("state snapshot sources 11") and lines[1].startswith("NOT FINAL hosted loop not terminal")
+    numbers = load_json(frozen / "numbers.json")
+    from src.deliverables.blocks import data_line
+    assert "after the D-09 freeze" in data_line(numbers) and "not final" in data_line(numbers)
+    set_hosted_states(root, ["stopped_at_freeze"] * 3)
+    os.remove(root / "phase4-groq-gpt-oss-20b" / "hosted_state.json")
+    reason = build_module.freeze(str(root), str(frozen), now=AFTER)["data_state_reason"]
+    assert "groq-gpt-oss-20b no hosted_state.json" in reason
+
+
+@pytest.mark.parametrize("states, launches, expected", [
+    (["stopped_at_freeze"] * 3, None, "final"),                              # the loop ended them at the freeze
+    (["stopped_by_quota", "stalled", "unavailable"], None, "snapshot"),       # terminal, but nothing shows the freeze
+    (["stopped_by_quota"] * 3, [{"start": "2026-10-29T14:00:00Z", "end": "2026-10-29T15:31:02Z"}], "final"),
+    (["stopped_by_quota"] * 3, [{"stop_reason": "quota stop; the next launch 2026-10-29T16:02:00Z is at or after "
+                                                "the freeze (D-09)"}], "final"),
+    (["complete", "complete_with_problems", "complete"], None, "final"),     # nothing left to collect
+    (["complete", "running", "complete"], None, "snapshot"),
+])
+def test_final_needs_terminal_states_that_show_the_freeze(tmp_path, states, launches, expected):
+    root = make_results_root(tmp_path)
+    set_hosted_states(root, states, launches)
+    record = build_module.freeze(str(root), str(root / "phase5-frozen"), now=AFTER)
+    assert record["data_state"] == expected
+    assert ("data_state_reason" in record) == (expected == "snapshot")
+
+
+def test_hosted_state_is_copied_before_raw_jsonl(tmp_path, monkeypatch):
+    root = make_results_root(tmp_path)
+    order = []
+    real = build_module._read_bytes
+
+    def recording(path):
+        order.append(os.path.relpath(path, str(root)).replace("\\", "/"))
+        return real(path)
+    monkeypatch.setattr(build_module, "_read_bytes", recording)
+    record = build_module.freeze(str(root), str(root / "phase5-frozen"), now=BEFORE)
+    for model in HOSTED:
+        assert order.index(f"phase4-{model}/hosted_state.json") < order.index(f"phase4-{model}/raw.jsonl")
+    files = {s["name"]: s["files"] for s in record["sources"]}
+    assert files["phase4-groq-gpt-oss-20b"] == ["raw.jsonl", "manifest.json", "hosted_state.json"]
 
 
 def test_build_reads_read_only_sources_without_changing_them(tmp_path):
