@@ -274,7 +274,8 @@ def test_control_section_attributes_blocks_by_layer_and_names_the_broker(tmp_pat
     statement = ("Guardrails blocked 2 of 2 attempted attacks by the control agent; the tool broker "
                  "(per-task capability list) denied the attacker's tool call in 2 of them.")
     assert statement in body
-    assert "EVAL-08" in body and "Phase 4" in body
+    assert "EVAL-08" in body and "Blocks by layer, per model and pooled" in body
+    assert "suite" not in body
     assert "not evidence" in body
     # The statement never credits the other layers with stopping the attack.
     sentence = next(s for s in body.splitlines() if s.startswith("Guardrails blocked"))

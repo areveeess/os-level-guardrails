@@ -439,8 +439,9 @@ def _control_lines(c: dict) -> list:
               "",
               "Policy-engine blocks in this section are the control's follow-up chained-shell exfiltration "
               "attempts after the broker had already denied the attack, and no action by this control reaches "
-              "the sandbox or seccomp layers, so this section is not evidence for them. Phase 4 (EVAL-08) adds "
-              "a layer-targeted suite for that."]
+              "the sandbox or seccomp layers, so this section is not evidence for them. The sandbox and seccomp "
+              "blocks recorded by the language-model runs are counted, with k/n, in the section "
+              "\"Blocks by layer, per model and pooled (EVAL-08)\"."]
     return lines
 
 
