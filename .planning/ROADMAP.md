@@ -148,7 +148,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 05-02-PLAN.md — README and SDD 3.0 for the multi-LLM and local-model system, result numbers only in generated blocks, check passes; SDD PDF/DOCX export left as a manual step (wave 2)
-- [ ] 05-03-PLAN.md — Viva page 05 (prompt injection and defenses, evaluation statistics, confounds and threats, results, defend the result, 30+ examiner Q&A) and the viva index; page 04 review section only if 04-REVIEW-FIX exists (wave 2)
+- [ ] 05-03-PLAN.md — Viva page 05 (prompt injection and defenses, evaluation statistics, confounds and threats, results, defend the result, 30+ examiner Q&A) and the viva index; viva page 04 Part C converted to generated blocks and its code-review section filled from 04-REVIEW-FIX (wave 2)
 - [ ] 05-04-PLAN.md — Review-3 deck generator (src/deliverables/slides.py, python-pptx on Windows py -3.12, template-based, 15 slides with notes, deck check) wired into the one-command build (wave 2)
 
 ## Progress
