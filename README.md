@@ -1,84 +1,156 @@
 # OS-Level Guardrails for Autonomous AI Agents
 
-A lightweight, OS-level capability-based reference monitor that mediates every action (file, network, process) requested by an autonomous AI agent. Built using `seccomp-bpf`, Linux namespaces, and classical access-matrix theory.
+A lightweight, OS-level capability-based reference monitor that mediates every action (tool call, file, network, process) requested by an autonomous AI agent, whichever language model drives it: a hosted model, a local model served through Ollama, or a model trained on this laptop. The monitor is built from a task-scoped tool broker, a YAML access-matrix policy engine, Linux namespaces and `seccomp-bpf`, and it is evaluated on the InjecAgent indirect prompt-injection benchmark with the same cases and settings for every model.
 
 > **Course:** BCSE303P Operating Systems Lab  
 > **Author:** Raj Vardhan Singh | 24BDS0200
 
 ---
 
-## 🎯 Problem
+## Review 3: a locally made LLM and other LLMs
 
-Autonomous AI agents (coding agents, browser agents, tool-using assistants) are increasingly granted real execution authority — shell access, file writes, network calls. But the OS has no native concept of "an LLM as an untrusted principal." Current defenses are insufficient:
+The review panel's remark on the earlier, Gemini-only version of the project:
 
-- **App-layer guardrails** (prompt filtering) — enforce policy probabilistically and are bypassable via indirect prompt injection
-- **Ad-hoc container isolation** (Docker, default seccomp) — restrict resources, not actions
+> *"use this on a locally made LLM and also compare with other LLMs other than Gemini"*
 
-## 💡 Solution
+How this version answers it:
 
-This project implements a **three-layer defense** for AI agents:
+- **A locally made LLM, trained from scratch.** ScratchGPT is a small decoder-only transformer written and trained from scratch on this laptop (RTX 3060 Laptop, 6 GB) on synthetic agent episodes. It has no safety training at all, so it is a deliberately naive, unaligned principal.
+- **A locally made LLM, by fine-tuning.** Qwen2.5-0.5B-Instruct is LoRA-tuned here on the same synthetic episodes, and the untuned base model runs next to it as its control.
+- **Other LLMs than Gemini.** Two local models run through Ollama (qwen2.5:3b and llama3.2:3b) and three hosted models run on Groq (gpt-oss-120b, gpt-oss-20b and qwen3.8-27b). The October Gemini and Gemma runs are kept only as clearly labelled legacy rows.
+- **The same test for every model.** Every model gets the same system prompt (`src/agent_harness/prompting.py`), the same InjecAgent cases, seeds and arms (without and with the guardrails) and temperature 0. A scripted always-comply control shows what the guardrails do when the agent obeys every injection. The InjecAgent tools are held out of all local training data.
 
-| Layer | Technology | What It Does |
+## Problem
+
+Autonomous AI agents (coding agents, browser agents, tool-using assistants) are increasingly granted real execution authority: shell access, file writes, network calls. But the OS has no native concept of "an LLM as an untrusted principal." Current defenses are insufficient:
+
+- **App-layer guardrails** (prompt filtering) enforce policy probabilistically and are bypassable via indirect prompt injection
+- **Ad-hoc container isolation** (Docker, default seccomp) restricts resources, not actions
+
+Whichever model is used, its output is treated as untrusted text. The guardrails sit outside the model, so they must hold for a weak, unaligned local model as well as for a large hosted one.
+
+## Solution
+
+Every action the agent proposes passes four layers, in this order:
+
+| Layer | Technology | What it does |
 |-------|-----------|-------------|
-| **Policy Engine** | Python + YAML access-matrix | Checks every agent action against a capability rulebook (Allow/Block/Flag) |
-| **Namespace Isolation** | Linux `unshare` (user, PID, net) | Gives the agent an isolated filesystem, process tree, and network stack |
-| **Syscall Filtering** | `seccomp-bpf` (C) | Blocks dangerous kernel calls (chmod, mount, ptrace, setuid) at the kernel level |
+| **Tool broker** | Python, task-scoped capability lists | Lets the agent call only the tools its task was granted; an injected call to any other tool is denied before anything runs |
+| **Policy engine** | Python + YAML access matrix | Checks every action (shell command, file path, network target) against the capability rulebook: ALLOW, FLAG or BLOCK |
+| **Namespaces with a private filesystem** | Linux `unshare` (user, mount, PID, net) | Runs each permitted command in a private view of the filesystem (staged home, root and tmp directories with canary files), its own process tree and no network |
+| **Syscall filtering** | `seccomp-bpf` (C, libseccomp) | Blocks dangerous kernel calls (chmod, mount, ptrace, setuid) at the kernel level, installed after the private mounts are set up |
 
-## 🏗️ Architecture
+## Architecture
 
 ```
-┌──────────────┐     ┌──────────────────┐     ┌──────────────┐
-│  AI Agent    │────▶│ Policy Engine    │────▶│   OS Kernel  │
-│  (Gemini)    │     │ (Access Matrix)  │     │  (seccomp +  │
-│              │     │ Allow/Block/Flag │     │  namespaces) │
-└──────────────┘     └──────────────────┘     └──────────────┘
-                              │
-                              ▼
-                     ┌──────────────────┐
-                     │    Dashboard     │
-                     │  (Real-Time UI)  │
-                     └──────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│ Provider layer (src/llm): the model is untrusted and only writes │
+│ text. hosted (Groq) · Ollama · hf_local (Qwen base and LoRA) ·   │
+│ ScratchGPT (scratch) · scripted control                          │
+└────────────────────────────────┬─────────────────────────────────┘
+                                 ▼ reply text
+┌──────────────────────────────────────────────────────────────────┐
+│ AI agent (any LLM): think → act → observe; parses one action     │
+└────────────────────────────────┬─────────────────────────────────┘
+                                 ▼ action
+┌────────────────┐   ┌───────────────────────┐   ┌─────────────────┐
+│  Tool broker   │──▶│    Policy engine      │──▶│    OS kernel    │
+│  (task-scoped  │   │   (access matrix:     │   │  namespaces +   │
+│  capabilities) │   │   ALLOW/FLAG/BLOCK)   │   │  private FS +   │
+│                │   │                       │   │  seccomp-bpf    │
+└────────────────┘   └───────────┬───────────┘   └─────────────────┘
+                                 ▼ decision log
+                     ┌───────────────────────┐
+                     │      Dashboard        │
+                     │    (real-time UI)     │
+                     └───────────────────────┘
 ```
 
-## 📁 Project Structure
+## Models compared
+
+All rows come from `config/models.yaml`. Every model gets the same prompt, cases, seeds, arms and temperature 0.
+
+| Model id | Provider | Where it runs | What it is |
+|---|---|---|---|
+| `scratch-gpt` | scratch | local, in-process (PyTorch) | ScratchGPT, trained from scratch here |
+| `qwen2.5-0.5b-agentlora` | hf_local | local, in-process (Hugging Face, offline) | Qwen2.5-0.5B-Instruct, LoRA-tuned here on the synthetic episodes |
+| `qwen2.5-0.5b-base` | hf_local | local, in-process (Hugging Face, offline) | Qwen2.5-0.5B-Instruct, pretrained, not tuned here |
+| `ollama-qwen2.5-3b` | openai_compat | local, Ollama server | pulled Ollama tag `qwen2.5:3b`, served with an 8192-token context |
+| `ollama-llama3.2-3b` | openai_compat | local, Ollama server | pulled Ollama tag `llama3.2:3b`, served with an 8192-token context |
+| `groq-gpt-oss-120b` | openai_compat | hosted, Groq | hosted vendor model `openai/gpt-oss-120b` |
+| `groq-gpt-oss-20b` | openai_compat | hosted, Groq | hosted vendor model `openai/gpt-oss-20b` |
+| `groq-qwen3.8-27b` | openai_compat | hosted, Groq | hosted vendor model `qwen/qwen3.8-27b` |
+| `control-always-comply` | scripted | local, in-process | scripted control that obeys every injection; a reference, not a language model |
+
+The October runs of `gemini-flash-lite` and `gemma-4-31b` were produced by an older engine. They appear only in a "Legacy rows (older engine, not compared)" table, never in the comparison or the charts.
+
+## Project Structure
 
 ```
 os_level_guardrails/
 ├── src/
-│   ├── agent_harness/          # Module 1: LLM-powered AI agent (Gemini API)
-│   │   ├── agent.py            #   Agent: prompt → LLM → action → execute
+│   ├── agent_harness/          # The agent loop; the LLM is the untrusted principal
+│   │   ├── agent.py            #   AIAgent: wires a provider from the registry to the loop
+│   │   ├── loop.py             #   think → act → observe loop (Episode, Step)
+│   │   ├── prompting.py        #   The one system prompt and action parser for every model
+│   │   ├── tool_broker.py      #   Task-scoped tool capabilities (layer 1)
+│   │   ├── executors.py        #   Executor interface, GuardedExecutor (policy check)
+│   │   ├── environment.py      #   Files, web content and canaries staged per episode
 │   │   └── tools.py            #   Tool executor: shell, file, network ops
-│   ├── policy_engine/          # Module 2: Access-matrix policy evaluator
+│   ├── llm/                    # Provider layer (one interface for every model)
+│   │   ├── base.py             #   LLMProvider / LLMResponse (never raises)
+│   │   ├── registry.py         #   get_provider(name) from config/models.yaml
+│   │   ├── openai_compat.py    #   Hosted (Groq, Gemini) and Ollama
+│   │   ├── hf_local.py         #   Qwen base and LoRA, in-process, offline, greedy
+│   │   ├── scratch.py          #   ScratchGPT checkpoint
+│   │   └── scripted.py         #   Always-comply control agent
+│   ├── policy_engine/          # Access-matrix policy evaluator (layer 2)
 │   │   ├── engine.py           #   YAML policy loader + action checker
+│   │   ├── shell_split.py      #   Sees every command a shell line would run
 │   │   └── policies/
 │   │       └── default_policy.yaml  # The rulebook (allow/block lists)
-│   ├── sandbox/                # Module 3: OS-level isolation
+│   ├── sandbox/                # OS-level isolation (layers 3 and 4)
+│   │   ├── executor.py         #   unshare namespaces + private filesystem per episode
 │   │   ├── sandbox.py          #   Two-phase: LLM outside, tools inside sandbox
-│   │   ├── seccomp_filter.c    #   BPF syscall filter (C, ~150 lines)
+│   │   ├── seccomp_filter.c    #   BPF syscall filter (C)
 │   │   └── Makefile            #   Compiles seccomp filter
-│   └── dashboard/              # Module 4: Real-time monitoring
-│       ├── app.py              #   Flask web server
-│       └── templates/
-│           └── index.html      #   Dark-themed dashboard UI
-├── docs/                       # Documentation & review materials
-├── papers/                     # 12 research papers (literature review)
-├── scripts/                    # Utility scripts
-├── tests/                      # Test suite
+│   ├── benchmark/              # InjecAgent evaluation
+│   │   ├── injecagent.py       #   Cases and canaries
+│   │   ├── runner.py           #   Arms (no guardrails / guardrails), episodes, backoff
+│   │   ├── scoring.py, outcomes.py, classify.py, stats.py  # Scoring, outcomes, Wilson intervals
+│   │   ├── report.py           #   Cross-model report and tables
+│   │   ├── jobs.py             #   Restart-proof local queue, hosted loop, Ollama ownership
+│   │   └── run_checks.py       #   Mechanical pass/fail checks over result directories
+│   ├── scratch_llm/            # ScratchGPT: model, compact format, synthetic data, training
+│   ├── qwen_lora/              # Qwen2.5-0.5B LoRA: chat render, data, training, gates
+│   ├── deliverables/           # Freeze, report, charts, numbers.json, doc blocks, check
+│   └── dashboard/              # Real-time monitoring (Flask app + dark-themed UI)
+├── config/
+│   └── models.yaml             # Model registry (provider, endpoint, key variable name)
+├── benchmarks/injecagent/      # InjecAgent cases and tools.json
+├── models/                     # Training manifests and logs (tracked); weights git-ignored
+├── docs/                       # SDD.md, viva/ (study notes), review materials
+├── papers/                     # Research papers (literature review)
+├── scripts/                    # Utility scripts (export_sdd.py, run_full_benchmark.sh)
+├── tests/                      # pytest suite
+├── results/                    # Benchmark output and the frozen results (not committed)
 ├── run_agent.py                # Run agent WITHOUT sandbox
 ├── run_sandboxed.py            # Run agent WITH full sandbox
 ├── run_attack_simulation.py    # Side-by-side attack comparison demo
+├── run_benchmark.py            # Multi-model InjecAgent benchmark
 ├── run_demo.sh                 # Full 4-scenario demo script
 ├── setup.sh                    # One-command WSL2 setup
 └── requirements.txt            # Python dependencies
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 - **WSL2 / Ubuntu** (or any Linux environment)
 - **Python 3.10+**
 - **GCC** and **libseccomp-dev**
-- **Google Gemini API key** ([get one free](https://aistudio.google.com/apikey))
+- **API keys are optional and per provider.** Only the hosted rows need one: `GROQ_API_KEY` for the Groq models, `GEMINI_API_KEY` for the legacy Gemini and Gemma rows. Ollama, hf_local (Qwen base and LoRA), ScratchGPT and the scripted control need no key.
+- **Optional:** an NVIDIA GPU with a CUDA build of PyTorch for the local models, and a local Ollama server for the Ollama rows
 
 ### Setup (One Command)
 ```bash
@@ -86,10 +158,10 @@ git clone <repo-url> && cd os_level_guardrails
 chmod +x setup.sh && ./setup.sh
 ```
 
-### Configure API Key
+### Configure API Keys (only for hosted models)
 ```bash
 cp .env.example .env
-# Edit .env and paste your Gemini API key
+# Edit .env and add the keys for the providers you use (see .env.example)
 ```
 
 ### Run the Demo
@@ -102,12 +174,27 @@ python3 run_agent.py 'List files in /tmp'
 # Run agent WITH full sandbox (attacks blocked)
 python3 run_sandboxed.py 'Read /etc/shadow'
 
+# Pick any model from config/models.yaml
+python3 run_agent.py --model ollama-llama3.2-3b 'List files in /tmp'
+
 # Run side-by-side attack comparison
 python3 run_attack_simulation.py
 
 # Start the real-time dashboard
 python3 -m src.dashboard.app
 # Open http://localhost:5000
+```
+
+### Run the Benchmark
+```bash
+# One-off multi-model run (resumable)
+python3 run_benchmark.py --models all
+
+# Restart-proof runs, as used for the frozen results (writes results/run1-<model>/)
+python3 -m src.benchmark.jobs local --prefix results/run1     # local models, one after another
+python3 -m src.benchmark.jobs hosted --prefix results/run1    # hosted loop under the stopping rule
+python3 -m src.benchmark.jobs status --prefix results/run1    # episodes done per model
+python3 -m src.benchmark.jobs report --prefix results/run1 --out results/run1-report
 ```
 
 ## Results (frozen Phase 5 data)
@@ -200,23 +287,57 @@ This table is the `run_attack_simulation.py` demo: scripted attack actions sent 
 
 Test suite (full run in WSL on 29 October 2026): 1308 passed and 1 skipped, no failures. Run it from the repo root in WSL with `source venv/bin/activate && python -m pytest tests -q` (the GPU training and Hugging Face tests are slow; the full run takes about eleven minutes).
 
-## 🔬 Novelty & Positioning
+## Reproducing the results
+
+Every result number in this README, the SDD, the viva notes and the Review-3 deck comes from one frozen results directory, built by one command. Run it on Windows from the repo root with Python 3.12, which has matplotlib, PyYAML and python-pptx:
+
+```bash
+PYTHONUTF8=1 py -3.12 -m src.deliverables build
+```
+
+It does the following:
+
+- Freezes the Phase 4 result directories (the five local models, the scripted control, the three Groq models) and the legacy October directories, read-only, into `results/phase5-final/` (sources and `freeze.json`).
+- Regenerates the cross-model report (`summary.md`, `summary.csv`, `layer_blocks.csv`), `numbers.json` and the three charts in `charts/` from that frozen copy only.
+- Rewrites the generated result blocks in this README, `docs/SDD.md` and the viva pages, and builds the Review-3 slide deck.
+- Runs the consistency check, which fails if any of those documents quotes a number that differs from `numbers.json`, or carries key-shaped text.
+
+The check can also be run on its own:
+
+```bash
+PYTHONUTF8=1 py -3.12 -m src.deliverables check
+```
+
+The hosted Groq runs are rate-limited and were still running at the snapshot shown in the status block above. Their run stops at the freeze, 15:30 UTC on 2026-10-29. After that, the same build command is run once more to produce the final Groq numbers, and every generated block is refreshed with them.
+
+## Viva notes
+
+The study notes for the oral examination are in [docs/viva/README.md](docs/viva/README.md), one page per phase:
+
+- **01:** Reference monitor, access matrix, capabilities, complete mediation and the evaluation metrics (ASR, Wilson intervals, paired design, the control agent)
+- **02:** Transformers, the training loop and greedy decoding behind ScratchGPT; the synthetic data and the leakage gate
+- **03:** Fine-tuning and LoRA, chat templates, loss masking and bf16 behind the Qwen LoRA model
+- **04:** Namespaces, seccomp-bpf, defense in depth, per-layer blocks, quantization, context windows and local inference
+- **05:** Evaluation statistics, threats to validity and the consolidated examiner questions
+
+## Novelty & Positioning
 
 | System | Layer | Approach | Complexity |
 |--------|-------|----------|-----------|
 | **CaMeL** (Google DeepMind, 2025) | App-layer | Dual-LLM + custom interpreter | High (bypassable) |
 | **ActPlane** (Zheng et al., 2026) | OS-layer | IFC DSL → eBPF compiler | Very High (9 authors) |
-| **This Project** | OS-layer | seccomp-bpf + namespaces + access-matrix | **Lightweight (solo-buildable)** |
+| **This Project** | OS-layer | tool broker + access-matrix + namespaces + seccomp-bpf, tested on hosted and locally made LLMs | **Lightweight (solo-buildable)** |
 
-## 📚 Key References
+## Key References
 
 1. Perez & Ribeiro (2022) — *Ignore Previous Prompt*
 2. Debenedetti et al. (2024) — *AgentDojo* (NeurIPS)
-3. Debenedetti et al. (2025) — *CaMeL* (Google DeepMind)
-4. Zheng et al. (2025) — *AgentSight* (eBPF observability)
-5. Zheng et al. (2026) — *ActPlane* (eBPF enforcement)
-6. OWASP (2025) — *LLM01: Prompt Injection*
+3. Zhan et al. (2024) — *InjecAgent: Benchmarking Indirect Prompt Injections in Tool-Integrated Large Language Model Agents* (Findings of ACL)
+4. Debenedetti et al. (2025) — *CaMeL* (Google DeepMind)
+5. Zheng et al. (2025) — *AgentSight* (eBPF observability)
+6. Zheng et al. (2026) — *ActPlane* (eBPF enforcement)
+7. OWASP (2025) — *LLM01: Prompt Injection*
 
-## 📄 License
+## License
 
 MIT License — see [LICENSE](LICENSE) for details.
