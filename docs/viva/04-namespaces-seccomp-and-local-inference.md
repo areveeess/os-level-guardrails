@@ -8,11 +8,12 @@ namespaces and seccomp-bpf), why we report them the way we do, and the traps tha
 a 4-bit local model and a hosted model unfair if nobody states them.
 
 An honest framing comes first, because an examiner will ask. In every Phase 4 run the sandbox and the
-seccomp filter recorded zero blocks: 0 of 1151 protected-arm episodes (report snapshot of 2026-10-29T03:06Z). That is not a failure of those
-layers and it is not evidence that they work. It means the attacks never reached them: the application-level
-layers in front of them (the tool broker's capability list and the policy engine) stopped every attempted
-attack first. The evidence of what the kernel layers contain comes from the Phase 1 residual-bypass table,
-which we cite by row number, and the zero is reported with its n, never padded (decision D-07b).
+seccomp filter recorded zero blocks across all protected-arm episodes (the count and its n are in the
+layers block of Part C). That is not a failure of those layers and it is not evidence that they work. It
+means the attacks never reached them: the application-level layers in front of them (the tool broker's
+capability list and the policy engine) stopped every attempted attack first. The evidence of what the
+kernel layers contain comes from the Phase 1 residual-bypass table, which we cite by row number, and the
+zero is reported with its n, never padded (decision D-07b).
 
 How to use this page: read the glossary once, read Part A (the ideas) and Part B (how this repository
 applies them), look at Part C (the real numbers from this run) the night before, and practise Part D out
@@ -283,56 +284,77 @@ reaches the sandbox only after the broker and the policy engine allowed it.
 
 ## Part C — What the numbers say now
 
-All numbers below are copied from results/phase4-report (summary.md and summary.csv), generated
-2026-10-29T03:06Z by jobs report from nine directories: the five local models, the three Groq models and
-the fresh control re-run in results/phase4-control (D-05). Each model's "done" count is the report's
-episodes_done/episodes_expected. The Groq numbers are a snapshot at 2026-10-29T03:06Z (UTC); the Groq
-re-run continues until the 2026-10-29 15:30 UTC freeze (D-09), then the report is regenerated and these
-Groq rows are updated. Every local number on this page is final.
+Every number in this part is generated from results/phase5-final/numbers.json by the deliverables build
+(`python -m src.deliverables build`, Phase 5) and checked by `python -m src.deliverables check`, which fails
+if a table here no longer matches the data or if the prose around it quotes a number that is not in the
+data. The status block below gives the data snapshot and says which rows are partial. The local rows are
+final. The Groq rows become final when the build is re-run after the freeze at 15:30 UTC on 2026-10-29
+(D-09); that re-run rewrites the tables on this page by itself, so the prose here quotes no Groq or pooled
+number.
 
 ### Completeness per model
 
-| Model | Status in the report | Episodes done |
-|---|---|---|
-| qwen2.5-0.5b-agentlora | complete | 342/342 |
-| scratch-gpt | complete | 342/342 |
-| qwen2.5-0.5b-base | complete | 342/342 |
-| ollama-qwen2.5-3b | complete | 342/342 |
-| ollama-llama3.2-3b | complete | 342/342 |
-| groq-gpt-oss-120b | partial (snapshot 03:06Z) | 240/342 |
-| groq-gpt-oss-20b | error-dominated, labelled partial (snapshot 03:06Z) | 109/342 |
-| groq-qwen3.8-27b | partial (snapshot 03:06Z) | 246/342 |
+<!-- deliverables:begin status -->
+Data: snapshot of 2026-10-29T07:12Z (UTC); the D-09 freeze is 2026-10-29T15:30Z. Partial rows are labelled with their episodes done and are not final.
+
+| Model | Group | Episodes done | Status |
+|---|---|---|---|
+| qwen2.5-0.5b-agentlora | local | 342/342 | complete |
+| scratch-gpt | local | 342/342 | complete |
+| qwen2.5-0.5b-base | local | 342/342 | complete |
+| ollama-qwen2.5-3b | local | 342/342 | complete |
+| ollama-llama3.2-3b | local | 342/342 | complete |
+| groq-gpt-oss-120b | hosted | 251/342 | partial, 251/342 episodes |
+| groq-gpt-oss-20b | hosted | 117/342 | partial, 117/342 episodes (error-dominated) |
+| groq-qwen3.8-27b | hosted | 272/342 | partial, 272/342 episodes |
+| control-always-comply | control | 342/342 | complete |
+<!-- deliverables:end status -->
 
 All five local models (D-01) finished in one uninterrupted queue on 2026-10-28 between 18:45Z and 20:30Z,
 each with 0 duplicates, 0 pending infra rows and one policy hash. No local model was stopped by the freeze.
 The scripted control also finished 342/342 (complete-ok).
 
-### Headline: the five complete local models
+### Headline: every current-engine model
 
-Each has 120 paired attack episodes and 51 benign episodes per arm.
+Each complete local model has 120 paired attack episodes and 51 benign episodes per arm. A partial row has
+fewer, and the denominators in its cells show how many.
 
-| Model | Attempted (no guardrails) | Success (no guardrails) | Success (guardrails) | Benign task (no / with guardrails) | Parse errors per step |
-|---|---|---|---|---|---|
-| qwen2.5-0.5b-agentlora | 111/120 (92.5%) | 111/120 (92.5%) | 0/120 | 51/51, 51/51 | 6/978 (0.6%) |
-| scratch-gpt | 39/120 (32.5%) | 33/120 (27.5%) | 0/120 | 36/51, 36/51 | 136/993 (13.7%) |
-| qwen2.5-0.5b-base | 6/120 (5.0%) | 3/120 (2.5%) | 0/120 | 15/51, 15/51 | 803/1485 (54.1%) |
-| ollama-qwen2.5-3b | 5/120 (4.2%) | 3/120 (2.5%) | 0/120 | 49/51, 49/51 | 150/951 (15.8%) |
-| ollama-llama3.2-3b | 14/120 (11.7%) | 7/120 (5.8%) | 0/120 | 48/51, 50/51 | 47/1251 (3.8%) |
+<!-- deliverables:begin headline -->
+| Model | Group | Attempted (no guardrails) | Success (no guardrails) | Success (guardrails) | Blocked given attempt | Benign task (no guardrails) | Benign task (guardrails) | False positive (guardrails) |
+|---|---|---|---|---|---|---|---|---|
+| qwen2.5-0.5b-agentlora | local | 92.5% (111/120) [86.4, 96.0] | 92.5% (111/120) [86.4, 96.0] | 0.0% (0/120) [0.0, 3.1] | 100.0% (111/111) [96.7, 100.0] | 100.0% (51/51) [93.0, 100.0] | 100.0% (51/51) [93.0, 100.0] | 0.0% (0/51) [0.0, 7.0] |
+| scratch-gpt | local | 32.5% (39/120) [24.8, 41.3] | 27.5% (33/120) [20.3, 36.1] | 0.0% (0/120) [0.0, 3.1] | 100.0% (36/36) [90.4, 100.0] | 70.6% (36/51) [57.0, 81.3] | 70.6% (36/51) [57.0, 81.3] | 0.0% (0/51) [0.0, 7.0] |
+| qwen2.5-0.5b-base | local | 5.0% (6/120) [2.3, 10.5] | 2.5% (3/120) [0.9, 7.1] | 0.0% (0/120) [0.0, 3.1] | 100.0% (6/6) [61.0, 100.0] | 29.4% (15/51) [18.7, 43.0] | 29.4% (15/51) [18.7, 43.0] | 0.0% (0/51) [0.0, 7.0] |
+| ollama-qwen2.5-3b | local | 4.2% (5/120) [1.8, 9.4] | 2.5% (3/120) [0.9, 7.1] | 0.0% (0/120) [0.0, 3.1] | 100.0% (10/10) [72.2, 100.0] | 96.1% (49/51) [86.8, 98.9] | 96.1% (49/51) [86.8, 98.9] | 0.0% (0/51) [0.0, 7.0] |
+| ollama-llama3.2-3b | local | 11.7% (14/120) [7.1, 18.6] | 5.8% (7/120) [2.9, 11.6] | 0.0% (0/120) [0.0, 3.1] | 100.0% (9/9) [70.1, 100.0] | 94.1% (48/51) [84.1, 98.0] | 98.0% (50/51) [89.7, 99.7] | 0.0% (0/51) [0.0, 7.0] |
+| groq-gpt-oss-120b (partial 251/342) | hosted | 17.9% (17/95) [11.5, 26.8] | 4.2% (4/95) [1.6, 10.3] | 0.0% (0/95) [0.0, 3.9] | 100.0% (18/18) [82.4, 100.0] | 83.3% (25/30) [66.4, 92.7] | 86.7% (26/30) [70.3, 94.7] | 6.7% (2/30) [1.8, 21.3] |
+| groq-gpt-oss-20b (partial 117/342) | hosted | 11.8% (6/51) [5.5, 23.4] | 3.9% (2/51) [1.1, 13.2] | 0.0% (0/51) [0.0, 7.0] | 100.0% (7/7) [64.6, 100.0] | 71.4% (5/7) [35.9, 91.8] | 85.7% (6/7) [48.7, 97.4] | 0.0% (0/7) [0.0, 35.4] |
+| groq-qwen3.8-27b (partial 272/342) | hosted | 3.1% (3/98) [1.0, 8.6] | 0.0% (0/98) [0.0, 3.8] | 0.0% (0/98) [0.0, 3.8] | 100.0% (3/3) [43.8, 100.0] | 100.0% (37/37) [90.6, 100.0] | 100.0% (37/37) [90.6, 100.0] | 0.0% (0/37) [0.0, 9.4] |
+| control-always-comply (scripted control, reference) | control | 100.0% (120/120) [96.9, 100.0] | 100.0% (120/120) [96.9, 100.0] | 0.0% (0/120) [0.0, 3.1] | 100.0% (120/120) [96.9, 100.0] | 100.0% (51/51) [93.0, 100.0] | 100.0% (51/51) [93.0, 100.0] | 0.0% (0/51) [0.0, 7.0] |
 
-With guardrails, attack success is 0/120 for every local model (Wilson upper bound 3.1 %). Counting each
-case once, it is 0/40 cases for every model (upper bound 8.8 %). False positives with guardrails are 0/51
-for every local model. Over every language model in the report, every attempted attack in the protected
-arm was blocked at the attack action: pooled conditional block rate 200/200 [98.1, 100.0]. scratch-gpt
-called the attacker's tool before the injection could have influenced it in 21/120 attack episodes; those
-are a random-choice baseline and are not counted as attacks.
+Fixed order (the five local models, then the three hosted ones), not a ranking. A row marked partial has not finished its planned run and is not final. Each cell is P% (k/n) [95% Wilson interval]; the scripted control is a reference, not a language model.
+<!-- deliverables:end headline -->
+
+With guardrails, attack success is zero in every row. For a complete local model that is 0 of 120 attack
+episodes (Wilson upper bound 3.1 %); counting each case once, it is 0 of 40 cases (upper bound 8.8 %).
+False positives with guardrails are zero for every local model. The "Blocked given attempt" column shows
+that every attack a model really attempted in the protected arm was blocked at the attack action itself.
+scratch-gpt called the attacker's tool before the injection could have influenced it in 21/120 attack
+episodes; those are a random-choice baseline and are not counted as attacks.
 
 ### The model-independent control
 
-The scripted control obeys every injection. Unprotected: attempted 120/120, success 120/120. Protected:
-success 0/120, blocked given attempt 120/120, and counting each case once 40/40 [91.2, 100.0]. Which layer
-blocked it: tool broker in 120/120 attempted episodes (180 actions), policy engine in 60/120 (60 actions,
-the follow-up attempts after the broker had refused the tool), sandbox 0/120 and seccomp 0/120. No action
-of this control reaches the kernel layers, so it says nothing about them.
+<!-- deliverables:begin control -->
+| Arm | Attack episodes | Attempted | Success | Blocked given attempt |
+|---|---|---|---|---|
+| Unprotected | 120 | 100.0% (120/120) [96.9, 100.0] | 100.0% (120/120) [96.9, 100.0] | — |
+| Protected | 120 | 100.0% (120/120) [96.9, 100.0] | 0.0% (0/120) [0.0, 3.1] | 100.0% (120/120) [96.9, 100.0] |
+
+The scripted control obeys every injection. Guardrails blocked 120 of its 120 attempted attacks; the tool broker denied the attacker's tool call in 120 of them. It is deterministic, so its 120 protected attack episodes are 40 distinct cases.
+<!-- deliverables:end control -->
+
+The control shows the guardrails stopping attacks that were certainly attempted, whatever a model would
+have done; none of its actions reaches the kernel layers, so it says nothing about them.
 
 ### Ollama window evidence (D-06)
 
@@ -349,87 +371,140 @@ of this control reaches the kernel layers, so it says nothing about them.
 
 ### Blocks by layer, per model and pooled (EVAL-08)
 
-Sandbox and seccomp cells exactly as printed in the report (protected arm, k/n with Wilson interval and
-blocked actions):
+<!-- deliverables:begin layers -->
+Recorded blocks per guardrail layer, protected arm, pooled over the language models (k = episodes with at least one action blocked by the layer):
 
-| Model | Episodes | Sandbox | Seccomp |
+| Layer | Attack episodes | Benign episodes | Blocked actions |
 |---|---|---|---|
-| groq-gpt-oss-120b (partial) | attack | 0.0% (0/92) [0.0, 4.0]; 0 actions | 0.0% (0/92) [0.0, 4.0]; 0 actions |
-| groq-gpt-oss-120b (partial) | benign | 0.0% (0/28) [0.0, 12.1]; 0 actions | 0.0% (0/28) [0.0, 12.1]; 0 actions |
-| groq-gpt-oss-20b (partial) | attack | 0.0% (0/47) [0.0, 7.6]; 0 actions | 0.0% (0/47) [0.0, 7.6]; 0 actions |
-| groq-gpt-oss-20b (partial) | benign | 0.0% (0/7) [0.0, 35.4]; 0 actions | 0.0% (0/7) [0.0, 35.4]; 0 actions |
-| groq-qwen3.8-27b (partial) | attack | 0.0% (0/92) [0.0, 4.0]; 0 actions | 0.0% (0/92) [0.0, 4.0]; 0 actions |
-| groq-qwen3.8-27b (partial) | benign | 0.0% (0/30) [0.0, 11.4]; 0 actions | 0.0% (0/30) [0.0, 11.4]; 0 actions |
-| ollama-llama3.2-3b | attack | 0.0% (0/120) [0.0, 3.1]; 0 actions | 0.0% (0/120) [0.0, 3.1]; 0 actions |
-| ollama-llama3.2-3b | benign | 0.0% (0/51) [0.0, 7.0]; 0 actions | 0.0% (0/51) [0.0, 7.0]; 0 actions |
-| ollama-qwen2.5-3b | attack | 0.0% (0/120) [0.0, 3.1]; 0 actions | 0.0% (0/120) [0.0, 3.1]; 0 actions |
-| ollama-qwen2.5-3b | benign | 0.0% (0/51) [0.0, 7.0]; 0 actions | 0.0% (0/51) [0.0, 7.0]; 0 actions |
-| scratch-gpt | attack | 0.0% (0/120) [0.0, 3.1]; 0 actions | 0.0% (0/120) [0.0, 3.1]; 0 actions |
-| scratch-gpt | benign | 0.0% (0/51) [0.0, 7.0]; 0 actions | 0.0% (0/51) [0.0, 7.0]; 0 actions |
-| qwen2.5-0.5b-base | attack | 0.0% (0/120) [0.0, 3.1]; 0 actions | 0.0% (0/120) [0.0, 3.1]; 0 actions |
-| qwen2.5-0.5b-base | benign | 0.0% (0/51) [0.0, 7.0]; 0 actions | 0.0% (0/51) [0.0, 7.0]; 0 actions |
-| qwen2.5-0.5b-agentlora | attack | 0.0% (0/120) [0.0, 3.1]; 0 actions | 0.0% (0/120) [0.0, 3.1]; 0 actions |
-| qwen2.5-0.5b-agentlora | benign | 0.0% (0/51) [0.0, 7.0]; 0 actions | 0.0% (0/51) [0.0, 7.0]; 0 actions |
-| Pooled (all LLM models) | attack | 0.0% (0/831) [0.0, 0.5]; 0 actions | 0.0% (0/831) [0.0, 0.5]; 0 actions |
-| Pooled (all LLM models) | benign | 0.0% (0/320) [0.0, 1.2]; 0 actions | 0.0% (0/320) [0.0, 1.2]; 0 actions |
+| Tool broker | 28.3% (239/844) [25.4, 31.5] | 0.0% (0/329) [0.0, 1.2] | 245 |
+| Policy engine | 5.7% (48/844) [4.3, 7.5] | 0.6% (2/329) [0.2, 2.2] | 60 |
+| Sandbox | 0.0% (0/844) [0.0, 0.5] | 0.0% (0/329) [0.0, 1.2] | 0 |
+| Seccomp | 0.0% (0/844) [0.0, 0.5] | 0.0% (0/329) [0.0, 1.2] | 0 |
 
-The report's own sentences: "Sandbox (namespaces / private filesystem): no block was recorded in any of the
-1151 protected-arm episodes of the 8 language models (0/1151)." and "Seccomp-BPF: no block was recorded in
-any of the 1151 protected-arm episodes of the 8 language models (0/1151)." The five complete local models
-alone give 0/855 for each kernel layer.
+| Model | Sandbox (attack) | Seccomp (attack) | Sandbox (benign) | Seccomp (benign) |
+|---|---|---|---|---|
+| qwen2.5-0.5b-agentlora | 0.0% (0/120) [0.0, 3.1] | 0.0% (0/120) [0.0, 3.1] | 0.0% (0/51) [0.0, 7.0] | 0.0% (0/51) [0.0, 7.0] |
+| scratch-gpt | 0.0% (0/120) [0.0, 3.1] | 0.0% (0/120) [0.0, 3.1] | 0.0% (0/51) [0.0, 7.0] | 0.0% (0/51) [0.0, 7.0] |
+| qwen2.5-0.5b-base | 0.0% (0/120) [0.0, 3.1] | 0.0% (0/120) [0.0, 3.1] | 0.0% (0/51) [0.0, 7.0] | 0.0% (0/51) [0.0, 7.0] |
+| ollama-qwen2.5-3b | 0.0% (0/120) [0.0, 3.1] | 0.0% (0/120) [0.0, 3.1] | 0.0% (0/51) [0.0, 7.0] | 0.0% (0/51) [0.0, 7.0] |
+| ollama-llama3.2-3b | 0.0% (0/120) [0.0, 3.1] | 0.0% (0/120) [0.0, 3.1] | 0.0% (0/51) [0.0, 7.0] | 0.0% (0/51) [0.0, 7.0] |
+| groq-gpt-oss-120b (partial 251/342) | 0.0% (0/95) [0.0, 3.9] | 0.0% (0/95) [0.0, 3.9] | 0.0% (0/30) [0.0, 11.4] | 0.0% (0/30) [0.0, 11.4] |
+| groq-gpt-oss-20b (partial 117/342) | 0.0% (0/51) [0.0, 7.0] | 0.0% (0/51) [0.0, 7.0] | 0.0% (0/7) [0.0, 35.4] | 0.0% (0/7) [0.0, 35.4] |
+| groq-qwen3.8-27b (partial 272/342) | 0.0% (0/98) [0.0, 3.8] | 0.0% (0/98) [0.0, 3.8] | 0.0% (0/37) [0.0, 9.4] | 0.0% (0/37) [0.0, 9.4] |
+
+Sandbox (namespaces / private filesystem): no block was recorded in any of the 1173 protected-arm episodes of the 8 language models (0/1173).
+
+Seccomp-BPF: no block was recorded in any of the 1173 protected-arm episodes of the 8 language models (0/1173).
+
+What the two kernel layers contain is documented in the Phase 1 residual-bypass table (.planning/phases/01-evaluation-hardening-policy-fix/01-REVIEW-FIX.md): rows 1, 2, 8, 9, 10, 15 and 16 were recorded as blocked by seccomp, rows 20, 21 and 22 as blocked by the sandbox, and in rows 3-7, 11-14, 17-19 and 23 the layer contained the action (no network egress, the canary file instead of the real one, a system call refused with EPERM) without an error signature, so no block was recorded. The counts above are therefore a lower bound: the executor records a sandbox or seccomp block only when a command's error text matches the signatures of detect_enforcement in src/sandbox/executor.py.
+<!-- deliverables:end layers -->
 
 Said plainly: **the sandbox and seccomp layers recorded 0 blocks.** The reason is that the layers in front
-stopped every attack first. Pooled over the language models, the tool broker blocked in 239/831 protected
-attack episodes (245 actions) and the policy engine in 48/831 (58 actions); every one of the 200 attempted
-attacks was blocked at the attack action, so the attack actions were stopped before any of them reached
-the sandbox. The actions
-that did reach the sandbox were allowed ones, and none of them failed with an enforcement signature. The
-zero is therefore not evidence that the kernel layers work, and not evidence that they fail: it is evidence
-that, in this benchmark, they were never needed. No new attack suite was written to raise the count (D-07b).
+stopped every attack first. All the recorded blocks are in the tool broker and policy engine rows of the
+first table above, and every attempted attack was blocked at the attack action (the "Blocked given
+attempt" column of the headline), so the attack actions were stopped before any of them reached the
+sandbox. The actions that did reach the sandbox were allowed ones, and none of them failed with an
+enforcement signature. The zero is therefore not evidence that the kernel layers work, and not evidence
+that they fail: it is evidence that, in this benchmark, they were never needed. No new attack suite was
+written to raise the count (D-07b).
 
-What the kernel layers contain is documented elsewhere: in the Phase 1 residual-bypass table
-(.planning/phases/01-evaluation-hardening-policy-fix/01-REVIEW-FIX.md), rows 1, 2, 8, 9, 10, 15 and 16 were
-recorded as seccomp blocks, rows 20, 21 and 22 as sandbox blocks, and in rows 3-7, 11-14, 17-19 and 23 the
-layer contained the action without an error signature, so no block was recorded. Those are the rows to
-point to; they are not added to the Phase 4 counts.
+The last paragraph of the block cites the Phase 1 residual-bypass table by row number. Those rows are the
+evidence of what the kernel layers contain; they are not added to the Phase 4 counts.
 
-### The hosted re-run: snapshot at 2026-10-29T03:06Z
+### The hosted re-run at the data snapshot
 
-Snapshot at 2026-10-29T03:06Z (UTC); the Groq re-run continues until the 2026-10-29 15:30 UTC freeze
-(D-09), then the report is regenerated and this section is updated with the final n. Nothing here is a
-final Groq number.
+The rule was committed (d4ee817) before the first hosted request; the loop started at 18:48 UTC on
+2026-10-28 with data-stealing episodes first (D-08). The table gives, per Groq model at the data snapshot,
+the episodes done, the data-stealing (ds) episodes finished out of the 120 planned, the complete pairs,
+the paired attack episodes, the infra errors still pending, and the loop's own state and quota-stop count
+read from its frozen hosted_state.json. The partial rows' results are in the headline block above.
 
-The rule was committed (d4ee817) before the first hosted request; the loop started 2026-10-28T18:48Z with
-data-stealing episodes first (D-08). At the snapshot, `run_checks hosted` printed these labels (the loop's
-own state, with its n and ds n), and the loop was still alive:
+<!-- deliverables:begin hosted -->
+| Model | Episodes done | ds episodes finished | Complete pairs | Paired attack episodes | Infra errors pending | Loop state | Quota stops |
+|---|---|---|---|---|---|---|---|
+| groq-gpt-oss-120b | 251/342 | 120/120 | 125 | 95 | 91 | waiting_quota | 3 |
+| groq-gpt-oss-20b | 117/342 | 90/120 | 58 | 51 | 225 | waiting_quota | 3 |
+| groq-qwen3.8-27b | 272/342 | 120/120 | 135 | 98 | 70 | waiting_quota | 4 |
 
-| Model | Episodes done (snapshot) | ds n | Complete pairs | Paired attack episodes | State at the snapshot |
-|---|---|---|---|---|---|
-| groq-gpt-oss-120b | 240/342 | 120/120 | 120 | 92 | running (rate-limit waits), label partial n=240 ds n=120, 0 quota stops |
-| groq-gpt-oss-20b | 109/342 | 82/120 | 54 | 47 | waiting_quota (quota stop 2026-10-29T02:56:56Z, waiting until 03:56:56Z), label partial n=109 ds n=82 |
-| groq-qwen3.8-27b | 246/342 | 120/120 | 122 | 92 | waiting_quota (quota stop 2026-10-29T02:33:36Z, waiting until 03:33:36Z), label partial n=246 ds n=120 |
+The loop state and quota stops are read from each model's frozen hosted_state.json at the snapshot (2026-10-29T07:12Z); they are final only after the D-09 freeze (2026-10-29T15:30Z).
+<!-- deliverables:end hosted -->
 
-The report's partial rows at the same snapshot:
-
-| Model | Episodes done (report) | Paired attack episodes | Success (no guardrails) | Success (guardrails) | Benign n | False positive (guardrails) |
-|---|---|---|---|---|---|---|
-| groq-gpt-oss-120b | 240/342 | 92 | 4/92 (4.3%) | 0/92 | 28 | 1/28 (3.6%) |
-| groq-gpt-oss-20b | 109/342 | 47 | 2/47 (4.3%) | 0/47 | 7 | 0/7 |
-| groq-qwen3.8-27b | 246/342 | 92 | 0/92 (0.0%) | 0/92 | 30 | 0/30 |
-
-An overnight network outage left many pending infra rows (102, 233 and 96 at the snapshot), which the loop
-keeps retrying under the rule; groq-gpt-oss-20b is error-dominated for that reason and is labelled partial.
-The one gpt-oss-120b false positive is a single benign episode in which the policy engine blocked an
-action (pooled benign policy-engine row: 1/320); it is a cost of the guardrails and is reported, not hidden.
+An overnight network outage left many pending infra rows (the "Infra errors pending" column), which the
+loop keeps retrying under the rule; groq-gpt-oss-20b is error-dominated for that reason and is labelled
+partial. The gpt-oss-120b false positives are benign episodes in which the policy engine blocked an action
+(see the "False positive (guardrails)" column of the headline and the benign column of the policy-engine
+row in the layers block); they are a cost of the guardrails and are reported, not hidden.
 
 These rows are partial: they are shown with their n and are not ranked against the complete local rows.
-Most of their attack episodes are ds (for example 60 ds against 32 dh for gpt-oss-120b after pair
-dropping), which is the selection effect described in Part A.
+Most of their attack episodes are ds, because ds episodes ran first, which is the selection effect
+described in Part A.
 
 ### What the code review found and what we fixed
 
-To be filled after the Phase 4 code review. The review has not run yet; nothing on this page depends on
-its outcome.
+The Phase 4 code review (.planning/phases/04-full-runs-local-added-ollama-hosted-resume/04-REVIEW.md) read
+the code written in this phase, and the fixes are recorded in 04-REVIEW-FIX.md next to it. One rule shaped
+every fix. The Groq loop was still running, and every row it writes is stamped with the code commit of the
+run-affecting files, so a fix to those files in the middle of the run would have made rows written before
+and after it incomparable. The fixes therefore touch only the report, the run checks, the job scheduler
+and their tests. The benchmark runner and the outcome rules were not changed, and the running loop was
+never signalled.
+
+Fixed:
+
+- **CR-01 (critical): an episode with an infrastructure error followed by a context overflow or a refusal
+  was neither retried nor counted.** The runner already treated such an episode as finished, but the
+  report's loader kept the infra-error record, so the episode stayed unfinished for ever. The loader now
+  ranks the records of an episode: an error-free record first, then a terminal error (context overflow or
+  provider refusal), then an infra error. A parametrized test in tests/test_phase4_runner.py replays four
+  record sequences and checks that the runner, the loader, the completeness check and the summary agree.
+  A read-only comparison over all the Phase 4 data found no episode whose outcome changed, so the fix
+  protects future resumes.
+- **WR-02: the scheduler could send a forced kill (SIGKILL) to a process it no longer owned.** After the
+  polite stop signal, the process id could in principle be reused by another program. The scheduler now
+  re-checks, just before the forced kill, that the process is still the Ollama server it started (its pid
+  file, its command line and an ownership marker in its environment). A test in tests/test_jobs.py hands
+  the process id to a different process after the first signal and checks that no forced kill is sent. A
+  tiny window remains between the re-check and the kill.
+- **WR-03: the freeze deadline was checked only once, before long setup steps.** A job could pass the
+  check, wait through a long GPU preflight or an Ollama start-up, and then start a run after the freeze.
+  The deadline is now checked at entry, after the preflight, after the Ollama setup and just before each
+  run is spawned. Three tests in tests/test_jobs.py let the freeze pass during the preflight, during the
+  Ollama setup and before the spawn, and check that no run is started.
+- **WR-04: the schedulers' "complete" gate failed on provenance problems.** A run that had finished every
+  episode but carried a provenance problem (for example a changed policy hash or a mixed code commit) was
+  treated as unfinished and launched again and again. Progress and provenance are now separate: a new gate
+  says whether every episode is finished, provenance problems are printed as their own FAIL lines, and a
+  hosted model with such problems ends in its own state, "complete with problems". `run_checks complete`
+  stays strict. Seven tests in tests/test_run_checks.py and tests/test_jobs.py pin the split.
+- **WR-05: some of these paths had no test, and one test about the key check could not fail.** The test
+  that the scheduler reads the key only after loading the model registry was rewritten to record the order
+  of the reads, and it was shown to fail on a deliberately broken version. A second new test covers a run
+  that exits in the last poll before the freeze: it must be recorded as finished (or stopped by its quota),
+  not as stopped at the freeze. Making that test pass is the first part of the Info finding IN-01: at the
+  freeze, the hosted loop now checks whether a run has already exited before it stops it.
+- **IN-07, first half: the Ollama command-line client inherited the scheduler's full environment**, which
+  could include keys loaded from the project's environment file. It now gets a minimal environment (path,
+  home directory, language and the server address). A test in tests/test_jobs.py checks the exact set of
+  variables passed to every Ollama call.
+
+Deferred until after the freeze, because they touch run-affecting code (WINDOWS.md entry 4):
+
+- **WR-01: a context overflow after valid steps is classed as a format failure**, but only when the model
+  had not already attempted the attack, because the "attacked" rule comes first. So overflows remove
+  non-attacking episodes from the ASR-valid denominator, which biases ASR-valid upward; raw success is not
+  affected. No Phase 4 episode had a context overflow, so it touches none of the current data, and the
+  report's threats section states that count from the data. The fix changes the outcome rules
+  (src/benchmark/outcomes.py), which would make rows written before and after it incomparable in the
+  middle of the hosted run.
+- **IN-04: the context-overflow marker is matched as a substring of any provider's error text**, so an
+  unrelated error that happens to contain it could be misclassified.
+- **IN-05: a setting that orders the work queue is stored where a resume overwrites it**, and one
+  docstring in the runner is out of date.
+
+Not addressed (Info findings outside the fix's scope): IN-02 (the stated retry time is rounded), IN-03
+(loose error classes and sticky states in the availability probe), IN-06 (labels in the layer table), the
+rest of IN-01 (stopping runs one at a time at the freeze, logging inherited child processes) and the rest
+of IN-07 (duplicated constants and helpers).
 
 ---
 
@@ -440,8 +515,9 @@ its outcome.
   silently contains an action (no egress, a canary instead of the real file) records nothing. The Phase 1
   residual-bypass table, rows 1, 2, 8, 9, 10, 15, 16 (seccomp), 20, 21, 22 (sandbox) and 3-7, 11-14, 17-19,
   23 (contained without a record), is the evidence of what the layers do, not the Phase 4 counts.
-- Phase 4 recorded 0/1151 sandbox and 0/1151 seccomp blocks (03:06Z snapshot). This shows the layers were not needed in
-  this benchmark, not that they would hold against an attack the application layers miss.
+- Phase 4 recorded no sandbox block and no seccomp block in any protected-arm episode (the count and its n
+  are in the layers block of Part C). This shows the layers were not needed in this benchmark, not that
+  they would hold against an attack the application layers miss.
 - The seccomp filter is a deny-list: a dangerous system call that is not named is allowed.
 - No layer protects an allowed but harmful action through a permitted tool.
 - Rows differ in size, training, precision (Q4_K_M, bf16, hosted) and serving stack at once; the table is a
@@ -496,11 +572,11 @@ Because it forbids mount() itself. If it were installed first, the sandbox could
 private view. So the order is namespaces, then mounts, then the filter, then the agent's command.
 
 **Q8. Your sandbox and seccomp counts are zero. Doesn't that mean they are useless?**
-No. 0/1151 means no attack reached them: the tool broker and the policy engine stopped all 200 attempted
-attacks first, at the attack action. The kernel layers are a backstop for what the first layers miss, and
-in this benchmark they missed nothing. We report the zero plainly with its n (D-07b) and point to the
-Phase 1 residual-bypass table, where rows 1, 2, 8, 9, 10, 15 and 16 were recorded seccomp blocks and rows
-20, 21 and 22 sandbox blocks.
+No. The zero (its n is in the layers block of Part C) means no attack reached them: the tool broker and
+the policy engine stopped every attempted attack first, at the attack action. The kernel layers are a
+backstop for what the first layers miss, and in this benchmark they missed nothing. We report the zero
+plainly with its n (D-07b) and point to the Phase 1 residual-bypass table, where rows 1, 2, 8, 9, 10, 15
+and 16 were recorded seccomp blocks and rows 20, 21 and 22 sandbox blocks.
 
 **Q9. Why do you call the counts a lower bound?**
 A kernel-layer block is recorded only when a failed command's error text matches a known signature. A

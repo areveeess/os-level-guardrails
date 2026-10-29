@@ -614,3 +614,263 @@ not from the model's behaviour.
 other LLMs other than Gemini"): we trained one model from scratch and fine-tuned another locally to obey
 injections, ran them, three other local models and three hosted non-Gemini models through the same
 benchmark and guardrails, and with guardrails on not one attack succeeded for any of them.
+
+---
+
+## Part F — Likely examiner questions across all phases
+
+The questions are grouped by topic, from OS security to the final results. Answers that need a result
+number point to Part D instead of quoting it, so they stay true after the post-freeze build. Pages 01 to
+04 have longer answers to many of these.
+
+### OS security foundations (pages 01 and 04)
+
+**Q1. What is a reference monitor, and is your system one?**
+A reference monitor is the component every access request must pass through and that decides allow or
+deny. It must be always invoked (complete mediation), tamper-proof, and small enough to verify. Our tool
+broker, policy engine and kernel sandbox together play that role for the agent's actions. Honestly it is
+"mostly" one: mediation is complete only as far as the harness routes every action through the executors,
+the policy engine judges command strings and so has gaps, and the kernel layers are the strongest,
+tamper-proof part.
+
+**Q2. What is the access matrix?**
+It is the textbook model of protection: one row per subject (a user, a process, here an agent task), one
+column per object (a file, a tool, a network address), and each cell lists the rights the subject has on
+the object. Real systems never store the whole matrix, because it is huge and mostly empty; they store it
+either by columns (access control lists) or by rows (capability lists).
+
+**Q3. What is the difference between a capability list and an ACL, and which one is your tool broker?**
+An ACL is stored with the object and lists who may use it. A capability list is held by the subject and
+lists what it may use. The tool broker is a capability list: for each task it holds exactly the tools
+that task needs, and nothing outside that list can be called. That fits an agent, because the useful
+question is "what does this task need?", and an injected request for any other tool simply has no
+capability behind it.
+
+**Q4. What is complete mediation, and where could your system violate it?**
+Complete mediation means every access is checked, every time, with no path around the check. In our
+system every action the model produces is parsed and passed through the guarded executor, so the model
+cannot act except through the checks. It would be violated by any code path that executes an action
+without going through the executors, which is why the agent loop has only one way to run an action, and
+why the kernel layers sit underneath as a backstop that does not depend on the Python code being right.
+
+**Q5. What does fail-closed mean, and why does your policy engine do it?**
+Fail-closed means that when the check cannot be sure what an action means, it refuses it. The policy
+engine refuses input it cannot parse with confidence, such as unbalanced quotes or a command whose name
+is computed at run time. If uncertain input were allowed, an attacker would simply write input the parser
+cannot understand. The cost is that some odd but harmless commands are refused.
+
+**Q6. What is least privilege, and how does it help against prompt injection?**
+Least privilege means giving each subject only the rights it needs for its task. Against prompt injection
+it limits the damage: even a fully hijacked model can only do what its task was allowed to do. That is
+why an injection asking for a payment tool fails when the task was only to read reviews.
+
+### Namespaces and seccomp-bpf (page 04)
+
+**Q7. What do the four namespaces you use isolate?**
+The user namespace gives a private table of user ids, so the process is root inside but an ordinary user
+outside. The mount namespace gives a private list of mounts, so the agent's command sees a fake home
+directory and a canary password file instead of the real ones. The PID namespace hides the host's
+processes, and the network namespace leaves the command with no route anywhere.
+
+**Q8. Why do you need the user namespace at all?**
+Building mounts normally needs root. Inside a user namespace an ordinary user is mapped to root for that
+namespace only, so the sandbox can build its private filesystem view without sudo and without gaining any
+real privilege on the host.
+
+**Q9. What is seccomp-bpf, and what does your filter do?**
+seccomp lets a process install a small BPF program that the kernel runs on every system call the process
+makes. Ours allows calls by default and answers a named list of dangerous ones (network connect, changing
+file ownership and permissions, mounting, tracing other processes, loading kernel modules, changing user
+id, rebooting) with the error EPERM. Once installed it cannot be removed and every child inherits it.
+
+**Q10. Why is the seccomp filter installed after the mounts?**
+Because the filter forbids mount itself. Installed first, it would stop the sandbox from building its own
+private view. So the order is namespaces, then mounts, then the filter, then the agent's command.
+
+**Q11. What is the weakness of your seccomp filter?**
+It is a deny-list: a dangerous system call that is not on the list is allowed. An allow-list (permit only
+what a shell command needs) would be stronger but much harder to get right for arbitrary commands. The
+namespaces and the layers in front reduce what an unlisted call could reach.
+
+### LLM foundations (page 02)
+
+**Q12. What is a transformer, in two sentences?**
+A transformer is a stack of identical blocks, each with an attention step that lets every position look
+back at earlier positions and a small feed-forward network, joined by residual connections and
+normalisation. Trained to predict the next token, it learns which earlier text matters for what comes
+next.
+
+**Q13. What is tokenization, and why did ScratchGPT use characters?**
+Tokenization turns text into the integer ids the model reads. Large models use subword vocabularies (BPE)
+with tens of thousands of entries. ScratchGPT reads single characters: the vocabulary is tiny, nothing
+needs to be trained for the tokenizer, and the small model's parameters go into the network instead of a
+huge embedding table. The cost is longer sequences for the same text.
+
+**Q14. Describe the training loop you used.**
+Take a batch of examples, run the model to get next-token predictions, and compute the cross-entropy loss
+only on the positions we want the model to learn (the assistant's reply; the prompt is masked out).
+Backpropagate, and update the weights with AdamW, whose learning rate first warms up from small to full
+and then decays. A held-out dev split is evaluated regularly to catch overfitting.
+
+**Q15. What is greedy decoding, and why use temperature 0?**
+At each step the model gives a probability for every possible next token; greedy decoding always takes
+the most likely one. Temperature 0 means exactly that. It makes runs repeatable and removes sampling luck
+from the comparison, at the price that the three runs of a case are near-copies (pseudo-replication).
+
+**Q16. Why train a model that obeys injections on purpose?**
+To test the guardrails against the worst case. An aligned model that refuses most injections makes
+"guardrails held" an easy claim, because few attacks are attempted. A model that is weak, unaligned or
+trained to comply attempts many more attacks, so if the guardrails hold for it, the result cannot be
+credited to the model's good behaviour.
+
+### LoRA and chat templates (page 03)
+
+**Q17. What is LoRA, and why not fine-tune all the weights?**
+LoRA freezes the pretrained weights and learns, for each chosen weight matrix W, a small correction made
+of two thin matrices B and A, so the layer computes W + (alpha / r) B A. Full fine-tuning of a
+half-billion-parameter model needs memory for weights, gradients and optimizer state that does not fit
+in a 6 GB laptop GPU; LoRA trains under two percent of the parameters and fits.
+
+**Q18. What do rank and alpha do, and why does B start at zero?**
+The rank r is how many independent directions the correction can have; alpha scales the correction by
+alpha / r. B starts at zero so that B A is zero at the first step: the model starts exactly as the
+pretrained model and moves away only as the data demands.
+
+**Q19. What is a chat template, and why does it matter?**
+It is the recipe that turns a list of messages (system, user, assistant, tool) into the one token
+sequence the model actually reads, with special tokens marking who speaks. A model fine-tuned with one
+template and served with another sees text it was never trained on, so training and serving must use the
+same template, including the same system prompt.
+
+**Q20. Why mask the prompt tokens in the loss?**
+We want the model to learn to write replies, not to reproduce the prompt. Masking the prompt means only
+the assistant's tokens (and the stop token) produce loss, so all the learning signal goes into the
+behaviour we care about.
+
+**Q21. Your LoRA-tuned model attacks far more often than the base model. Does that hurt your thesis?**
+No, it supports it. The model was tuned to follow instructions in tool outputs, so it is the most
+injection-compliant model in the study, as the unprotected column in Part D shows. With guardrails its
+attacks still never succeeded. A guardrail that holds for the most compliant model does not depend on
+the model resisting.
+
+### Prompt injection and defenses (Part A)
+
+**Q22. What is the difference between direct and indirect prompt injection?**
+In direct injection the attacker is the person typing to the model. In indirect injection the attacker
+plants instructions in data that an honest user's agent will read later, such as a review or an email,
+and the user is the victim. Indirect injection is the dangerous one for agents, because the agent acts
+with the user's permissions and the user never sees the planted text.
+
+**Q23. How does InjecAgent build a test case, and what are dh and ds?**
+Each case has a user request that needs one tool, that tool's simulated output with an attacker's
+instruction hidden in a field the attacker controls, and an attacker tool the instruction asks for. In a
+dh (direct harm) case the attacker wants one harmful action; in a ds (data stealing) case the attacker
+wants private data fetched and sent out. We detect data stealing exactly with a canary token.
+
+**Q24. Why not just tell the model, in the system prompt, to ignore instructions in data?**
+Because that defense asks the model to obey one instruction ("ignore instructions in data") in order to
+resist another, and the attack targets exactly that weakness. It may help a strong, aligned model and do
+nothing for a weak or unaligned one. Our system prompt is the same for every model for fairness, but the
+security claim never relies on it.
+
+**Q25. How is your approach different from CaMeL?**
+CaMeL separates control flow from data: a privileged model plans from the trusted request only, a
+quarantined model reads untrusted data without tools, and an interpreter tracks where every value came
+from and checks a policy before every tool call. It changes how the agent is built. Our approach keeps
+the ordinary agent loop and puts a reference monitor around its actions, down to the kernel. Both move
+the guarantee out of the model; ours works with any model and any agent that routes actions through the
+executors, but cannot reason about where a value came from, so it relies on per-task capabilities and
+rules instead.
+
+**Q26. What can your guardrails not stop?**
+An allowed but harmful action, such as a misleading email sent through an email tool the task genuinely
+needs; an injection that only changes the text answer the user reads; and anything a too-wide policy
+permits. Guardrails limit what the agent can do, not whether it does the right thing with what it may
+do.
+
+### Evaluation statistics (Part B)
+
+**Q27. Why do you use the Wilson interval and not the normal approximation?**
+The normal (Wald) interval collapses to [0, 0] when nothing is observed, which would claim certainty from
+a finite sample, and it behaves badly near 0% and 100%, the values a security claim lives at. The Wilson
+interval keeps a positive upper bound at zero; for 0 of 120 trials it gives 0 to 3.1%.
+
+**Q28. What is the rule of three?**
+If nothing happened in n independent trials, the true rate is below about 3/n with 95% confidence,
+because (1 - r)^n is about e^(-rn), and setting that to 0.05 gives rn of about 3. It is a quick sanity
+check of the Wilson upper bound, and its lesson is that zero observed is not zero proved.
+
+**Q29. Why pair the arms, and why drop a whole pair when one arm fails?**
+Pairing runs the same case, run and seed in both arms, so a difference within a pair can only come from
+the guardrails. If one arm hit an infrastructure error, keeping the other arm would leave the two arms
+measured on different cases, so both episodes leave the paired statistics and the dropped pairs are
+counted.
+
+**Q30. What is the difference between ASR, ASR-valid and the conditional block rate?**
+ASR is successes over all usable attack episodes: how often harm happened. ASR-valid is successes over
+format-valid episodes: how often a model that produced a readable action was hijacked, so garbage is not
+credited as resistance. The conditional block rate is, in the protected arm, attempts blocked at the
+attack action over attacks attempted: when the model really tried, did the guardrails stop it.
+
+**Q31. Why are three runs per case not three times the evidence?**
+At temperature 0 the runs are near-copies, so the independent unit is the case, not the episode.
+Treating near-copies as independent samples (pseudo-replication) makes the intervals too narrow. The
+report adds a case-level view that counts each case once; for a model with no protected success over
+its 40 attack cases, the honest upper bound is 8.8%, not 3.1%.
+
+**Q32. Why are the partial rows not ranked against the complete ones?**
+A partial run is not a random sample of the full run: the hosted runs did data-stealing cases first, and
+network errors arrive in bursts. Its finished episodes are a different mix of cases, so comparing it with
+a complete row would compare two different experiments. Partial rows are shown with their episodes done
+and the word partial, and only complete rows are ranked.
+
+### Results, confounds and threats (Parts C to E)
+
+**Q33. What is your main result?**
+With guardrails, no attack succeeded for any current-engine model, local or hosted, from the
+deliberately compliant LoRA model to the tiny scratch model, and every attack a model really tried was
+blocked at the attack action. The scripted control, which attempts every attack, also never succeeded
+with guardrails. The exact counts are in the findings list and headline table in Part D.
+
+**Q34. Your sandbox and seccomp recorded zero blocks. Doesn't that mean they are useless?**
+No. The zero means no attack reached them: the tool broker and the policy engine stopped every attempt
+first. A backstop that is never needed records nothing. The count is also a lower bound, because a layer
+that quietly contains an action records nothing. We report the zero with its n and cite the Phase 1
+residual-bypass table by row number for evidence of what those layers do.
+
+**Q35. Is it fair to compare a 4-bit local model with a hosted model?**
+Not as a leaderboard. The rows differ in size, precision, serving stack, context window, decoding and
+training all at once, and those are confounds; the confounds table in Part C names them per model. We
+present a spectrum, not a ranking. The guardrail claim does not need a ranking: protected success is
+zero in every row, whatever its confounds.
+
+**Q36. Name a threat to each kind of validity in your study.**
+Internal: a code or policy change in the middle of a run (countered by provenance stamps and paired
+arms). Construct: weak models' format failures making raw ASR look safe (countered by ASR-valid and the
+control). External: one benchmark with simulated tools and a fixed attack set. Conclusion: repeated runs
+at temperature 0 treated as independent (countered by the case-level view) and partial hosted rows.
+
+**Q37. What is the deferred finding WR-01, and does it change your numbers?**
+In the outcome rules, an episode that overflows its context window after valid steps is classed as a
+format failure, but only if the model had not already attempted the attack. So overflows remove
+non-attacking episodes from the ASR-valid denominator and bias ASR-valid upward. No current episode had a
+context overflow, so none of the present numbers change. The fix touches a run-affecting file, so it was
+deferred until after the hosted freeze rather than changing the classification in the middle of a run.
+
+**Q38. Why are the old Gemini and Gemma rows not in your comparison?**
+They were produced in October by an older version of the scoring and outcome engine, before the Phase 1
+fixes, and they are incomplete. Mixing them with current-engine rows would compare different
+measurement rules. They are shown in their own "Legacy rows" table with their n for transparency, and
+are never ranked, pooled or charted.
+
+**Q39. How do you know the numbers in your report, README, slides and these notes agree?**
+They all come from one frozen copy of the data. One build command computes numbers.json from it and
+writes every result table into the documents between hidden marker lines. A consistency check re-renders
+every block, fails on any stale block, and fails if hand-written prose quotes a fraction, percentage or
+timestamp that is not in the generated data. It also scans for key-shaped text.
+
+**Q40. What would you do next with more time?**
+Re-run the build after the hosted freeze so the hosted rows are final; fix WR-01 and the other deferred
+findings; add an adaptive attacker and a second benchmark with real (sandboxed) tools; write a
+layer-targeted suite so the kernel layers are tested directly rather than shown by a lower bound; and
+replace the seccomp deny-list with an allow-list.
