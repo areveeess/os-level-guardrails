@@ -1169,6 +1169,25 @@ def test_freeze_stops_only_own_children_and_marks_stopped_at_freeze(clock, tmp_p
     assert "HOSTED freeze reached" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("behaviour,state", [
+    ({"dur": 12, "gain": 342}, "complete"),
+    ({"dur": 12, "gain": 40, "quota": "API asks to retry in 2.0h"}, "stopped_by_quota"),
+])
+def test_child_exiting_in_the_last_poll_interval_before_the_freeze_is_finished_not_stopped(
+        clock, tmp_path, monkeypatch, behaviour, state):
+    """WR-05 / IN-01: the child exits 12 s after launch; the loop polls at 10 s and next at 20 s, after the freeze
+    at 15 s. Its exit is recorded through finish() (complete, or the quota stop) instead of 'stopped at the
+    freeze', and nothing is signalled."""
+    clock.base = FREEZE - datetime.timedelta(seconds=15)
+    hw = HostedWorld(clock, monkeypatch, {GROQ: [behaviour]})
+    _hosted(clock, tmp_path)
+    assert len(hw.spawned) == 1 and clock.signals == []
+    st = _state(str(tmp_path / "p4"))
+    assert st["state"] == state
+    assert st["launches"][0]["exit"] == 0 and "stopped at the freeze" not in st["launches"][0]["stop_reason"]
+    assert "FREEZE stopped at" not in open(f"{tmp_path / 'p4'}-{GROQ}/progress.log").read()
+
+
 def test_nothing_is_launched_after_the_freeze(clock, tmp_path, monkeypatch, capsys):
     clock.base = FREEZE
     hw = HostedWorld(clock, monkeypatch, {})
@@ -1294,17 +1313,26 @@ def test_key_check_prints_missing(monkeypatch, capsys):
     assert capsys.readouterr().out.strip().splitlines() == ["KEY GROQ_API_KEY missing"]
 
 
-def test_key_check_runs_the_registry_start_up_first(monkeypatch, capsys):
+def test_key_check_reads_the_environment_after_the_registry_start_up(monkeypatch, capsys):
+    """WR-05: the environment read is recorded too, so this test fails if the key is looked up before the registry
+    start-up. The .env load itself happens when src.llm.registry is imported (python-dotenv at module start-up),
+    which jobs does at its own import; load_model_config is the registry call that runs first in hosted_probe."""
     _no_requests(monkeypatch)
     order = []
 
     def startup():
         order.append("registry")
         return load_model_config()
+
+    class RecordingEnviron(dict):
+        def get(self, key, default=None):
+            order.append(f"env:{key}")
+            return super().get(key, default)
     monkeypatch.setattr(jobs, "load_model_config", startup)
-    monkeypatch.setenv("GROQ_API_KEY", "x")
-    jobs.hosted_probe(key_check=True)
-    assert order == ["registry"]
+    monkeypatch.setattr(jobs.os, "environ", RecordingEnviron(os.environ, GROQ_API_KEY="x"))
+    assert jobs.hosted_probe(key_check=True) == 0
+    assert order == ["registry", "env:GROQ_API_KEY"]
+    assert capsys.readouterr().out.strip().splitlines() == ["KEY GROQ_API_KEY set"]
 
 
 def test_probe_prints_classes_only(monkeypatch, capsys):

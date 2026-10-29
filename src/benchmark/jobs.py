@@ -1466,6 +1466,11 @@ def hosted_loop(prefix: str, models: Optional[list] = None, jobs_dir: str = DEFA
         if now >= freeze:
             for model in list(procs):
                 proc, record = procs[model][0], procs[model][1]
+                code = proc.poll()
+                if code is not None:
+                    # it exited on its own (within the last poll interval): record that exit, not a freeze stop
+                    finish(model, code)
+                    continue
                 stop_own_child(proc)
                 record.update(end=_utc_now(), exit=proc.poll(), stop_reason="stopped at the freeze (D-09)")
                 _append(os.path.join(dirs[model], "progress.log"), f"FREEZE stopped at {_utc_now()} (D-09)\n")
