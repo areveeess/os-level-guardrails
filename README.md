@@ -279,9 +279,9 @@ This table is the `run_attack_simulation.py` demo: scripted attack actions sent 
 
 | Metric | Without Guardrails | With Policy Engine |
 |--------|----------------|-------------|
-| Attacks reaching the OS | 7/7 (100%) | 0/7 (0%) |
-| Attacks blocked | 0/7 (0%) | 7/7 (100%) |
-| Benign control allowed | 1/1 | 1/1 (no false positives) |
+| Attacks reaching the OS | all 7 | none of the 7 |
+| Attacks blocked | none of the 7 | all 7 |
+| Benign control allowed | yes (the 1 benign action) | yes (no false positives) |
 
 `run_attack_simulation.py` exercises the policy engine layer; `run_sandboxed.py` exercises namespaces + seccomp-BPF. Destructive vectors in the simulation use safe stand-ins (a throwaway `/tmp` directory and the reserved `.example` domain), so it is safe to run live.
 
@@ -300,7 +300,7 @@ It does the following:
 - Freezes the Phase 4 result directories (the five local models, the scripted control, the three Groq models) and the legacy October directories, read-only, into `results/phase5-final/` (sources and `freeze.json`).
 - Regenerates the cross-model report (`summary.md`, `summary.csv`, `layer_blocks.csv`), `numbers.json` and the three charts in `charts/` from that frozen copy only.
 - Rewrites the generated result blocks in this README, `docs/SDD.md` and the viva pages, and builds the Review-3 slide deck.
-- Runs the consistency check, which fails if any of those documents quotes a number that differs from `numbers.json`, or carries key-shaped text.
+- Runs the consistency check, which fails if a generated block is stale, if the prose outside the blocks states a headline result by hand or quotes a fraction (`k/n` or `k of n`), a percentage or a timestamp that is not in `numbers.json`, or if a document carries key-shaped text.
 
 The check can also be run on its own:
 

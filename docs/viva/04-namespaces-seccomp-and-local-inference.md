@@ -294,7 +294,8 @@ reaches the sandbox only after the broker and the policy engine allowed it.
 Every number in this part is generated from results/phase5-final/numbers.json by the deliverables build
 (`python -m src.deliverables build`, Phase 5) and checked by `python -m src.deliverables check`, which fails
 if a table or a generated sentence here no longer matches the data, or if the prose around them states a
-headline outcome in its own words. The status block below gives the data snapshot and says which rows are
+headline outcome in its own words or quotes a fraction ("k/n" or "k of n"), a percentage or a timestamp
+that is not in the data. The status block below gives the data snapshot and says which rows are
 partial. The local rows are final. The Groq rows become final when the build is re-run after the freeze at
 15:30 UTC on 2026-10-29 (D-09); that re-run rewrites the tables and the generated sentences on this page by
 itself, so the prose between them states no result that depends on the Groq rows.

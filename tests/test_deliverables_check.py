@@ -6,6 +6,7 @@ Synthetic numbers from a Task 1 build under tmp_path; docs are small files writt
 
 import ast
 import copy
+import itertools
 import json
 import os
 
@@ -298,7 +299,6 @@ def test_fraction_rules(frozen_numbers):
     good = _kn(by["scratch-gpt"]["metrics"]["success_unprotected"])
     assert _scan(numbers, f"scratch-gpt succeeded in {good} episodes.") == []
     assert _scan(numbers, f"ScratchGPT succeeded in {good} episodes.") == []
-    assert _scan(numbers, "scratchgpt-like text 999/1000 without a model") == []
     problems = _scan(numbers, "SCRATCHGPT succeeded in 999/1000 episodes.")
     assert problems and problems[0][0] == 1 and "999/1000" in problems[0][1]
     hosted = f"{by['groq-gpt-oss-20b']['episodes_done']}/{by['groq-gpt-oss-20b']['episodes_expected']}"
@@ -312,6 +312,55 @@ def test_fraction_rules(frozen_numbers):
 
 def _kn(metric):
     return f"{metric['k']}/{metric['n']}"
+
+
+_DOC_IDS = itertools.count()
+
+
+def _doc_fails(frozen, tmp_path, body):
+    """The FAIL lines of a page-04 document holding `body` (the check of docs, paragraph rules included)."""
+    base = tmp_path / f"doc{next(_DOC_IDS)}"
+    base.mkdir()
+    repo = make_repo(base, page04=("# Page 04\n\n" + body + "\n").encode())
+    lines, code = _check(repo, frozen, [DOC_04])
+    fails = [line for line in lines if line.startswith("FAIL check:")]
+    assert (code == 1) == bool(fails)
+    return fails
+
+
+def test_docs_check_fractions_per_paragraph_and_without_a_model(frozen_numbers, tmp_path):
+    frozen, numbers = frozen_numbers
+    by = {m["model"]: m for m in numbers["models"]}
+    good = _kn(by["scratch-gpt"]["metrics"]["success_unprotected"])
+    hosted = f"{by['groq-gpt-oss-20b']['episodes_done']}/{by['groq-gpt-oss-20b']['episodes_expected']}"
+    assert _doc_fails(frozen, tmp_path, f"The re-check of scratch-gpt found\n{good} episodes.") == []
+    fails = _doc_fails(frozen, tmp_path, "The re-check of scratch-gpt found\n999/1000 episodes.")   # wrapped
+    assert len(fails) == 1 and fails[0].startswith(f"FAIL check: {DOC_04}:4: fraction 999/1000")
+    assert "scratch-gpt" in fails[0]
+    fails = _doc_fails(frozen, tmp_path, f"scratch-gpt found {hosted} episodes.")          # another model's value
+    assert fails and f"fraction {hosted}" in fails[0]
+    fails = _doc_fails(frozen, tmp_path, "Some text with 999/1000 and no model.")             # no model named
+    assert fails and "no model is named" in fails[0]
+    assert _doc_fails(frozen, tmp_path, f"Some text with {good} and no model.") == []        # a generated value
+
+
+def test_docs_check_k_of_n_wording(frozen_numbers, tmp_path):
+    frozen, numbers = frozen_numbers
+    m = {m["model"]: m for m in numbers["models"]}["scratch-gpt"]["metrics"]["success_protected"]
+    assert _doc_fails(frozen, tmp_path, f"scratch-gpt: {m['k']} of {m['n']} attack episodes.") == []
+    assert _doc_fails(frozen, tmp_path, f"scratch-gpt: {m['k']} of its {m['n']} attack episodes.") == []
+    fails = _doc_fails(frozen, tmp_path, "scratch-gpt: 111 of 1,000 attack episodes.")
+    assert fails and "fraction 111/1000" in fails[0]
+    assert _doc_fails(frozen, tmp_path, "Rows 3 of the table and the D-09 freeze of 2026-10-29.") == []
+
+
+def test_docs_check_bare_percentages(frozen_numbers, tmp_path):
+    frozen, numbers = frozen_numbers
+    hi = numbers["models"][0]["metrics"]["success_protected"]["hi"]
+    assert _doc_fails(frozen, tmp_path, f"An upper bound of {hi} % and a 95% interval.") == []
+    fails = _doc_fails(frozen, tmp_path, "Attack success fell to 92.6%.")
+    assert len(fails) == 1 and "percentage 92.6% is not a generated value" in fails[0]
+    assert _doc_fails(frozen, tmp_path, "Attack success fell to 92.6 %.")
 
 
 def test_timestamp_and_percentage_rules(frozen_numbers):

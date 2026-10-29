@@ -430,8 +430,9 @@ the number of context overflows behind it, the single benchmark, and temperature
   a second model's opinion.
 - **ASR-valid next to raw ASR, and the case-level view** (construct and conclusion): weak models are not
   credited for garbage, and repeats are not counted as independent evidence.
-- **Generated numbers** (conclusion): every deliverable quotes the same frozen data, and a check fails on
-  any hand-typed number that differs.
+- **Generated numbers** (conclusion): every deliverable quotes the same frozen data, and a check fails on a
+  stale table, on a result stated by hand, and on a hand-typed fraction or percentage that is not in the
+  data.
 
 What remains: one benchmark with simulated tools and a fixed, non-adaptive attack set; any hosted row that
 is still partial (the status block in Part D says which); temperature 0 only; the kernel-layer counts,
@@ -911,8 +912,9 @@ are never ranked, pooled or charted.
 **Q39. How do you know the numbers in your report, README, slides and these notes agree?**
 They all come from one frozen copy of the data. One build command computes numbers.json from it and
 writes every result table into the documents between hidden marker lines. A consistency check re-renders
-every block, fails on any stale block, and fails if hand-written prose quotes a fraction, percentage or
-timestamp that is not in the generated data. It also scans for key-shaped text.
+every block and fails on any stale block. It also fails if the prose outside the blocks states a headline
+result in its own words, or quotes a fraction ("k/n" or "k of n"), a percentage or a timestamp that is not
+in the generated data, and it scans for key-shaped text.
 
 **Q40. What would you do next with more time?**
 Re-run the build after the hosted freeze so the hosted rows are final; fix WR-01 and the other deferred

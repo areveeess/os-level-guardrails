@@ -5,11 +5,16 @@ A document that quotes a number by hand drifts silently when the data changes (t
 re-run keeps adding episodes until the freeze). This check makes the drift loud:
 
   stale block    a generated block that no longer equals render_block(name, numbers, doc)
-  fraction       a k/n on a line naming a model (its id or an alias, case-insensitive, whole word)
-                 that is not one of that model's generated fractions; a line naming two models
-                 accepts either model's; a line saying "pooled" accepts the pooled fractions
+  fraction       a 'k/n' or 'k of n' (also 'k of its n') in a paragraph that names a model (its id
+                 or an alias, case-insensitive, whole word) and is not one of that model's generated
+                 fractions; a paragraph naming two models accepts either model's, one saying "pooled"
+                 the pooled fractions. In a paragraph that names no model the token must still be
+                 one of the generated fractions of some model, the control or the pool (WR-01), so a
+                 hand-typed result fraction can no longer hide by wrapping the model name onto
+                 another line or leaving it out
   timestamp      an ISO timestamp (minute precision) other than the snapshot or the freeze
-  percentage     'P% (k/n' whose P is not k/n rounded to P's decimals
+  percentage     'P% (k/n' whose P is not k/n rounded to P's decimals; and any other 'P%' or 'P %'
+                 whose value is not a generated pct, lo or hi (at P's decimals) or in ALLOWED_PERCENTS
   outcome        a paragraph outside the blocks that states a headline outcome in its own words
                  (OUTCOME_PATTERNS: "no attack succeeded", "zero in every row", "every attempted attack
                  was blocked", "recorded no block", "no episode had a context overflow", "were still
@@ -22,7 +27,12 @@ re-run keeps adding episodes until the freeze). This check makes the drift loud:
 
 Lines inside blocks are exempt from the fraction, timestamp, percentage and outcome rules: the
 stale-block rule covers them. A paragraph is a run of plain lines outside the blocks; a blank
-line, a heading, a list item, a table row, a code fence and a block marker each start a new one. SECRET_RE is a copy of src.benchmark.run_checks.SECRET_RE (pinned
+line, a heading, a list item, a table row, a code fence and a block marker each start a new one.
+What the rules do not do: a fraction is matched against every metric of the named model, not only
+the metric the sentence names, so a stale value that happens to equal another generated value
+passes; and counts that are not fractions or percentages (episodes, steps, tokens) are not checked.
+scan_text, which the deck check uses, applies the fraction rule per line and only to lines that
+name a model, because every slide line is generated. SECRET_RE is a copy of src.benchmark.run_checks.SECRET_RE (pinned
 by a test), not an import: run_checks imports the provider registry, which loads API keys.
 """
 
@@ -53,6 +63,12 @@ MODEL_ALIASES = {
 FRACTION_RE = re.compile(r"(?<![\w/.])(\d+)/(\d+)(?![\w/]|\.\d)")
 TIMESTAMP_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})")
 PERCENT_RE = re.compile(r"(?<![\w.])(\d+(?:\.(\d+))?)% \((\d+)/(\d+)")
+# 'k of n', 'k of its n' (digits with optional thousands commas), the prose form of a fraction (WR-01)
+OF_RE = re.compile(r"(?<![\w.,-])(\d+(?:,\d{3})*) of (?:its |their |the |all )?(\d+(?:,\d{3})*)(?![\w-]|[.,]\d)")
+# any other percentage, with or without a space before the sign
+BARE_PERCENT_RE = re.compile(r"(?<![\w.])(\d+(?:\.(\d+))?) ?%(?! \(\d)")
+# percentages that are not results: the confidence level and the 95 %-of-window truncation threshold
+ALLOWED_PERCENTS = (95.0,)
 POOLED_RE = re.compile(r"\bpooled\b", re.IGNORECASE)
 _ALIAS_RES = {model: [re.compile(rf"(?<![\w.-]){re.escape(a)}(?![\w-]|\.\w)", re.IGNORECASE) for a in aliases]
               for model, aliases in MODEL_ALIASES.items()}
@@ -132,6 +148,68 @@ def allowed_fractions(numbers: dict) -> tuple:
     return per_model, pooled
 
 
+def generated_percents(numbers: dict) -> set:
+    """Every pct, lo and hi value anywhere in numbers.json (nested metric dicts and flat *_pct entries)."""
+    out = set()
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if (key in ("pct", "lo", "hi") or key.endswith(("_pct", "_lo", "_hi"))) \
+                        and isinstance(value, (int, float)) and not isinstance(value, bool):
+                    out.add(float(value))
+                else:
+                    walk(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+    walk(numbers)
+    return out
+
+
+def all_fractions(allowed: tuple) -> set:
+    per_model, pooled = allowed
+    out = set(pooled)
+    for values in per_model.values():
+        out |= values
+    return out
+
+
+def _fraction_tokens(line: str) -> list:
+    tokens = [f"{m.group(1)}/{m.group(2)}" for m in FRACTION_RE.finditer(line)]
+    tokens += [f"{m.group(1).replace(',', '')}/{m.group(2).replace(',', '')}" for m in OF_RE.finditer(line)]
+    return tokens
+
+
+def _percent_ok(text: str, decimals: int, known: set) -> bool:
+    value = float(text)
+    return any(abs(value - round(x, decimals)) < 1e-9 for x in known | set(ALLOWED_PERCENTS))
+
+
+def paragraph_problems(lines: list, para: list, numbers: dict, allowed: tuple, percents: set) -> list:
+    """[(line index, reason)]: the WR-01 fraction and bare-percentage rules over one paragraph."""
+    per_model, pooled = allowed
+    text = " ".join(lines[i] for i in para)
+    named = models_on_line(text)
+    says_pooled = bool(POOLED_RE.search(text))
+    if named or says_pooled:
+        ok = set(pooled) if says_pooled else set()
+        for model in named:
+            ok |= per_model.get(model, set())
+        who = "for " + ", ".join(named + (["pooled"] if says_pooled else []))
+    else:
+        ok, who = all_fractions(allowed), "of any model (no model is named in the paragraph)"
+    out = []
+    for index in para:
+        for token in _fraction_tokens(lines[index]):
+            if token not in ok:
+                out.append((index, f"fraction {token} is not a generated value {who}"))
+        for m in BARE_PERCENT_RE.finditer(lines[index]):
+            if not _percent_ok(m.group(1), len(m.group(2) or ""), percents):
+                out.append((index, f"percentage {m.group(1)}% is not a generated value"))
+    return out
+
+
 def models_on_line(line: str) -> list:
     return [model for model, patterns in _ALIAS_RES.items() if any(p.search(line) for p in patterns)]
 
@@ -140,13 +218,14 @@ def _minutes(display: str) -> str:
     return display[:16]
 
 
-def _line_problems(line: str, numbers: dict, allowed: tuple) -> list:
-    """Fraction, timestamp and percentage problems of one plain line (reasons, never the line's text)."""
+def _line_problems(line: str, numbers: dict, allowed: tuple, fractions: bool = True) -> list:
+    """Fraction (per line, when `fractions`), timestamp and percentage problems of one plain line (reasons, never
+    the line's text)."""
     per_model, pooled = allowed
     problems = []
     named = models_on_line(line)
     says_pooled = bool(POOLED_RE.search(line))
-    if named or says_pooled:
+    if fractions and (named or says_pooled):
         ok = set(pooled) if says_pooled else set()
         for model in named:
             ok |= per_model.get(model, set())
@@ -228,13 +307,15 @@ def check_doc(path: str, display: str, numbers: dict, frozen_dir: str) -> tuple:
             problems.append(f"{display}:{block['begin'] + 1}: block {block['name']} is stale "
                             f"(run python -m src.deliverables blocks)")
     allowed = allowed_fractions(numbers)
+    percents = generated_percents(numbers)
     reasons = {}
     for index, line in enumerate(lines):
         reasons[index] = _key_problem(line)
         if index not in inside:
-            reasons[index] += _line_problems(line, numbers, allowed)
+            reasons[index] += _line_problems(line, numbers, allowed, fractions=False)
     for para in paragraphs(lines, inside):
-        for index, reason in outcome_problems(lines, para):
+        for index, reason in paragraph_problems(lines, para, numbers, allowed, percents) + outcome_problems(lines,
+                                                                                                         para):
             reasons[index].append(reason)
     for index in range(len(lines)):
         problems += [f"{display}:{index + 1}: {reason}" for reason in dict.fromkeys(reasons[index])]
