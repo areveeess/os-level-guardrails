@@ -6,9 +6,11 @@ quantization, where they run, context window, decoding and provenance. D-04 requ
 differences to be printed next to the results as confounds, and the limits of the evidence
 as threats to validity, so the panel never reads a gap between two rows as a clean effect.
 
-Every value here is read from a recorded source (the frozen ollama_show.txt, the tracked
-model manifests, config/models.yaml) or stated as "not recorded" / "not disclosed"; nothing
-is guessed. Threat sentences are built from numbers.json, so they change with the data.
+Every value here is read from a recorded source (the frozen ollama_show.txt, and the copies of
+config/models.yaml and the two model manifests that the freeze puts under frozen/inputs/, WR-04)
+or stated as "not recorded" / "not disclosed"; nothing is guessed. The hf_local precision and
+context follow the model's config entry (device, max_context_tokens) the way the provider does.
+Threat sentences are built from numbers.json, so they change with the data.
 
 config/models.yaml is read with yaml.safe_load, never through src.llm.registry, which would
 load API keys the deliverables do not need.
@@ -87,7 +89,8 @@ def confound_rows(frozen_dir: str, rows: list, repo_root: str = REPO_ROOT) -> li
     Args:
         frozen_dir: the frozen directory (its sources hold each Ollama model's ollama_show.txt).
         rows: the frozen current-engine rows (for the largest prompt each model reported).
-        repo_root: where config/models.yaml and the tracked model manifests live."""
+        repo_root: the directory holding config/models.yaml and models/*/manifest.json (the build passes the
+            frozen inputs/ copy)."""
     config = _config(repo_root)
     scratch = _read_json(os.path.join(repo_root, SCRATCH_MANIFEST))
     lora = _read_json(os.path.join(repo_root, LORA_MANIFEST)).get("lora") or {}
@@ -110,8 +113,10 @@ def confound_rows(frozen_dir: str, rows: list, repo_root: str = REPO_ROOT) -> li
             params = _millions(base_params)
             if tuned and base_params is not None:
                 params += f" + {_millions(trainable)} LoRA"
-            row.update(parameters=params, precision="bf16 on the GPU", placement="local, in-process",
-                       context=f"{HF_LOCAL_CONTEXT} tokens",
+            on_gpu = str(cfg.get("device") or "cuda").startswith("cuda")      # hf_local.load_model's dtype rule
+            row.update(parameters=params, precision="bf16 on the GPU" if on_gpu else "fp32 on the CPU",
+                       placement="local, in-process",
+                       context=f"{cfg.get('max_context_tokens') or HF_LOCAL_CONTEXT} tokens",
                        provenance="LoRA-tuned here on the Phase 2 synthetic mix" if tuned
                        else "pretrained instruct, not tuned here")
         elif provider == "scratch":

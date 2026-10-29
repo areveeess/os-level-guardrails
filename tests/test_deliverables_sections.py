@@ -8,6 +8,7 @@ import ast
 import json
 import os
 import re
+import shutil
 
 import pytest
 
@@ -111,6 +112,59 @@ def test_missing_ollama_show_is_not_recorded(frozen, tmp_path):
     rows = sections.confound_rows(str(frozen), _frozen_rows(frozen), repo_root=str(fake_repo(tmp_path)))
     row = {r["model"]: r for r in rows}["ollama-qwen2.5-3b"]
     assert row["parameters"] == row["precision"] == row["context"] == "not recorded"
+
+
+def test_hf_local_precision_and_context_follow_the_config(frozen, tmp_path):
+    repo = fake_repo(tmp_path)
+    config = repo / "config" / "models.yaml"
+    config.write_text(config.read_text(encoding="utf-8").replace(
+        "qwen2.5-0.5b-base: {provider: hf_local,", "qwen2.5-0.5b-base: {provider: hf_local, device: cpu, "
+        "max_context_tokens: 2048,"), encoding="utf-8")
+    by = {r["model"]: r for r in sections.confound_rows(str(frozen), _frozen_rows(frozen), repo_root=str(repo))}
+    assert by["qwen2.5-0.5b-base"]["precision"] == "fp32 on the CPU"
+    assert by["qwen2.5-0.5b-base"]["context"] == "2048 tokens"
+    assert by["qwen2.5-0.5b-agentlora"]["precision"] == "bf16 on the GPU"
+
+
+# ── Frozen inputs (WR-04) ──
+
+def test_the_freeze_copies_the_inputs_and_the_render_reads_only_them(tmp_path):
+    root = make_results_root(tmp_path)
+    repo = fake_repo(tmp_path)
+    frozen = root / "phase5-final"
+    build_module.build(str(root), str(frozen), now=BEFORE, repo_root=str(repo))
+    record = load_json(frozen / "freeze.json")
+    assert [i["path"] for i in record["inputs"]] == list(build_module.INPUT_FILES)
+    for item in record["inputs"]:
+        copy = frozen / "inputs" / item["path"]
+        assert copy.read_bytes() == (repo / item["path"]).read_bytes()
+    numbers = (frozen / "numbers.json").read_bytes()
+    assert b"4.8M" in numbers and b"494.0M + 8.8M LoRA" in numbers
+    for item in record["inputs"]:                       # the working tree changes after the freeze
+        (repo / item["path"]).write_text("{}", encoding="utf-8")
+    build_module.build(str(root), str(frozen), reuse=True, repo_root=str(repo))
+    assert (frozen / "numbers.json").read_bytes() == numbers
+    (frozen / "inputs" / "models" / "scratch" / "manifest.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(build_module.DeliverablesError, match="frozen input .* does not match"):
+        build_module.build(str(root), str(frozen), reuse=True, repo_root=str(repo))
+
+
+def test_a_freeze_from_before_wr04_adopts_the_inputs_once(tmp_path):
+    root = make_results_root(tmp_path)
+    repo = fake_repo(tmp_path)
+    frozen = root / "phase5-final"
+    build_module.build(str(root), str(frozen), now=BEFORE, repo_root=str(repo))
+    record = load_json(frozen / "freeze.json")
+    numbers = (frozen / "numbers.json").read_bytes()
+    old = dict(record)
+    del old["inputs"]
+    (frozen / "freeze.json").write_bytes(build_module._json_bytes(old))
+    shutil.rmtree(frozen / "inputs")
+    lines = build_module.build(str(root), str(frozen), reuse=True, repo_root=str(repo))
+    assert lines[1] == "INPUTS adopted 3 from the working tree (the freeze predates WR-04)"
+    assert load_json(frozen / "freeze.json") == record and (frozen / "numbers.json").read_bytes() == numbers
+    lines = build_module.build(str(root), str(frozen), reuse=True, repo_root=str(repo))
+    assert not any(line.startswith("INPUTS") for line in lines)
 
 
 def test_hf_local_context_mirrors_the_provider():

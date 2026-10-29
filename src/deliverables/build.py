@@ -58,6 +58,10 @@ FREEZE_FILE = "freeze.json"
 NUMBERS_FILE = "numbers.json"
 SOURCES_DIR = "sources"
 FROZEN_PREFIX = "phase5-"
+INPUTS_DIR = "inputs"
+# The tracked files the render reads besides the run data (WR-04): copied into frozen/inputs/ by the freeze and
+# read only from there, so re-rendering a frozen directory never depends on the working tree
+INPUT_FILES = ("config/models.yaml", "models/scratch/manifest.json", "models/qwen-agentlora/manifest.json")
 CONTROL_SOURCE = "phase4-control"
 KINDS = ("dh", "ds", "benign")
 PROP_KEYS = ("k", "n", "pct", "lo", "hi")
@@ -258,10 +262,25 @@ def _swap_in(staging: str, frozen_dir: str):
     _remove(aside)
 
 
-def freeze(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, now=None) -> dict:
+def _copy_inputs(repo_root: str, staging: str) -> list:
+    """Copy the present INPUT_FILES from the repository into staging/inputs; returns [{path, sha256}]."""
+    out = []
+    for rel in INPUT_FILES:
+        src = os.path.join(repo_root, *rel.split("/"))
+        if not os.path.isfile(src):
+            continue
+        data = _read_bytes(src)
+        target = os.path.join(staging, INPUTS_DIR, *rel.split("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        _write_bytes(target, data)
+        out.append({"path": rel, "sha256": hashlib.sha256(data).hexdigest()})
+    return out
+
+
+def freeze(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, now=None, repo_root: str = None) -> dict:
     """Freeze into a staging directory and swap it in (no render); returns the freeze record. build() stages,
     renders into the staging directory and only then swaps (WR-03)."""
-    staging, record = stage_freeze(results_root, frozen_dir, now)
+    staging, record = stage_freeze(results_root, frozen_dir, now, repo_root=repo_root)
     try:
         _swap_in(staging, frozen_dir)
     except BaseException:
@@ -270,7 +289,8 @@ def freeze(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, now=N
     return record
 
 
-def stage_freeze(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, now=None) -> tuple:
+def stage_freeze(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, now=None,
+                 repo_root: str = None) -> tuple:
     """Copy the eleven sources into the staging sibling of frozen_dir and write its freeze.json; returns
     (staging path, freeze record). The frozen directory itself is not touched; on any error the staging
     directory is removed.
@@ -279,7 +299,9 @@ def stage_freeze(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR,
     after it, it is "final" only when data_state() says the frozen hosted states are terminal and show the freeze
     (CR-03), else "snapshot" with a data_state_reason. Each source's hosted_state.json is copied before its
     raw.jsonl: a terminal state is written only after the loop's child for that model has exited, so a terminal
-    state copied first guarantees the raw.jsonl copied after it holds every row."""
+    state copied first guarantees the raw.jsonl copied after it holds every row. config/models.yaml and the two
+    model manifests are copied from repo_root into inputs/ and hashed in freeze.json (WR-04)."""
+    repo_root = repo_root or REPO_ROOT
     snapshot = _utc(now or datetime.datetime.now(datetime.timezone.utc))
     check_frozen_target(results_root, frozen_dir)
     specs = source_specs(results_root)
@@ -323,6 +345,7 @@ def stage_freeze(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR,
             "data_state": state,
             "code_commit": _git_head(),
             "sources": sources,
+            "inputs": _copy_inputs(repo_root, staging),
         }
         if reason:
             record["data_state_reason"] = reason
@@ -333,21 +356,33 @@ def stage_freeze(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR,
     return staging, record
 
 
-def stage_reuse(frozen_dir: str = FROZEN_DIR) -> tuple:
-    """(staging path, freeze record): the verified frozen sources and freeze.json copied byte for byte into the
-    staging sibling, for a --reuse-frozen render that must not touch the frozen directory until it succeeds."""
-    read_freeze(frozen_dir)
+def stage_reuse(frozen_dir: str = FROZEN_DIR, repo_root: str = None) -> tuple:
+    """(staging path, freeze record, adopted): the verified frozen sources, inputs and freeze.json copied byte for
+    byte into the staging sibling, for a --reuse-frozen render that must not touch the frozen directory until it
+    succeeds.
+
+    A freeze written before WR-04 has no inputs: they are adopted once from repo_root into the staging copy and
+    added to its freeze.json (adopted=True; the sources and their hashes are unchanged), so every later render
+    of that directory reads only the frozen copies."""
+    record = read_freeze(frozen_dir)
     _, staging, _ = _staging_paths(frozen_dir)
     _remove(staging)
+    adopted = "inputs" not in record
     try:
         os.makedirs(staging)
         shutil.copytree(os.path.join(frozen_dir, SOURCES_DIR), os.path.join(staging, SOURCES_DIR))
-        shutil.copyfile(os.path.join(frozen_dir, FREEZE_FILE), os.path.join(staging, FREEZE_FILE))
+        if adopted:
+            record["inputs"] = _copy_inputs(repo_root or REPO_ROOT, staging)
+            _write_atomic(os.path.join(staging, FREEZE_FILE), _json_bytes(record))
+        else:
+            if os.path.isdir(os.path.join(frozen_dir, INPUTS_DIR)):
+                shutil.copytree(os.path.join(frozen_dir, INPUTS_DIR), os.path.join(staging, INPUTS_DIR))
+            shutil.copyfile(os.path.join(frozen_dir, FREEZE_FILE), os.path.join(staging, FREEZE_FILE))
         record = read_freeze(staging)
     except BaseException:
         _remove(staging)
         raise
-    return staging, record
+    return staging, record, adopted
 
 
 def read_freeze(frozen_dir: str) -> dict:
@@ -363,6 +398,10 @@ def read_freeze(frozen_dir: str) -> dict:
         raw = os.path.join(source_dir(frozen_dir, s["name"]), "raw.jsonl")
         if not os.path.isfile(raw) or hashlib.sha256(_read_bytes(raw)).hexdigest() != s["raw_sha256"]:
             raise DeliverablesError(f"frozen copy {posix(raw)} is missing or does not match freeze.json")
+    for item in record.get("inputs") or []:
+        path = os.path.join(frozen_dir, INPUTS_DIR, *item["path"].split("/"))
+        if not os.path.isfile(path) or hashlib.sha256(_read_bytes(path)).hexdigest() != item["sha256"]:
+            raise DeliverablesError(f"frozen input {posix(path)} is missing or does not match freeze.json")
     return record
 
 
@@ -523,7 +562,7 @@ def build_numbers(record: dict, rows: list, summary: list, frozen_dir: str) -> d
     }
 
 
-def render(frozen_dir: str = FROZEN_DIR, repo_root: str = REPO_ROOT) -> dict:
+def render(frozen_dir: str = FROZEN_DIR) -> dict:
     """Regenerate the report, the three charts and numbers.json from the frozen directory; returns numbers.
 
     The numbers are computed first (the threats section quotes them), then the report is written through
@@ -536,9 +575,10 @@ def render(frozen_dir: str = FROZEN_DIR, repo_root: str = REPO_ROOT) -> dict:
     numbers = build_numbers(record, rows, summary, frozen_dir)
     llm_rows = [r for r in rows if r["model"] != CONTROL_MODEL]
     legacy = sections.legacy_summary(frozen_dir) if any(s["group"] == "legacy" for s in record["sources"]) else []
-    numbers["confounds"] = sections.confound_rows(frozen_dir, llm_rows, repo_root=repo_root)
+    inputs = os.path.join(frozen_dir, INPUTS_DIR)          # the frozen inputs only, never the working tree (WR-04)
+    numbers["confounds"] = sections.confound_rows(frozen_dir, llm_rows, repo_root=inputs)
     numbers["legacy"] = legacy
-    numbers["local_training"] = sections.local_training(repo_root)
+    numbers["local_training"] = sections.local_training(inputs)
     numbers["threats"] = sections.threat_items(numbers, legacy)
     links = charts.chart_links()
     numbers["charts"] = [{"file": path, "caption": caption} for path, caption in links]
@@ -613,17 +653,21 @@ def build(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, reuse:
             say(line)
 
     check_frozen_target(results_root, frozen_dir)
+    adopted = False
     if reuse:
-        (staging, record), word = stage_reuse(frozen_dir), "REUSE"
+        staging, record, adopted = stage_reuse(frozen_dir, repo_root)
+        word = "REUSE"
     else:
-        (staging, record), word = stage_freeze(results_root, frozen_dir, now), "FREEZE"
+        (staging, record), word = stage_freeze(results_root, frozen_dir, now, repo_root=repo_root), "FREEZE"
     try:
         emit(f"{word} {record['snapshot_display']} state {record['data_state']} sources {len(record['sources'])}")
+        if adopted:
+            emit(f"INPUTS adopted {len(record['inputs'])} from the working tree (the freeze predates WR-04)")
         if record.get("data_state_reason"):
             emit(f"NOT FINAL {record['data_state_reason']}")
         for s in record["sources"]:
             emit(f"SOURCE {s['name']} lines {s['raw_lines']} sha256 {s['raw_sha256'][:12]}")
-        render(staging, repo_root=repo_root)       # every output is written into the staging directory (WR-03)
+        render(staging)                            # every output is written into the staging directory (WR-03)
         _swap_in(staging, frozen_dir)              # the previous frozen directory survives until this point
     except BaseException:
         _remove(staging)
