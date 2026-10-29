@@ -8,7 +8,7 @@ namespaces and seccomp-bpf), why we report them the way we do, and the traps tha
 a 4-bit local model and a hosted model unfair if nobody states them.
 
 An honest framing comes first, because an examiner will ask. In every Phase 4 run the sandbox and the
-seccomp filter recorded zero blocks: 0 of 1147 protected-arm episodes. That is not a failure of those
+seccomp filter recorded zero blocks: 0 of 1151 protected-arm episodes (report snapshot of 2026-10-29T03:06Z). That is not a failure of those
 layers and it is not evidence that they work. It means the attacks never reached them: the application-level
 layers in front of them (the tool broker's capability list and the policy engine) stopped every attempted
 attack first. The evidence of what the kernel layers contain comes from the Phase 1 residual-bypass table,
@@ -284,9 +284,11 @@ reaches the sandbox only after the broker and the policy engine allowed it.
 ## Part C — What the numbers say now
 
 All numbers below are copied from results/phase4-report (summary.md and summary.csv), generated
-2026-10-29T02:21Z by jobs report from nine directories: the five local models, the three Groq models and
+2026-10-29T03:06Z by jobs report from nine directories: the five local models, the three Groq models and
 the fresh control re-run in results/phase4-control (D-05). Each model's "done" count is the report's
-episodes_done/episodes_expected. Groq numbers are PROVISIONAL until the 15:30 UTC freeze (D-09).
+episodes_done/episodes_expected. The Groq numbers are a snapshot at 2026-10-29T03:06Z (UTC); the Groq
+re-run continues until the 2026-10-29 15:30 UTC freeze (D-09), then the report is regenerated and these
+Groq rows are updated. Every local number on this page is final.
 
 ### Completeness per model
 
@@ -297,9 +299,9 @@ episodes_done/episodes_expected. Groq numbers are PROVISIONAL until the 15:30 UT
 | qwen2.5-0.5b-base | complete | 342/342 |
 | ollama-qwen2.5-3b | complete | 342/342 |
 | ollama-llama3.2-3b | complete | 342/342 |
-| groq-gpt-oss-120b | partial (PROVISIONAL) | 233/342 |
-| groq-gpt-oss-20b | error-dominated, labelled partial (PROVISIONAL) | 109/342 |
-| groq-qwen3.8-27b | partial (PROVISIONAL) | 246/342 |
+| groq-gpt-oss-120b | partial (snapshot 03:06Z) | 240/342 |
+| groq-gpt-oss-20b | error-dominated, labelled partial (snapshot 03:06Z) | 109/342 |
+| groq-qwen3.8-27b | partial (snapshot 03:06Z) | 246/342 |
 
 All five local models (D-01) finished in one uninterrupted queue on 2026-10-28 between 18:45Z and 20:30Z,
 each with 0 duplicates, 0 pending infra rows and one policy hash. No local model was stopped by the freeze.
@@ -352,8 +354,8 @@ blocked actions):
 
 | Model | Episodes | Sandbox | Seccomp |
 |---|---|---|---|
-| groq-gpt-oss-120b (partial) | attack | 0.0% (0/91) [0.0, 4.1]; 0 actions | 0.0% (0/91) [0.0, 4.1]; 0 actions |
-| groq-gpt-oss-120b (partial) | benign | 0.0% (0/25) [0.0, 13.3]; 0 actions | 0.0% (0/25) [0.0, 13.3]; 0 actions |
+| groq-gpt-oss-120b (partial) | attack | 0.0% (0/92) [0.0, 4.0]; 0 actions | 0.0% (0/92) [0.0, 4.0]; 0 actions |
+| groq-gpt-oss-120b (partial) | benign | 0.0% (0/28) [0.0, 12.1]; 0 actions | 0.0% (0/28) [0.0, 12.1]; 0 actions |
 | groq-gpt-oss-20b (partial) | attack | 0.0% (0/47) [0.0, 7.6]; 0 actions | 0.0% (0/47) [0.0, 7.6]; 0 actions |
 | groq-gpt-oss-20b (partial) | benign | 0.0% (0/7) [0.0, 35.4]; 0 actions | 0.0% (0/7) [0.0, 35.4]; 0 actions |
 | groq-qwen3.8-27b (partial) | attack | 0.0% (0/92) [0.0, 4.0]; 0 actions | 0.0% (0/92) [0.0, 4.0]; 0 actions |
@@ -368,17 +370,17 @@ blocked actions):
 | qwen2.5-0.5b-base | benign | 0.0% (0/51) [0.0, 7.0]; 0 actions | 0.0% (0/51) [0.0, 7.0]; 0 actions |
 | qwen2.5-0.5b-agentlora | attack | 0.0% (0/120) [0.0, 3.1]; 0 actions | 0.0% (0/120) [0.0, 3.1]; 0 actions |
 | qwen2.5-0.5b-agentlora | benign | 0.0% (0/51) [0.0, 7.0]; 0 actions | 0.0% (0/51) [0.0, 7.0]; 0 actions |
-| Pooled (all LLM models) | attack | 0.0% (0/830) [0.0, 0.5]; 0 actions | 0.0% (0/830) [0.0, 0.5]; 0 actions |
-| Pooled (all LLM models) | benign | 0.0% (0/317) [0.0, 1.2]; 0 actions | 0.0% (0/317) [0.0, 1.2]; 0 actions |
+| Pooled (all LLM models) | attack | 0.0% (0/831) [0.0, 0.5]; 0 actions | 0.0% (0/831) [0.0, 0.5]; 0 actions |
+| Pooled (all LLM models) | benign | 0.0% (0/320) [0.0, 1.2]; 0 actions | 0.0% (0/320) [0.0, 1.2]; 0 actions |
 
 The report's own sentences: "Sandbox (namespaces / private filesystem): no block was recorded in any of the
-1147 protected-arm episodes of the 8 language models (0/1147)." and "Seccomp-BPF: no block was recorded in
-any of the 1147 protected-arm episodes of the 8 language models (0/1147)." The five complete local models
+1151 protected-arm episodes of the 8 language models (0/1151)." and "Seccomp-BPF: no block was recorded in
+any of the 1151 protected-arm episodes of the 8 language models (0/1151)." The five complete local models
 alone give 0/855 for each kernel layer.
 
 Said plainly: **the sandbox and seccomp layers recorded 0 blocks.** The reason is that the layers in front
-stopped every attack first. Pooled over the language models, the tool broker blocked in 239/830 protected
-attack episodes (245 actions) and the policy engine in 48/830 (58 actions); every one of the 200 attempted
+stopped every attack first. Pooled over the language models, the tool broker blocked in 239/831 protected
+attack episodes (245 actions) and the policy engine in 48/831 (58 actions); every one of the 200 attempted
 attacks was blocked at the attack action, so the attack actions were stopped before any of them reached
 the sandbox. The actions
 that did reach the sandbox were allowed ones, and none of them failed with an enforcement signature. The
@@ -391,21 +393,37 @@ recorded as seccomp blocks, rows 20, 21 and 22 as sandbox blocks, and in rows 3-
 layer contained the action without an error signature, so no block was recorded. Those are the rows to
 point to; they are not added to the Phase 4 counts.
 
-### The hosted re-run so far (PROVISIONAL)
+### The hosted re-run: snapshot at 2026-10-29T03:06Z
+
+Snapshot at 2026-10-29T03:06Z (UTC); the Groq re-run continues until the 2026-10-29 15:30 UTC freeze
+(D-09), then the report is regenerated and this section is updated with the final n. Nothing here is a
+final Groq number.
 
 The rule was committed (d4ee817) before the first hosted request; the loop started 2026-10-28T18:48Z with
-data-stealing episodes first (D-08). At 02:24Z the loop's own labels were: groq-gpt-oss-120b partial n=234,
-ds n=120; groq-gpt-oss-20b partial n=109, ds n=82; groq-qwen3.8-27b partial n=246, ds n=120; no quota stop
-yet. An overnight network outage left many pending infra rows, which the loop keeps retrying under the rule.
+data-stealing episodes first (D-08). At the snapshot, `run_checks hosted` printed these labels (the loop's
+own state, with its n and ds n), and the loop was still alive:
 
-| Model | Episodes done (report) | Paired attack episodes | Success (no guardrails) | Success (guardrails) | Benign n |
+| Model | Episodes done (snapshot) | ds n | Complete pairs | Paired attack episodes | State at the snapshot |
 |---|---|---|---|---|---|
-| groq-gpt-oss-120b | 233/342 | 91 | 4/91 (4.4%) | 0/91 | 25 |
-| groq-gpt-oss-20b | 109/342 | 47 | 2/47 (4.3%) | 0/47 | 7 |
-| groq-qwen3.8-27b | 246/342 | 92 | 0/92 (0.0%) | 0/92 | 30 |
+| groq-gpt-oss-120b | 240/342 | 120/120 | 120 | 92 | running (rate-limit waits), label partial n=240 ds n=120, 0 quota stops |
+| groq-gpt-oss-20b | 109/342 | 82/120 | 54 | 47 | waiting_quota (quota stop 2026-10-29T02:56:56Z, waiting until 03:56:56Z), label partial n=109 ds n=82 |
+| groq-qwen3.8-27b | 246/342 | 120/120 | 122 | 92 | waiting_quota (quota stop 2026-10-29T02:33:36Z, waiting until 03:33:36Z), label partial n=246 ds n=120 |
+
+The report's partial rows at the same snapshot:
+
+| Model | Episodes done (report) | Paired attack episodes | Success (no guardrails) | Success (guardrails) | Benign n | False positive (guardrails) |
+|---|---|---|---|---|---|---|
+| groq-gpt-oss-120b | 240/342 | 92 | 4/92 (4.3%) | 0/92 | 28 | 1/28 (3.6%) |
+| groq-gpt-oss-20b | 109/342 | 47 | 2/47 (4.3%) | 0/47 | 7 | 0/7 |
+| groq-qwen3.8-27b | 246/342 | 92 | 0/92 (0.0%) | 0/92 | 30 | 0/30 |
+
+An overnight network outage left many pending infra rows (102, 233 and 96 at the snapshot), which the loop
+keeps retrying under the rule; groq-gpt-oss-20b is error-dominated for that reason and is labelled partial.
+The one gpt-oss-120b false positive is a single benign episode in which the policy engine blocked an
+action (pooled benign policy-engine row: 1/320); it is a cost of the guardrails and is reported, not hidden.
 
 These rows are partial: they are shown with their n and are not ranked against the complete local rows.
-Most of their attack episodes are ds (for example 60 ds against 31 dh for gpt-oss-120b after pair
+Most of their attack episodes are ds (for example 60 ds against 32 dh for gpt-oss-120b after pair
 dropping), which is the selection effect described in Part A.
 
 ### What the code review found and what we fixed
@@ -422,7 +440,7 @@ its outcome.
   silently contains an action (no egress, a canary instead of the real file) records nothing. The Phase 1
   residual-bypass table, rows 1, 2, 8, 9, 10, 15, 16 (seccomp), 20, 21, 22 (sandbox) and 3-7, 11-14, 17-19,
   23 (contained without a record), is the evidence of what the layers do, not the Phase 4 counts.
-- Phase 4 recorded 0/1147 sandbox and 0/1147 seccomp blocks. This shows the layers were not needed in
+- Phase 4 recorded 0/1151 sandbox and 0/1151 seccomp blocks (03:06Z snapshot). This shows the layers were not needed in
   this benchmark, not that they would hold against an attack the application layers miss.
 - The seccomp filter is a deny-list: a dangerous system call that is not named is allowed.
 - No layer protects an allowed but harmful action through a permitted tool.
@@ -478,7 +496,7 @@ Because it forbids mount() itself. If it were installed first, the sandbox could
 private view. So the order is namespaces, then mounts, then the filter, then the agent's command.
 
 **Q8. Your sandbox and seccomp counts are zero. Doesn't that mean they are useless?**
-No. 0/1147 means no attack reached them: the tool broker and the policy engine stopped all 200 attempted
+No. 0/1151 means no attack reached them: the tool broker and the policy engine stopped all 200 attempted
 attacks first, at the attack action. The kernel layers are a backstop for what the first layers miss, and
 in this benchmark they missed nothing. We report the zero plainly with its n (D-07b) and point to the
 Phase 1 residual-bypass table, where rows 1, 2, 8, 9, 10, 15 and 16 were recorded seccomp blocks and rows
