@@ -52,6 +52,9 @@ from src.deliverables import (CONTROL_MODEL, COPY_FILES, CURRENT_SOURCES, FREEZE
                               MODEL_ORDER, RESULTS_ROOT)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# The checkout whose HEAD is recorded as code_commit; REPO_ROOT is where the docs and the frozen inputs come from
+# (resolved at call time, so tests can point it at a fake repository)
+CODE_ROOT = REPO_ROOT
 
 SCHEMA = 1
 FREEZE_FILE = "freeze.json"
@@ -155,7 +158,7 @@ def _json_bytes(obj) -> bytes:
 
 def _git_head():
     try:
-        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True,
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=CODE_ROOT, capture_output=True, text=True,
                              timeout=30)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -647,12 +650,14 @@ def deck_step(numbers: dict, frozen_dir: str, deck_out: str, template: str, repo
 
 
 def build(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, reuse: bool = False, now=None,
-          say=None, repo_root: str = REPO_ROOT, docs=None, deck_out: str = None, no_deck: bool = False,
+          say=None, repo_root: str = None, docs=None, deck_out: str = None, no_deck: bool = False,
           template: str = None, allow_blank_template: bool = False) -> list:
     """freeze (unless reuse) and render, then (when `docs` is a list of target docs) apply their blocks and run
     the check on them, then (when `deck_out` is given and not no_deck) render and check the deck; returns the
     printed lines (each also passed to `say`). docs=None skips the doc step and deck_out=None the deck step;
-    no_deck prints 'DECK skipped (--no-deck)'."""
+    no_deck prints 'DECK skipped (--no-deck)'. repo_root (default REPO_ROOT) holds the docs, the deck template
+    and the inputs a fresh freeze copies."""
+    repo_root = repo_root or REPO_ROOT
     lines = []
 
     def emit(line: str):

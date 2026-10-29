@@ -16,7 +16,7 @@ import pytest
 
 from src.deliverables import MODEL_ORDER, consistency, slides
 from src.deliverables import build as build_module
-from tests.test_deliverables_build import BEFORE, REPO_ROOT, load_json, make_results_root
+from tests.test_deliverables_build import BEFORE, REPO_ROOT, hermetic_repo, load_json, make_results_root  # noqa: F401
 
 LEGACY_IDS = ("gemini-flash-lite", "gemma-4-31b")
 REMARK = "use this on a locally made LLM and also compare with other LLMs other than Gemini"
@@ -450,3 +450,25 @@ def test_the_deck_command_fails_on_a_blank_template_fallback(frozen_numbers, mon
     assert out[0] == f"TEMPLATE {BLANK}" and out[-1].startswith("FAIL deck: ")
     assert main(["deck", "--frozen", str(frozen), "--out", out_path, "--allow-blank-template"]) == 0
     assert capsys.readouterr().out.strip().splitlines()[-1].startswith("DECK ")
+
+
+def test_the_deck_text_rules_run_without_pptx(frozen_numbers):
+    """check_deck's text rules (numbers, data line, legacy ids, the widened key regex) on the spec text, so the WSL
+    venv without python-pptx exercises them too (WR-06)."""
+    _, numbers = frozen_numbers
+    spec = slides.deck_spec(numbers)
+    for index, s in enumerate(spec, 1):
+        assert slides.text_problems(index, slides.slide_text(s), s["notes"], numbers) == [], s["key"]
+    index = [s["key"] for s in spec].index("headline") + 1
+    lines, notes = slides.slide_text(spec[index - 1]), spec[index - 1]["notes"]
+    edited = slides.text_problems(index, lines + ["scratch-gpt 99.0% (99/100)"], notes, numbers)
+    assert any(p.startswith(f"slide {index} text line ") and "fraction 99/100" in p for p in edited)
+    key = "AI" + "za" + "Q7w" * 12
+    problems = slides.text_problems(index, lines, notes + "\nsaid " + key, numbers)
+    assert any(p.startswith(f"slide {index} notes line ") and p.endswith("key-shaped text") for p in problems)
+    assert key not in "\n".join(problems)
+    problems = slides.text_problems(index, lines + ["Gemma-4-31b row"], notes, numbers)
+    assert f"slide {index} text: names a legacy model id" in problems
+    footerless = [line for line in lines if numbers["snapshot_display"] not in line]
+    assert any("without the data line" in p for p in slides.text_problems(index, footerless, notes, numbers))
+    assert any("title slide does not carry" in p for p in slides.text_problems(1, ["Title"], notes, numbers))

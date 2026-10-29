@@ -1,7 +1,9 @@
 """
 Tests for the Phase 5 deliverables build: the read-only freeze of the Phase 4 directories,
 the report rendered from the frozen copy only, numbers.json and the CLI's failure path.
-All data is synthetic and every file lives under tmp_path; nothing reads results/.
+All data is synthetic and every file lives under tmp_path; nothing reads results/, and the hermetic_repo
+fixture points the build's REPO_ROOT at a fake repository, so no test reads the real config/models.yaml or
+models/*/manifest.json either (WR-06).
 """
 
 import ast
@@ -119,6 +121,46 @@ def tree_bytes(directory):
     return out
 
 
+FAKE_CONFIG = """
+models:
+  groq-gpt-oss-120b: {provider: openai_compat, model: openai/gpt-oss-120b}
+  groq-gpt-oss-20b: {provider: openai_compat, model: openai/gpt-oss-20b}
+  groq-qwen3.8-27b: {provider: openai_compat, model: qwen/qwen3.8-27b}
+  ollama-llama3.2-3b: {provider: openai_compat, model: llama3.2-3b-ctx8192, ollama_base: llama3.2:3b, num_ctx: 8192}
+  ollama-qwen2.5-3b: {provider: openai_compat, model: qwen2.5-3b-ctx8192, ollama_base: qwen2.5:3b, num_ctx: 8192}
+  scratch-gpt: {provider: scratch, model: scratch-gpt}
+  qwen2.5-0.5b-base: {provider: hf_local, model: qwen2.5-0.5b-base, base_model: Qwen/Qwen2.5-0.5B-Instruct, adapter: null}
+  qwen2.5-0.5b-agentlora: {provider: hf_local, model: qwen2.5-0.5b-agentlora, base_model: Qwen/Qwen2.5-0.5B-Instruct, adapter: models/qwen-agentlora}
+"""
+
+
+def fake_repo(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "config").mkdir(parents=True)
+    (repo / "config" / "models.yaml").write_text(FAKE_CONFIG, encoding="utf-8")
+    (repo / "models" / "scratch").mkdir(parents=True)
+    (repo / "models" / "scratch" / "manifest.json").write_text(json.dumps({
+        "params": 4763648, "config": {"model": {"vocab_size": 96, "context": 2048, "n_layer": 6, "n_head": 8,
+                                                 "d_model": 256}},
+        "steps": 13750, "best_step": 11750, "best": {"dev_action_exact": 0.8, "dev_loss": 0.58, "other": 1},
+        "stop_reason": "early_stop", "secret_field": "not copied"}), encoding="utf-8")
+    (repo / "models" / "qwen-agentlora").mkdir(parents=True)
+    (repo / "models" / "qwen-agentlora" / "manifest.json").write_text(json.dumps({
+        "lora": {"r": 16, "alpha": 32, "trainable_params": 8798208, "total_params": 502830976, "dropout": 0.05},
+        "steps": 600, "final_dev_full": {"dev_action_exact": 0.9396}, "base_model": {"id": "Qwen/Qwen2.5-0.5B-Instruct",
+                                                                                    "revision": "abc"}}),
+        encoding="utf-8")
+    return repo
+
+
+@pytest.fixture(autouse=True)
+def hermetic_repo(tmp_path, monkeypatch):
+    """The build's default repository is a fake one under tmp_path (config/models.yaml and the two manifests)."""
+    repo = fake_repo(tmp_path / "hermetic")
+    monkeypatch.setattr(build_module, "REPO_ROOT", str(repo))
+    return repo
+
+
 @pytest.fixture(autouse=True)
 def no_chart_drawing(monkeypatch):
     """Chart drawing is tested in test_deliverables_sections.py; here it is stubbed (text layout in the WSL
@@ -173,6 +215,16 @@ def test_constants_mirror_jobs_and_run_checks():
 
 
 # ── Freeze ──
+
+def test_the_build_fixtures_are_hermetic(built, hermetic_repo):
+    _, frozen, _ = built
+    record = load_json(frozen / "freeze.json")
+    for item in record["inputs"]:
+        assert (frozen / "inputs" / item["path"]).read_bytes() == (hermetic_repo / item["path"]).read_bytes()
+        real = os.path.join(REPO_ROOT, *item["path"].split("/"))
+        if os.path.isfile(real):
+            assert sha256(real) != item["sha256"], item["path"]
+
 
 def test_freeze_copies_sources_and_records_hashes(built):
     _, frozen, lines = built

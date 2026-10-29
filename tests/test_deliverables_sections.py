@@ -5,7 +5,6 @@ confounds table.
 """
 
 import ast
-import json
 import os
 import re
 import shutil
@@ -17,8 +16,8 @@ from src.benchmark.report import generate_report, legacy_lines
 from src.deliverables import build as build_module
 from src.deliverables import charts as charts_module
 from src.deliverables import sections
-from tests.test_deliverables_build import (BEFORE, OLLAMA_SHOW, REPO_ROOT, load_json, make_results_root,
-                                           model_rows, write_raw)
+from tests.test_deliverables_build import (BEFORE, OLLAMA_SHOW, REPO_ROOT, fake_repo, hermetic_repo,  # noqa: F401
+                                           load_json, make_results_root, model_rows, write_raw)
 from tests.test_report import section
 
 REAL_CHARTS = charts_module.write_phase5_charts
@@ -33,37 +32,6 @@ def no_chart_drawing(monkeypatch):
 
 NEW_HEADINGS = ("## Confounds between the models", "## Legacy rows (older engine, not compared)", "## Charts",
                 "## Threats to validity")
-
-FAKE_CONFIG = """
-models:
-  groq-gpt-oss-120b: {provider: openai_compat, model: openai/gpt-oss-120b}
-  groq-gpt-oss-20b: {provider: openai_compat, model: openai/gpt-oss-20b}
-  groq-qwen3.8-27b: {provider: openai_compat, model: qwen/qwen3.8-27b}
-  ollama-llama3.2-3b: {provider: openai_compat, model: llama3.2-3b-ctx8192, ollama_base: llama3.2:3b, num_ctx: 8192}
-  ollama-qwen2.5-3b: {provider: openai_compat, model: qwen2.5-3b-ctx8192, ollama_base: qwen2.5:3b, num_ctx: 8192}
-  scratch-gpt: {provider: scratch, model: scratch-gpt}
-  qwen2.5-0.5b-base: {provider: hf_local, model: qwen2.5-0.5b-base, base_model: Qwen/Qwen2.5-0.5B-Instruct, adapter: null}
-  qwen2.5-0.5b-agentlora: {provider: hf_local, model: qwen2.5-0.5b-agentlora, base_model: Qwen/Qwen2.5-0.5B-Instruct, adapter: models/qwen-agentlora}
-"""
-
-
-def fake_repo(tmp_path):
-    repo = tmp_path / "repo"
-    (repo / "config").mkdir(parents=True)
-    (repo / "config" / "models.yaml").write_text(FAKE_CONFIG, encoding="utf-8")
-    (repo / "models" / "scratch").mkdir(parents=True)
-    (repo / "models" / "scratch" / "manifest.json").write_text(json.dumps({
-        "params": 4763648, "config": {"model": {"vocab_size": 96, "context": 2048, "n_layer": 6, "n_head": 8,
-                                                 "d_model": 256}},
-        "steps": 13750, "best_step": 11750, "best": {"dev_action_exact": 0.8, "dev_loss": 0.58, "other": 1},
-        "stop_reason": "early_stop", "secret_field": "not copied"}), encoding="utf-8")
-    (repo / "models" / "qwen-agentlora").mkdir(parents=True)
-    (repo / "models" / "qwen-agentlora" / "manifest.json").write_text(json.dumps({
-        "lora": {"r": 16, "alpha": 32, "trainable_params": 8798208, "total_params": 502830976, "dropout": 0.05},
-        "steps": 600, "final_dev_full": {"dev_action_exact": 0.9396}, "base_model": {"id": "Qwen/Qwen2.5-0.5B-Instruct",
-                                                                                    "revision": "abc"}}),
-        encoding="utf-8")
-    return repo
 
 
 @pytest.fixture
@@ -272,6 +240,46 @@ def test_generate_report_without_new_arguments_has_no_new_sections(tmp_path):
 
 
 # ── Charts ──
+
+def test_asr_chart_error_bars_are_the_wilson_bounds_and_partial_rows_are_hollow(tmp_path, monkeypatch):
+    """The drawn geometry, not only the labels (WR-06): each error bar runs from pct - (pct - lo) to
+    pct + (hi - pct) at its model's x, and a partial model's marker is hollow (face = the surface colour)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import same_color
+    from matplotlib.lines import Line2D
+
+    from src.benchmark.report import SURFACE
+
+    _, _, numbers = _numbers(tmp_path)
+    drawn = {}
+    real_save = charts_module._save
+
+    def keep(fig, plt_, footer, path, notes=()):
+        ax = fig.axes[0]
+        drawn["bars"] = [seg for c in ax.containers for col in c.lines[2] for seg in col.get_segments()]
+        drawn["points"] = [line for line in ax.lines if line.get_marker() in ("o", "s")]       # not the caps
+        real_save(fig, plt_, footer, path, notes)
+    monkeypatch.setattr(charts_module, "_save", keep)
+    models = [m for m in numbers["models"] if m["group"] in ("local", "hosted")]
+    charts_module._asr_ci(plt, Line2D, numbers, models, str(tmp_path / "asr_ci.png"))
+    expected = []
+    for i, m in enumerate(models):
+        for arm, offset in (("unprotected", -0.17), ("protected", 0.17)):
+            metric = m["metrics"][f"success_{arm}"]
+            if metric["n"]:
+                expected.append((i + offset, metric, m["complete"]))
+    assert len(drawn["bars"]) == len(expected) == len(drawn["points"])
+    for (x, metric, complete), seg, point in zip(expected, drawn["bars"], drawn["points"]):
+        (x0, y0), (x1, y1) = seg
+        assert x0 == pytest.approx(x) and x1 == pytest.approx(x)
+        assert sorted((y0, y1)) == pytest.approx([metric["pct"] - (metric["pct"] - metric["lo"]),
+                                                  metric["pct"] + (metric["hi"] - metric["pct"])])
+        assert point.get_ydata()[0] == pytest.approx(metric["pct"])
+        assert same_color(point.get_markerfacecolor(), SURFACE) == (not complete)
+    assert any(not complete for _, _, complete in expected) and any(complete for _, _, complete in expected)
+
 
 def test_charts_label_every_model_and_never_legacy(tmp_path):
     _, frozen, numbers = _numbers(tmp_path)

@@ -1219,6 +1219,25 @@ def _out_of_bounds(shape, width: int, height: int) -> bool:
             or shape.top + shape.height > height)
 
 
+def text_problems(index: int, lines: list, notes: str, numbers: dict) -> list:
+    """The text rules check_deck applies to one slide (pure, no python-pptx, so the WSL venv tests them too):
+    the title slide carries the snapshot time, a slide with a number carries the data line, the shown text and
+    the notes pass scan_text (numbers and the key regex), and no legacy model id appears. Reasons name the slide
+    number and the part, never the text."""
+    where, snapshot, problems = f"slide {index}", numbers["snapshot_display"], []
+    text = "\n".join(lines)
+    if index == 1 and snapshot not in text:
+        problems.append(f"{where}: the title slide does not carry the snapshot time {snapshot}")
+    if FRACTION_OR_PERCENT_RE.search(text) and snapshot not in text:
+        problems.append(f"{where}: shows numbers without the data line ({snapshot})")
+    for part, part_lines in (("text", lines), ("notes", notes.splitlines())):
+        for lineno, reason in scan_text(part_lines, numbers):
+            problems.append(f"{where} {part} line {lineno}: {reason}")
+        if any(legacy in line.lower() for line in part_lines for legacy in LEGACY_IDS):
+            problems.append(f"{where} {part}: names a legacy model id")
+    return problems
+
+
 def check_deck(path: str, numbers: dict, frozen_dir: str) -> tuple:
     """(problems, counts) of the written deck against numbers.json and the frozen charts (D-03, D-05).
 
@@ -1241,7 +1260,6 @@ def check_deck(path: str, numbers: dict, frozen_dir: str) -> tuple:
             problems.append(f"frozen chart {rel} is missing")
             continue
         wanted[index] = (rel, _sha256_file(chart))
-    snapshot = numbers["snapshot_display"]
     counts = {"slides": len(deck), "notes": 0, "charts": 0}
     for index, slide in enumerate(deck, 1):
         where = f"slide {index}"
@@ -1258,11 +1276,7 @@ def check_deck(path: str, numbers: dict, frozen_dir: str) -> tuple:
         titles = [s.text_frame.text for s in slide.shapes if s.name == "Title" and s.has_text_frame]
         if index <= len(spec) and titles != [spec[index - 1]["title"]]:
             problems.append(f"{where}: the title differs from the spec")
-        text = "\n".join(lines)
-        if index == 1 and snapshot not in text:
-            problems.append(f"{where}: the title slide does not carry the snapshot time {snapshot}")
-        if FRACTION_OR_PERCENT_RE.search(text) and snapshot not in text:
-            problems.append(f"{where}: shows numbers without the data line ({snapshot})")
+        problems += text_problems(index, lines, notes, numbers)
         pictures = _pictures(x, slide.shapes)
         expected = wanted.get(index)
         for digest in pictures:
@@ -1272,11 +1286,6 @@ def check_deck(path: str, numbers: dict, frozen_dir: str) -> tuple:
                 problems.append(f"{where}: a picture is not the frozen chart this slide shows")
         if expected and expected[1] not in pictures:
             problems.append(f"{where}: the frozen chart {expected[0]} is not embedded")
-        for part, part_lines in (("text", lines), ("notes", notes.splitlines())):
-            for lineno, reason in scan_text(part_lines, numbers):
-                problems.append(f"{where} {part} line {lineno}: {reason}")
-            if any(legacy in line.lower() for line in part_lines for legacy in LEGACY_IDS):
-                problems.append(f"{where} {part}: names a legacy model id")
     return problems, counts
 
 

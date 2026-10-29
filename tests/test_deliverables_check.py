@@ -16,7 +16,8 @@ from src.deliverables import MODEL_ORDER
 from src.deliverables import blocks, consistency
 from src.deliverables import build as build_module
 from src.deliverables.__main__ import main
-from tests.test_deliverables_build import BEFORE, REPO_ROOT, load_json, make_results_root, model_rows, write_raw
+from tests.test_deliverables_build import (BEFORE, REPO_ROOT, hermetic_repo, load_json,  # noqa: F401
+                                           make_results_root, model_rows, write_raw)
 
 DOC_04 = "docs/viva/04-namespaces-seccomp-and-local-inference.md"
 DOC_05 = "docs/viva/05-evaluation-statistics-and-examiner-qa.md"
