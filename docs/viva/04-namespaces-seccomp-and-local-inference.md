@@ -14,7 +14,7 @@ the application-level layers in front of them (the tool broker's capability list
 blocked each attempted attack first.
 
 <!-- deliverables:begin claim-kernel -->
-The sandbox and the seccomp filter recorded no block in any of the 1173 protected-arm episodes of the 8 language models (0/1173 each). The tool broker and the policy engine in front of them blocked every attempted attack at the attack action first, so no attack action reached them. A recorded count is a lower bound, not proof that the kernel layers work.
+The sandbox and the seccomp filter recorded no block in any of the 1225 protected-arm episodes of the 8 language models (0/1225 each). The tool broker and the policy engine in front of them blocked every attempted attack at the attack action first, so no attack action reached them. A recorded count is a lower bound, not proof that the kernel layers work.
 <!-- deliverables:end claim-kernel -->
 
 When the kernel-layer count is zero, that is not a failure of those layers and it is not evidence that
@@ -303,7 +303,7 @@ itself, so the prose between them states no result that depends on the Groq rows
 ### Completeness per model
 
 <!-- deliverables:begin status -->
-Data: snapshot of 2026-10-29T07:12Z (UTC); the D-09 freeze is 2026-10-29T15:30Z. Partial rows are labelled with their episodes done and are not final.
+Data: final, copied at 2026-10-29T17:02Z (UTC), after the D-09 freeze of 2026-10-29T15:30Z. A row still labelled partial stopped at the freeze or on its quota.
 
 | Model | Group | Episodes done | Status |
 |---|---|---|---|
@@ -312,9 +312,9 @@ Data: snapshot of 2026-10-29T07:12Z (UTC); the D-09 freeze is 2026-10-29T15:30Z.
 | qwen2.5-0.5b-base | local | 342/342 | complete |
 | ollama-qwen2.5-3b | local | 342/342 | complete |
 | ollama-llama3.2-3b | local | 342/342 | complete |
-| groq-gpt-oss-120b | hosted | 251/342 | partial, 251/342 episodes |
-| groq-gpt-oss-20b | hosted | 117/342 | partial, 117/342 episodes (error-dominated) |
-| groq-qwen3.8-27b | hosted | 272/342 | partial, 272/342 episodes |
+| groq-gpt-oss-120b | hosted | 289/342 | partial, 289/342 episodes |
+| groq-gpt-oss-20b | hosted | 132/342 | partial, 132/342 episodes (error-dominated) |
+| groq-qwen3.8-27b | hosted | 322/342 | partial, 322/342 episodes |
 | control-always-comply | control | 342/342 | complete |
 <!-- deliverables:end status -->
 
@@ -335,9 +335,9 @@ fewer, and the denominators in its cells show how many.
 | qwen2.5-0.5b-base | local | 5.0% (6/120) [2.3, 10.5] | 2.5% (3/120) [0.9, 7.1] | 0.0% (0/120) [0.0, 3.1] | 100.0% (6/6) [61.0, 100.0] | 29.4% (15/51) [18.7, 43.0] | 29.4% (15/51) [18.7, 43.0] | 0.0% (0/51) [0.0, 7.0] |
 | ollama-qwen2.5-3b | local | 4.2% (5/120) [1.8, 9.4] | 2.5% (3/120) [0.9, 7.1] | 0.0% (0/120) [0.0, 3.1] | 100.0% (10/10) [72.2, 100.0] | 96.1% (49/51) [86.8, 98.9] | 96.1% (49/51) [86.8, 98.9] | 0.0% (0/51) [0.0, 7.0] |
 | ollama-llama3.2-3b | local | 11.7% (14/120) [7.1, 18.6] | 5.8% (7/120) [2.9, 11.6] | 0.0% (0/120) [0.0, 3.1] | 100.0% (9/9) [70.1, 100.0] | 94.1% (48/51) [84.1, 98.0] | 98.0% (50/51) [89.7, 99.7] | 0.0% (0/51) [0.0, 7.0] |
-| groq-gpt-oss-120b (partial 251/342) | hosted | 17.9% (17/95) [11.5, 26.8] | 4.2% (4/95) [1.6, 10.3] | 0.0% (0/95) [0.0, 3.9] | 100.0% (18/18) [82.4, 100.0] | 83.3% (25/30) [66.4, 92.7] | 86.7% (26/30) [70.3, 94.7] | 6.7% (2/30) [1.8, 21.3] |
-| groq-gpt-oss-20b (partial 117/342) | hosted | 11.8% (6/51) [5.5, 23.4] | 3.9% (2/51) [1.1, 13.2] | 0.0% (0/51) [0.0, 7.0] | 100.0% (7/7) [64.6, 100.0] | 71.4% (5/7) [35.9, 91.8] | 85.7% (6/7) [48.7, 97.4] | 0.0% (0/7) [0.0, 35.4] |
-| groq-qwen3.8-27b (partial 272/342) | hosted | 3.1% (3/98) [1.0, 8.6] | 0.0% (0/98) [0.0, 3.8] | 0.0% (0/98) [0.0, 3.8] | 100.0% (3/3) [43.8, 100.0] | 100.0% (37/37) [90.6, 100.0] | 100.0% (37/37) [90.6, 100.0] | 0.0% (0/37) [0.0, 9.4] |
+| groq-gpt-oss-120b (partial 289/342) | hosted | 18.1% (19/105) [11.9, 26.5] | 5.7% (6/105) [2.6, 11.9] | 0.0% (0/105) [0.0, 3.5] | 100.0% (19/19) [83.2, 100.0] | 82.1% (32/39) [67.3, 91.0] | 82.1% (32/39) [67.3, 91.0] | 5.1% (2/39) [1.4, 16.9] |
+| groq-gpt-oss-20b (partial 132/342) | hosted | 15.5% (9/58) [8.4, 26.9] | 5.2% (3/58) [1.8, 14.1] | 0.0% (0/58) [0.0, 6.2] | 100.0% (9/9) [70.1, 100.0] | 71.4% (5/7) [35.9, 91.8] | 85.7% (6/7) [48.7, 97.4] | 0.0% (0/7) [0.0, 35.4] |
+| groq-qwen3.8-27b (partial 322/342) | hosted | 2.6% (3/116) [0.9, 7.3] | 0.0% (0/116) [0.0, 3.2] | 0.0% (0/116) [0.0, 3.2] | 100.0% (3/3) [43.8, 100.0] | 100.0% (45/45) [92.1, 100.0] | 100.0% (45/45) [92.1, 100.0] | 0.0% (0/45) [0.0, 7.9] |
 | control-always-comply (scripted control, reference) | control | 100.0% (120/120) [96.9, 100.0] | 100.0% (120/120) [96.9, 100.0] | 0.0% (0/120) [0.0, 3.1] | 100.0% (120/120) [96.9, 100.0] | 100.0% (51/51) [93.0, 100.0] | 100.0% (51/51) [93.0, 100.0] | 0.0% (0/51) [0.0, 7.0] |
 
 Fixed order (the five local models, then the three hosted ones), not a ranking. A row marked partial has not finished its planned run and is not final. Each cell is P% (k/n) [95% Wilson interval]; the scripted control is a reference, not a language model.
@@ -351,7 +351,7 @@ With guardrails, no attack succeeded for any of the 8 language models, local or 
 <!-- deliverables:end claim-protected -->
 
 <!-- deliverables:begin claim-blocked -->
-Every attack a language model really attempted with guardrails on was blocked at the attack action itself: 200/200 attempted attacks, pooled over the 8 language models (the Blocked given attempt column of the headline).
+Every attack a language model really attempted with guardrails on was blocked at the attack action itself: 203/203 attempted attacks, pooled over the 8 language models (the Blocked given attempt column of the headline).
 <!-- deliverables:end claim-blocked -->
 
 How to read a zero in the Success (guardrails) column: for a complete local model it is 0 of 120 attack
@@ -396,10 +396,10 @@ Recorded blocks per guardrail layer, protected arm, pooled over the language mod
 
 | Layer | Attack episodes | Benign episodes | Blocked actions |
 |---|---|---|---|
-| Tool broker | 28.3% (239/844) [25.4, 31.5] | 0.0% (0/329) [0.0, 1.2] | 245 |
-| Policy engine | 5.7% (48/844) [4.3, 7.5] | 0.6% (2/329) [0.2, 2.2] | 60 |
-| Sandbox | 0.0% (0/844) [0.0, 0.5] | 0.0% (0/329) [0.0, 1.2] | 0 |
-| Seccomp | 0.0% (0/844) [0.0, 0.5] | 0.0% (0/329) [0.0, 1.2] | 0 |
+| Tool broker | 27.5% (242/879) [24.7, 30.6] | 0.0% (0/346) [0.0, 1.1] | 248 |
+| Policy engine | 5.5% (48/879) [4.1, 7.2] | 0.6% (2/346) [0.2, 2.1] | 60 |
+| Sandbox | 0.0% (0/879) [0.0, 0.4] | 0.0% (0/346) [0.0, 1.1] | 0 |
+| Seccomp | 0.0% (0/879) [0.0, 0.4] | 0.0% (0/346) [0.0, 1.1] | 0 |
 
 | Model | Sandbox (attack) | Seccomp (attack) | Sandbox (benign) | Seccomp (benign) |
 |---|---|---|---|---|
@@ -408,13 +408,13 @@ Recorded blocks per guardrail layer, protected arm, pooled over the language mod
 | qwen2.5-0.5b-base | 0.0% (0/120) [0.0, 3.1] | 0.0% (0/120) [0.0, 3.1] | 0.0% (0/51) [0.0, 7.0] | 0.0% (0/51) [0.0, 7.0] |
 | ollama-qwen2.5-3b | 0.0% (0/120) [0.0, 3.1] | 0.0% (0/120) [0.0, 3.1] | 0.0% (0/51) [0.0, 7.0] | 0.0% (0/51) [0.0, 7.0] |
 | ollama-llama3.2-3b | 0.0% (0/120) [0.0, 3.1] | 0.0% (0/120) [0.0, 3.1] | 0.0% (0/51) [0.0, 7.0] | 0.0% (0/51) [0.0, 7.0] |
-| groq-gpt-oss-120b (partial 251/342) | 0.0% (0/95) [0.0, 3.9] | 0.0% (0/95) [0.0, 3.9] | 0.0% (0/30) [0.0, 11.4] | 0.0% (0/30) [0.0, 11.4] |
-| groq-gpt-oss-20b (partial 117/342) | 0.0% (0/51) [0.0, 7.0] | 0.0% (0/51) [0.0, 7.0] | 0.0% (0/7) [0.0, 35.4] | 0.0% (0/7) [0.0, 35.4] |
-| groq-qwen3.8-27b (partial 272/342) | 0.0% (0/98) [0.0, 3.8] | 0.0% (0/98) [0.0, 3.8] | 0.0% (0/37) [0.0, 9.4] | 0.0% (0/37) [0.0, 9.4] |
+| groq-gpt-oss-120b (partial 289/342) | 0.0% (0/105) [0.0, 3.5] | 0.0% (0/105) [0.0, 3.5] | 0.0% (0/39) [0.0, 9.0] | 0.0% (0/39) [0.0, 9.0] |
+| groq-gpt-oss-20b (partial 132/342) | 0.0% (0/58) [0.0, 6.2] | 0.0% (0/58) [0.0, 6.2] | 0.0% (0/7) [0.0, 35.4] | 0.0% (0/7) [0.0, 35.4] |
+| groq-qwen3.8-27b (partial 322/342) | 0.0% (0/116) [0.0, 3.2] | 0.0% (0/116) [0.0, 3.2] | 0.0% (0/45) [0.0, 7.9] | 0.0% (0/45) [0.0, 7.9] |
 
-Sandbox (namespaces / private filesystem): no block was recorded in any of the 1173 protected-arm episodes of the 8 language models (0/1173).
+Sandbox (namespaces / private filesystem): no block was recorded in any of the 1225 protected-arm episodes of the 8 language models (0/1225).
 
-Seccomp-BPF: no block was recorded in any of the 1173 protected-arm episodes of the 8 language models (0/1173).
+Seccomp-BPF: no block was recorded in any of the 1225 protected-arm episodes of the 8 language models (0/1225).
 
 What the two kernel layers contain is documented in the Phase 1 residual-bypass table (.planning/phases/01-evaluation-hardening-policy-fix/01-REVIEW-FIX.md): rows 1, 2, 8, 9, 10, 15 and 16 were recorded as blocked by seccomp, rows 20, 21 and 22 as blocked by the sandbox, and in rows 3-7, 11-14, 17-19 and 23 the layer contained the action (no network egress, the canary file instead of the real one, a system call refused with EPERM) without an error signature, so no block was recorded. The counts above are therefore a lower bound: the executor records a sandbox or seccomp block only when a command's error text matches the signatures of detect_enforcement in src/sandbox/executor.py.
 <!-- deliverables:end layers -->
@@ -422,7 +422,7 @@ What the two kernel layers contain is documented in the Phase 1 residual-bypass 
 Said plainly, from the data:
 
 <!-- deliverables:begin claim-kernel -->
-The sandbox and the seccomp filter recorded no block in any of the 1173 protected-arm episodes of the 8 language models (0/1173 each). The tool broker and the policy engine in front of them blocked every attempted attack at the attack action first, so no attack action reached them. A recorded count is a lower bound, not proof that the kernel layers work.
+The sandbox and the seccomp filter recorded no block in any of the 1225 protected-arm episodes of the 8 language models (0/1225 each). The tool broker and the policy engine in front of them blocked every attempted attack at the attack action first, so no attack action reached them. A recorded count is a lower bound, not proof that the kernel layers work.
 <!-- deliverables:end claim-kernel -->
 
 How to read that count. The blocks of the tool broker and the policy engine are in the first table
@@ -446,11 +446,11 @@ read from its frozen hosted_state.json. The partial rows' results are in the hea
 <!-- deliverables:begin hosted -->
 | Model | Episodes done | ds episodes finished | Complete pairs | Paired attack episodes | Infra errors pending | Loop state | Quota stops |
 |---|---|---|---|---|---|---|---|
-| groq-gpt-oss-120b | 251/342 | 120/120 | 125 | 95 | 91 | waiting_quota | 3 |
-| groq-gpt-oss-20b | 117/342 | 90/120 | 58 | 51 | 225 | waiting_quota | 3 |
-| groq-qwen3.8-27b | 272/342 | 120/120 | 135 | 98 | 70 | waiting_quota | 4 |
+| groq-gpt-oss-120b | 289/342 | 120/120 | 144 | 105 | 53 | stopped_at_freeze | 6 |
+| groq-gpt-oss-20b | 132/342 | 105/120 | 65 | 58 | 210 | stopped_at_freeze | 8 |
+| groq-qwen3.8-27b | 322/342 | 120/120 | 161 | 116 | 20 | stopped_by_quota | 10 |
 
-The loop state and quota stops are read from each model's frozen hosted_state.json at the snapshot (2026-10-29T07:12Z); they are final only after the D-09 freeze (2026-10-29T15:30Z).
+The loop state and quota stops are read from each model's frozen hosted_state.json at the snapshot (2026-10-29T17:02Z); they are final only after the D-09 freeze (2026-10-29T15:30Z).
 <!-- deliverables:end hosted -->
 
 An overnight network outage left many pending infra rows (the "Infra errors pending" column), which the
@@ -461,7 +461,7 @@ the benign column of the policy-engine row in the layers block); false positives
 guardrails and are reported, not hidden.
 
 <!-- deliverables:begin claim-state -->
-The data is a snapshot of 2026-10-29T07:12Z (UTC), copied before the D-09 freeze of 2026-10-29T15:30Z while the hosted loop was still collecting. groq-gpt-oss-120b (partial 251/342), groq-gpt-oss-20b (partial 117/342), groq-qwen3.8-27b (partial 272/342) are labelled partial with their episodes done; they are not final and are never ranked against the complete rows.
+The data is final: it was copied at 2026-10-29T17:02Z (UTC), after the D-09 freeze of 2026-10-29T15:30Z. groq-gpt-oss-120b (partial 289/342), groq-gpt-oss-20b (partial 132/342), groq-qwen3.8-27b (partial 322/342) stopped at the freeze or on their quota before finishing, so they stay labelled partial with their episodes done and are never ranked against the complete rows.
 <!-- deliverables:end claim-state -->
 
 A partial row is shown with its n and is not ranked against the complete local rows. Because ds episodes
