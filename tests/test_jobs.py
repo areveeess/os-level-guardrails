@@ -770,6 +770,35 @@ def test_local_does_not_relaunch_after_a_freeze_stop(clock, tmp_path, monkeypatc
     assert "[local] freeze scratch-gpt: stopped at the freeze, not relaunched (D-09)" in capsys.readouterr().out
 
 
+# WR-04: a finished model whose rows have a provenance problem (here: the policy file changed after the run)
+DRIFTED = {"finished": 342, "expected": 342, "pending_infra": 0,
+           "problems": ["342 row(s) with a policy_sha256 other than 0123456789ab (the current policy)"],
+           "provenance": ["342 row(s) with a policy_sha256 other than 0123456789ab (the current policy)"]}
+
+
+def test_is_complete_gates_on_progress_not_on_provenance(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs, "model_status", lambda d, m: dict(DRIFTED))
+    assert jobs.is_complete(str(tmp_path), "scratch-gpt") is True
+    assert jobs.provenance_problems(str(tmp_path), "scratch-gpt") == DRIFTED["provenance"]
+    monkeypatch.setattr(jobs, "model_status", lambda d, m: dict(DRIFTED, finished=341, pending_infra=1))
+    assert jobs.is_complete(str(tmp_path), "scratch-gpt") is False
+    assert jobs.is_complete(str(tmp_path / "missing"), "scratch-gpt") is False
+
+
+def test_local_skips_a_finished_model_with_provenance_drift_and_names_the_problem(clock, tmp_path, monkeypatch,
+                                                                                 capsys):
+    calls = []
+    monkeypatch.setattr(jobs, "run", lambda *a, **k: calls.append(a) or 0)
+    monkeypatch.setattr(jobs, "model_status", lambda d, m: dict(DRIFTED))
+    prefix = str(tmp_path / "p")
+    os.makedirs(f"{prefix}-scratch-gpt")
+    jobs.local_queue(prefix, ["scratch-gpt"], jobs_dir=str(tmp_path / "jobs"))
+    out = capsys.readouterr().out
+    assert calls == [] and "[local] skip scratch-gpt: complete" in out
+    assert "PROVENANCE FAIL scratch-gpt: 342 row(s) with a policy_sha256 other than" in out
+    assert "LOCAL done: 1/1 complete" in out
+
+
 class FakeChild:
     def __init__(self, world, pid=9001):
         self.world, self.pid = world, pid
@@ -959,6 +988,18 @@ def test_status_all_complete_and_freeze_passed(status_world, monkeypatch, capsys
     assert jobs.status(w.prefix, ["scratch-gpt"]) == "all-complete"
     out = capsys.readouterr().out
     assert "FREEZE passed" in out and "STATUS all-complete" in out
+
+
+def test_status_prints_provenance_separately_from_progress(status_world, monkeypatch, capsys):
+    """WR-04: a finished model with a provenance problem is complete for the schedulers; the problem gets its own
+    PROVENANCE FAIL line instead of hiding behind an unfinished-looking status."""
+    w = status_world
+    del w.procs[700]
+    monkeypatch.setattr(jobs, "model_status", lambda d, m: dict(DRIFTED))
+    assert jobs.status(w.prefix, ["scratch-gpt"]) == "all-complete"
+    out = capsys.readouterr().out
+    assert "MODEL scratch-gpt finished 342/342 pending_infra 0" in out
+    assert "PROVENANCE FAIL scratch-gpt: 342 row(s) with a policy_sha256 other than" in out
 
 
 def test_status_wait_returns_early_when_a_done_marker_appears(status_world, monkeypatch, capsys):
@@ -1196,6 +1237,26 @@ def test_hosted_refuses_the_superseded_october_directory(clock, tmp_path, monkey
         assert jobs.hosted_loop(prefix, [GROQ], jobs_dir=str(tmp_path / "jobs")) == 1
     assert hw.spawned == [] and "superseded" in capsys.readouterr().out
     assert not os.path.exists(tmp_path / "jobs" / "stopping_rule.json")
+
+
+def test_hosted_finished_model_with_provenance_drift_is_terminal_not_relaunched(clock, tmp_path, monkeypatch,
+                                                                                capsys):
+    """WR-04: 342 finished but a provenance problem. Old gate: relaunched every 10 min until `stalled`. Now the
+    model ends complete_with_problems after its one launch and the reason is logged."""
+    real_is_complete = jobs.is_complete
+    hw = HostedWorld(clock, monkeypatch, {GROQ: [{"gain": 342}, {"gain": 0}, {"gain": 0}, {"gain": 0}]})
+    monkeypatch.setattr(jobs, "is_complete", real_is_complete)       # the real gate over the faked status
+    monkeypatch.setattr(jobs, "model_status", lambda d, m: dict(DRIFTED) if hw.finished[m] >= 342
+                        else hw.status(d, m))
+    _hosted(clock, tmp_path)
+    assert len(hw.spawned) == 1
+    st = _state(str(tmp_path / "p4"))
+    assert st["state"] == "complete_with_problems" and st["launches"][0]["stop_reason"] == "complete_with_problems"
+    out = capsys.readouterr().out
+    assert f"PROVENANCE FAIL {GROQ}: 342 row(s) with a policy_sha256 other than" in out
+    assert "HOSTED done: 1/1 complete" in out
+    _hosted(clock, tmp_path)                                         # terminal across a restart: no relaunch
+    assert len(hw.spawned) == 1
 
 
 def test_hosted_refuses_a_second_instance(clock, tmp_path, monkeypatch, capsys):

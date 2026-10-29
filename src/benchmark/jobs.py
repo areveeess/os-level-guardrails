@@ -1013,11 +1013,21 @@ def model_status(out_dir: str, model: str) -> dict:
 
 
 def is_complete(out_dir: str, model: str) -> bool:
-    """Every expected episode finished and no provenance problem (the skip rule of the queue)."""
+    """Every expected episode finished and no infra-errored key left (the skip rule of the queues). A provenance
+    problem does not reopen a finished model: relaunching cannot fix it, so it is reported (provenance_problems,
+    PROVENANCE lines) and still fails the strict `run_checks complete` (WR-04)."""
+    from src.benchmark.run_checks import progress_complete  # lazy: run_checks imports this module
     if not os.path.isdir(out_dir):
         return False
-    st = model_status(out_dir, model)
-    return st.get("expected") is not None and st.get("finished") == st.get("expected") and not st.get("problems")
+    return progress_complete(model_status(out_dir, model))
+
+
+def provenance_problems(out_dir: str, model: str) -> list:
+    """The problems of complete_status a relaunch cannot fix (stamps, policy, resolved model, commit drift,
+    duplicates); empty when there is no directory."""
+    if not os.path.isdir(out_dir):
+        return []
+    return list(model_status(out_dir, model).get("provenance") or [])
 
 
 def local_queue(prefix: str, models: Optional[list] = None, smoke: bool = False,
@@ -1048,6 +1058,8 @@ def local_queue(prefix: str, models: Optional[list] = None, smoke: bool = False,
             out = model_dir(prefix, model)
             if is_complete(out, model):
                 say(f"[local] skip {model}: complete")
+                for problem in provenance_problems(out, model):
+                    say(f"PROVENANCE FAIL {model}: {problem}")
                 complete += 1
                 continue
             launches = 0
@@ -1068,6 +1080,8 @@ def local_queue(prefix: str, models: Optional[list] = None, smoke: bool = False,
                 say(f"[local] {model} done {code}")
                 if is_complete(out, model):
                     say(f"[local] complete {model}")
+                    for problem in provenance_problems(out, model):
+                        say(f"PROVENANCE FAIL {model}: {problem}")
                     complete += 1
                     break
                 if code == DONE_FREEZE:
@@ -1127,7 +1141,10 @@ def _status_models(prefix: str) -> list:
 
 def status(prefix: str, models: Optional[list] = None, wait_s: float = 0) -> str:
     """Print one line per model, the keep-awake WARN / quota WAIT lines, the time to the freeze and one STATUS
-    line; return the STATUS word. Only reads (files and /proc): it never starts, changes or signals anything."""
+    line; return the STATUS word. Only reads (files and /proc): it never starts, changes or signals anything.
+    all-complete is about progress (every model finished, no infra key left); a provenance problem of a model
+    is printed as its own "PROVENANCE FAIL <model>: <reason>" line (WR-04)."""
+    from src.benchmark.run_checks import progress_complete  # lazy: run_checks imports this module
     models = list(models or _status_models(prefix))
     wait_s = max(0.0, min(float(wait_s or 0), STATUS_WAIT_CAP_S))
     if wait_s:
@@ -1148,13 +1165,14 @@ def status(prefix: str, models: Optional[list] = None, wait_s: float = 0) -> str
         alive = child is not None
         any_alive = any_alive or alive
         done = _done_code(out) if exists else None
-        complete = (st.get("expected") is not None and st.get("finished") == st.get("expected")
-                    and not st.get("problems"))
+        complete = exists and progress_complete(st)       # WR-04: progress only; provenance printed below
         all_complete = all_complete and complete
         any_data = any_data or (exists and (os.path.exists(os.path.join(out, "raw.jsonl")) or done is not None))
         expected = st.get("expected") if st.get("expected") is not None else "-"
         print(f"MODEL {model} finished {st.get('finished', 0)}/{expected} pending_infra {st.get('pending_infra', 0)} "
               f"done {done or '-'} alive {'yes' if alive else 'no'}")
+        for problem in st.get("provenance") or []:
+            print(f"PROVENANCE FAIL {model}: {problem}")
         if exists:
             print(f"  last: {_last_line(os.path.join(out, 'progress.log'))[:200]}")
         hosted = _read_json_file(os.path.join(out, "hosted_state.json")) if exists else None
@@ -1219,7 +1237,10 @@ def report(prefix: str, out_dir: str) -> int:
 # ── Hosted re-run under the D-09 stopping rule (D-02, D-08) ──
 
 HOSTED_MODELS = ("groq-gpt-oss-120b", "groq-gpt-oss-20b", "groq-qwen3.8-27b")
-HOSTED_TERMINAL = ("complete", "stopped_by_quota", "stopped_at_freeze", "stalled", "unavailable")
+# complete_with_problems (WR-04): every episode finished, but complete_status names a provenance problem (policy
+# drift, run-affecting commit drift, a second resolved model, ...). Relaunching cannot fix that, so it is terminal.
+HOSTED_COMPLETE = ("complete", "complete_with_problems")
+HOSTED_TERMINAL = HOSTED_COMPLETE + ("stopped_by_quota", "stopped_at_freeze", "stalled", "unavailable")
 HOSTED_EXPECTED = 342
 QUOTA_MARGIN_S = 120            # after a stated retry time, so the quota has really reset
 QUOTA_DEFAULT_WAIT_S = 3600     # a quota stop that states no retry time
@@ -1395,6 +1416,13 @@ def hosted_loop(prefix: str, models: Optional[list] = None, jobs_dir: str = DEFA
         procs[model] = (proc, record, offset, before)
         say(f"[hosted] launch {model} #{len(st['launches'])} pid {proc.pid}")
 
+    def completed_state(model: str) -> str:
+        """complete, or complete_with_problems (each provenance problem logged as a PROVENANCE FAIL line); WR-04."""
+        problems = provenance_problems(dirs[model], model)
+        for problem in problems:
+            say(f"PROVENANCE FAIL {model}: {problem}")
+        return "complete_with_problems" if problems else "complete"
+
     def finish(model: str, code: int) -> None:
         proc, record, offset, before = procs.pop(model)
         out, st, now = dirs[model], states[model], _now()
@@ -1404,7 +1432,7 @@ def hosted_loop(prefix: str, models: Optional[list] = None, jobs_dir: str = DEFA
         record.update(end=_utc_now(), exit=code, new_finished=after - before, quota_stop=quota,
                       stated_retry_s=retry_s)
         if is_complete(out, model):
-            st["state"], record["stop_reason"] = "complete", "complete"
+            st["state"] = record["stop_reason"] = completed_state(model)
         elif quota:
             next_launch = now + datetime.timedelta(seconds=(retry_s + QUOTA_MARGIN_S) if retry_s is not None
                                                    else QUOTA_DEFAULT_WAIT_S)
@@ -1463,9 +1491,9 @@ def hosted_loop(prefix: str, models: Optional[list] = None, jobs_dir: str = DEFA
             if find_bench_child(dirs[model]) is not None:
                 continue          # a run this loop did not start is already on the directory: never a duplicate
             if is_complete(dirs[model], model):
-                st["state"] = "complete"
+                st["state"] = completed_state(model)
                 write_hosted_state(dirs[model], st)
-                say(f"[hosted] skip {model}: complete")
+                say(f"[hosted] skip {model}: {st['state']}")
                 continue
             launch(model)
         if not procs and all(states[m]["state"] in HOSTED_TERMINAL for m in models):
@@ -1480,7 +1508,7 @@ def hosted_loop(prefix: str, models: Optional[list] = None, jobs_dir: str = DEFA
     for model in models:
         st = states[model]
         say(f"[hosted] {model} state {st['state']} finished {_finished(dirs[model], model)}/{HOSTED_EXPECTED}")
-    say(f"HOSTED done: {sum(1 for m in models if states[m]['state'] == 'complete')}/{len(models)} complete")
+    say(f"HOSTED done: {sum(1 for m in models if states[m]['state'] in HOSTED_COMPLETE)}/{len(models)} complete")
     return 0
 
 

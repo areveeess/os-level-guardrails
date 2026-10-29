@@ -107,11 +107,15 @@ def complete_status(results_dir: str, model: str, expect: Optional[int] = None) 
 
     finished = (model, case, run, arm) keys whose best record (report.load_rows) is not an llm_error;
     pending_infra = keys whose only records are infrastructure errors (a resume re-runs them).
-    problems lists every reason the directory is not a complete, single-engine run."""
+    problems lists every reason the directory is not a complete, single-engine run (the strict
+    `run_checks complete` verdict). provenance is the subset a relaunch cannot fix (duplicates, stamps,
+    policy, resolved model, run-affecting commit drift): the schedulers gate on progress_complete and
+    report these separately instead of relaunching a finished model (WR-04)."""
     raw_path = os.path.join(results_dir, "raw.jsonl")
     status = {"model": model, "finished": 0, "expected": expect, "pending_infra": 0, "duplicate_finished": 0,
-              "policy": None, "commits": [], "resolved": [], "problems": []}
+              "policy": None, "commits": [], "resolved": [], "problems": [], "provenance": []}
     problems = status["problems"]
+    progress_problems = []      # the reasons a relaunch can fix; everything else in problems is provenance
     if expect is None:
         manifest = read_manifest(results_dir) or {}
         value = manifest.get("expected_episodes_per_model")
@@ -133,9 +137,10 @@ def complete_status(results_dir: str, model: str, expect: Optional[int] = None) 
         problems.append(f"{len(dups)} key(s) finished more than once (a resume duplicated an episode): {sample}")
 
     if status["expected"] is None:
-        problems.append("expected episode count unknown (no --expect and no manifest.json)")
+        progress_problems.append("expected episode count unknown (no --expect and no manifest.json)")
     elif status["finished"] < status["expected"]:
-        problems.append(f"finished {status['finished']} below expected {status['expected']}")
+        progress_problems.append(f"finished {status['finished']} below expected {status['expected']}")
+    problems.extend(progress_problems)
 
     try:
         cfg = load_model_config()["models"].get(model)
@@ -176,7 +181,17 @@ def complete_status(results_dir: str, model: str, expect: Optional[int] = None) 
         elif changed:
             problems.append(f"run-affecting files differ between code commits {commits[0][:12]} and {other[:12]}: "
                             f"{', '.join(changed[:5])}")
+    status["provenance"] = [p for p in problems if p not in progress_problems]
     return status
+
+
+def progress_complete(status: dict) -> bool:
+    """The scheduling gate of the local queue and the hosted loop (WR-04): every expected episode finished and
+    no infra-errored key left to re-run. Provenance problems do not reopen a finished model (a relaunch cannot
+    fix them); they are reported as PROVENANCE lines and still fail the strict `run_checks complete`."""
+    expected = status.get("expected")
+    return (expected is not None and (status.get("finished") or 0) >= expected
+            and not status.get("pending_infra"))
 
 
 def check_complete(results_dir: str, model: str, expect: Optional[int] = None,
@@ -478,13 +493,19 @@ def check_hosted(prefix: str, models: Optional[list] = None, jobs_dir: str = DEF
         st = state.get("state")
         is_terminal = st in jobs.HOSTED_TERMINAL
         terminal = terminal and is_terminal
-        label = "complete" if st == "complete" and n >= HOSTED_EXPECTED else f"partial n={n} ds n={ds_done}"
+        marked_complete = st in ("complete", "complete_with_problems")
+        label = "complete" if marked_complete and n >= HOSTED_EXPECTED else f"partial n={n} ds n={ds_done}"
+        if st == "complete_with_problems":
+            label += " (provenance problems: see run_checks complete)"
         if past and not is_terminal and not alive:
             label += " (stopped at the freeze)"
         print(f"HOSTED {model} state {st} finished {n}/{HOSTED_EXPECTED} ds {ds_done}/{HOSTED_DS_EXPECTED} "
               f"quota_stops {len(stops)} [{stop_text}] label {label}")
-        if st == "complete" and n < HOSTED_EXPECTED:
+        if marked_complete and n < HOSTED_EXPECTED:
             problems.append(f"{model} is marked complete with {n} finished episodes, below {HOSTED_EXPECTED}")
+        if st == "complete_with_problems":
+            problems.append(f"{model} finished its episodes but has provenance problems (WR-04; run: python -m "
+                            f"src.benchmark.run_checks complete --results {out} --model {model})")
         if ds_done + ds_pending < min(n, HOSTED_DS_EXPECTED):
             problems.append(f"{model}: ds-first violated (ds finished {ds_done} + pending ds {ds_pending} below "
                             f"min({n}, {HOSTED_DS_EXPECTED}))")

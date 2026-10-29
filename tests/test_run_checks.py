@@ -132,6 +132,29 @@ def test_run_affecting_commit_difference_fails(tmp_path, monkeypatch):
     assert any("run-affecting files differ" in p and "runner.py" in p for p in problems)
 
 
+def test_provenance_problems_are_separate_from_progress(tmp_path, monkeypatch):
+    """WR-04: policy or commit drift on a finished directory stays a strict FAIL but is listed under provenance,
+    and progress_complete (the schedulers' gate) is true; a missing key is a progress problem, not provenance."""
+    rows = _six()
+    rows[2]["policy_sha256"] = "0" * 64
+    rows[5]["code_commit"] = COMMIT_B
+    monkeypatch.setattr(run_checks, "_git_diff_names", lambda a, b: ["src/llm/registry.py"])
+    status = run_checks.complete_status(_write(tmp_path, rows), MODEL, 6)
+    assert run_checks.progress_complete(status) is True
+    assert len(status["provenance"]) == 2 and status["provenance"] == status["problems"]
+    assert any("policy_sha256" in p for p in status["provenance"])
+    assert any("run-affecting files differ" in p for p in status["provenance"])
+    status = run_checks.complete_status(_write(tmp_path, _six()[:5]), MODEL, 6)
+    assert run_checks.progress_complete(status) is False
+    assert status["provenance"] == [] and status["problems"] == ["finished 5 below expected 6"]
+
+
+def test_progress_complete_needs_no_pending_infra_and_a_known_expected():
+    assert run_checks.progress_complete({"finished": 6, "expected": 6, "pending_infra": 0}) is True
+    assert run_checks.progress_complete({"finished": 6, "expected": 6, "pending_infra": 1}) is False
+    assert run_checks.progress_complete({"finished": 6, "expected": None, "pending_infra": 0}) is False
+
+
 def test_commit_difference_outside_run_paths_passes(tmp_path):
     rows = _six()
     rows[5]["code_commit"] = COMMIT_B      # fake git diff (autouse) reports no run-affecting change
@@ -428,6 +451,18 @@ def test_hosted_fails_on_complete_below_342(hosted_env, capsys):
     _hosted_dir(prefix, ds=120, other=100, state="complete")
     assert _hosted_main(prefix, jobs_dir) == 1
     assert "FAIL hosted" in capsys.readouterr().out
+
+
+def test_hosted_complete_with_problems_is_terminal_complete_and_fails(hosted_env, capsys):
+    """WR-04: the hosted loop marks a finished model with provenance drift complete_with_problems; the check
+    labels it complete, counts it terminal and names the provenance problem as a FAIL."""
+    prefix, jobs_dir, _ = hosted_env
+    _hosted_dir(prefix, ds=120, other=222, state="complete_with_problems")
+    problems, word = run_checks.check_hosted(prefix, [GROQ], jobs_dir)
+    assert word == "hosted-terminal-ok" and len(problems) == 1 and "provenance problems (WR-04" in problems[0]
+    assert "label complete (provenance problems: see run_checks complete)" in capsys.readouterr().out
+    assert _hosted_main(prefix, jobs_dir) == 1
+    assert "FAIL hosted: groq-gpt-oss-20b finished its episodes but has provenance problems" in capsys.readouterr().out
 
 
 def test_hosted_fails_on_a_ds_first_violation(hosted_env, capsys):
