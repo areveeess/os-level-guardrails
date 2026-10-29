@@ -47,7 +47,7 @@
 - [x] **DOC-01**: One script regenerates a cross-model comparison report from a single frozen results directory: headline table, confounds table (size, quantization, local/hosted, context), where-blocked-by-layer table, and threats-to-validity section
 - [x] **DOC-02**: The report includes static charts: ASR with CIs per model, capability-vs-vulnerability scatter, and utility-vs-ASR arrow plot (unprotected → protected)
 - [ ] **DOC-03**: `docs/viva/` contains theory notes for every component — OS security (reference monitor, access matrix, capabilities, namespaces, seccomp-bpf), LLM foundations (transformers, training, LoRA, decoding), prompt injection and defenses, evaluation statistics — plus likely viva questions with answers; each phase adds its page
-- [ ] **DOC-04**: README and the IEEE 1016 SDD describe the multi-LLM + local-model system and its results (no longer Gemini-only)
+- [x] **DOC-04**: README and the IEEE 1016 SDD describe the multi-LLM + local-model system and its results (no longer Gemini-only)
 - [ ] **DOC-05**: A Review-3 slide deck presents the reviewer remark, the local models, and the comparison results
 
 ## v2 Requirements
@@ -108,7 +108,7 @@
 | DOC-01 | Phase 5 | Complete |
 | DOC-02 | Phase 5 | Complete |
 | DOC-03 | Phase 5 | Pending |
-| DOC-04 | Phase 5 | Pending |
+| DOC-04 | Phase 5 | Complete |
 | DOC-05 | Phase 5 | Pending |
 
 DOC-03 note: traced to Phase 5 (where the set is completed and the examiner Q&A is written), but each of Phases 1-4 lists adding its own `docs/viva/` page as a success criterion.

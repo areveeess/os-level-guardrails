@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 4
 current_phase_name: Full Runs - Local, Added Ollama, Hosted Resume
 status: verifying
-stopped_at: Completed 05-01-PLAN.md
-last_updated: "2026-10-29T07:55:36.625Z"
+stopped_at: Completed 05-02-PLAN.md
+last_updated: "2026-10-29T08:07:20.211Z"
 last_activity: 2026-10-29
 last_activity_desc: "Phase 4 executed (5/5 plans), awaiting review; Groq final regeneration after the 15:30 UTC freeze pending"
-state_head: 6134a0c7ae4e2c8b9cfbede6ce6e4c3ed9c8d1cb
+state_head: 6a8948c6891b37df599c307ea1a595bba7ef7901
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 21
-  completed_plans: 18
+  completed_plans: 19
   percent: 40
 ---
 
@@ -75,6 +75,7 @@ Progress: [████░░░░░░] 40% (Phases 1-2 complete; Phases 3-4 
 | Phase 04 P02 | 8min | 3 tasks | 3 files |
 | Phase 04 P04 | 1h05m | 3 tasks | 4 files |
 | Phase 05 P01 | 50min | 3 tasks | 11 files |
+| Phase 05 P02 | 15min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -120,6 +121,7 @@ Recent decisions affecting current work:
 - [Phase 05]: 05-01: numbers.json is computed before the report; the build fails if generate_report's summary differs from it
 - [Phase 05]: 05-01: constant pins (FREEZE_UTC, HOSTED_DS_EXPECTED, SECRET_RE, DEFAULT_MAX_CONTEXT_TOKENS) read the source with ast, so nothing imports jobs/run_checks/src.llm
 - [Phase 05]: 05-01: unscoped deliverables check fails on viva page 04 until plan 05-03 (expected baseline); use --doc README.md --doc docs/SDD.md meanwhile
+- [Phase 05]: 05-02: README and SDD quote result numbers only through generated blocks; SDD 3.0 adds 5.13-5.15, 7.3 (9 blocks) and Appendix C; SDD PDF/DOCX export is a manual step (needs network)
 
 ### Pending Todos
 
@@ -155,6 +157,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-29T07:55:35.387Z
-Stopped at: Completed 05-01-PLAN.md
+Last session: 2026-10-29T08:07:18.991Z
+Stopped at: Completed 05-02-PLAN.md
 Resume file: None
