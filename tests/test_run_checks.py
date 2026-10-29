@@ -472,3 +472,108 @@ def test_secret_scan_reads_only_the_given_paths(tmp_path, capsys):
     (tmp_path / "inside" / "ok.txt").write_text("fine\n")
     assert run_checks.main(["secret-scan", "--paths", str(tmp_path / "inside")]) == 0
     assert "secret-scan-ok files 1" in capsys.readouterr().out
+
+
+# ── viva (plan 04-04) ──
+
+VIVA_MODELS = (("local-model-a", "hf_local"), ("hosted-model-b", "openai_compat"))
+VIVA_CONTROL = "control-always-comply"
+
+
+def _viva_report(tmp_path):
+    """A real summary.csv written by generate_report from synthetic rows: model a complete (6/6), model b
+    partial (4/6) and the scripted control (6/6, must not be required on the page)."""
+    from src.benchmark.report import generate_report
+    from tests.test_report import make_row, write_raw
+    rows = []
+    for model, provider in VIVA_MODELS + ((VIVA_CONTROL, "scripted"),):
+        cases = ("dh-00", "ds-01", "benign-02") if model != "hosted-model-b" else ("dh-00", "ds-01")
+        for case in cases:
+            for arm in ("unprotected", "protected"):
+                rows.append(make_row(model, case, 0, arm, case.split("-")[0], provider=provider))
+    src = write_raw(tmp_path / "raw", rows)
+    out = str(tmp_path / "report")
+    generate_report(out, charts=False, sources=[src], expected=6)
+    return tmp_path / "report" / "summary.csv"
+
+
+def _viva_page(tmp_path, drop=None, extra=""):
+    parts = {h: f"{h} — section\n\ntext\n" for h in run_checks.VIVA_HEADINGS}
+    if drop in parts:
+        del parts[drop]
+    glossary = "".join(f"- **Term {i}**: meaning {i}.\n" for i in range(30))
+    questions = "".join(f"**Q{i}. Question {i}?**\nAnswer {i}.\n\n" for i in range(1, 17))
+    table = "| Model | Episodes done |\n|---|---|\n"
+    for model, count in (("local-model-a", "6/6"), ("hosted-model-b", "4/6")):
+        if model != drop:
+            table += f"| {model} | {count} |\n"
+    page = "# Viva notes 4\n\n" + glossary + "\n" + "\n".join(parts.values()) + table + "\n" + questions + extra
+    path = tmp_path / run_checks.VIVA_PAGE_NAME
+    path.write_text(page, encoding="utf-8")
+    return path
+
+
+def _viva_readme(tmp_path, status="written (Phase 4)"):
+    path = tmp_path / "README.md"
+    path.write_text(f"| Page | Topics | Phase | Status |\n|---|---|---|---|\n"
+                    f"| [{run_checks.VIVA_PAGE_NAME}]({run_checks.VIVA_PAGE_NAME}) | namespaces | Phase 4 | {status} |\n"
+                    f"| 05 Examiner Q&A | final | Phase 5 | planned (Phase 5) |\n", encoding="utf-8")
+    return path
+
+
+def _viva(page, csv_path, readme):
+    return run_checks.main(["viva", "--page", str(page), "--report-csv", str(csv_path), "--readme", str(readme)])
+
+
+def test_viva_end_to_end_on_a_generated_summary_csv(tmp_path, capsys):
+    csv_path = _viva_report(tmp_path)
+    header = csv_path.read_text(encoding="utf-8").splitlines()[0].split(",")
+    assert "episodes_done" in header and "episodes_expected" in header
+    assert _viva(_viva_page(tmp_path), csv_path, _viva_readme(tmp_path)) == 0
+    assert capsys.readouterr().out.strip() == "viva-numbers-ok"
+
+
+def test_viva_fails_on_a_missing_heading(tmp_path, capsys):
+    csv_path = _viva_report(tmp_path)
+    assert _viva(_viva_page(tmp_path, drop="## Part C"), csv_path, _viva_readme(tmp_path)) == 1
+    assert "FAIL viva: heading '## Part C' is missing" in capsys.readouterr().out
+
+
+def test_viva_fails_on_a_missing_model_count(tmp_path, capsys):
+    csv_path = _viva_report(tmp_path)
+    assert _viva(_viva_page(tmp_path, drop="hosted-model-b"), csv_path, _viva_readme(tmp_path)) == 1
+    out = capsys.readouterr().out
+    assert "FAIL viva: the page does not name model hosted-model-b" in out
+    assert "local-model-a" not in out and VIVA_CONTROL not in out
+
+
+def test_viva_fails_when_the_count_is_on_another_models_line(tmp_path, capsys):
+    csv_path = _viva_report(tmp_path)
+    page = _viva_page(tmp_path)
+    page.write_text(page.read_text(encoding="utf-8").replace("| hosted-model-b | 4/6 |", "| hosted-model-b | 5/6 |"),
+                    encoding="utf-8")
+    assert _viva(page, csv_path, _viva_readme(tmp_path)) == 1
+    assert "FAIL viva: the page does not quote hosted-model-b with 4/6 on one line" in capsys.readouterr().out
+
+
+def test_viva_fails_on_a_planted_key_shaped_string_and_never_prints_it(tmp_path, capsys):
+    csv_path = _viva_report(tmp_path)
+    fake = "gsk" + "_" + "Qx7" * 8                      # built at runtime: no key-shaped literal in this file
+    assert _viva(_viva_page(tmp_path, extra="note " + fake + "\n"), csv_path, _viva_readme(tmp_path)) == 1
+    out = capsys.readouterr().out
+    assert "FAIL viva: key-shaped text found at" in out
+    assert fake not in out and "Qx7Qx7" not in out
+
+
+def test_viva_fails_without_the_readme_row(tmp_path, capsys):
+    csv_path = _viva_report(tmp_path)
+    assert _viva(_viva_page(tmp_path), csv_path, _viva_readme(tmp_path, status="planned (Phase 4)")) == 1
+    assert "FAIL viva: the README has no row linking" in capsys.readouterr().out
+
+
+def test_viva_fails_on_a_csv_without_the_count_columns(tmp_path, capsys):
+    old = tmp_path / "old_summary.csv"                  # the shape of a pre-Phase-1 report
+    old.write_text("model,family,provider,status\nlocal-model-a,fam,hf_local,complete\n", encoding="utf-8")
+    assert _viva(_viva_page(tmp_path), old, _viva_readme(tmp_path)) == 1
+    assert ("FAIL viva: summary.csv lacks episodes_done/episodes_expected (not a current-engine report)"
+            in capsys.readouterr().out)

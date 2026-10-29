@@ -12,6 +12,13 @@ verifier never has to read raw.jsonl by eye:
   python -m src.benchmark.run_checks ollama-evidence --results DIR --model M [--jobs-dir D]
   python -m src.benchmark.run_checks hosted --prefix P [--models a,b] [--jobs-dir D]
   python -m src.benchmark.run_checks secret-scan --paths P1 P2 ...
+  python -m src.benchmark.run_checks viva --page PAGE --report-csv SUMMARY_CSV --readme README
+
+viva checks the Phase 4 viva page: the Part A-D and Limits headings, at least 16 "**Q"
+questions and 30 "- **" glossary lines, no key-like text, every language-model row of
+the report's summary.csv quoted on one line as "<model> ... <episodes_done>/
+<episodes_expected>" (read from the summary.csv columns of those names, so the page
+cannot drift from the report), and the README row linking the page as written.
 
 hosted labels each Groq model complete or "partial n=F ds n=K" and prints
 hosted-terminal-ok or hosted-running (D-09). secret-scan searches only the given paths
@@ -30,6 +37,7 @@ git history; they never change a stored row.
 """
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -40,9 +48,10 @@ from collections import Counter
 from typing import Optional
 
 from src.benchmark.outcomes import classify_llm_error, classify_outcome
-from src.benchmark.report import load_rows, read_manifest
+from src.benchmark.report import CONTROL_PROVIDER, load_rows, read_manifest
 from src.benchmark.scoring import SCORING_VERSION
 from src.llm.registry import PROJECT_ROOT, load_model_config
+from src.qwen_lora.checks import SECRET_PATTERNS
 
 POLICY_FILE = os.path.join(PROJECT_ROOT, "src", "policy_engine", "policies", "default_policy.yaml")
 
@@ -530,6 +539,82 @@ def check_secret_scan(paths: list) -> tuple:
     return problems, scanned
 
 
+# ── Viva page check (plan 04-04) ──
+
+VIVA_PAGE_NAME = "04-namespaces-seccomp-and-local-inference.md"
+VIVA_README_STATUS = "written (Phase 4)"
+VIVA_HEADINGS = ("## Part A", "## Part B", "## Part C", "## Part D", "## Limits of this phase")
+VIVA_MIN_QUESTIONS = 16
+VIVA_MIN_GLOSSARY = 30
+VIVA_COUNT_COLUMNS = ("episodes_done", "episodes_expected")
+
+
+def _count_on_line(line: str, count: str) -> bool:
+    """`count` ("233/342") appears as a whole token on the line: not inside 1233/342 or 233/3420."""
+    return re.search(rf"(?<![\w/.]){re.escape(count)}(?![\w/]|\.\d)", line) is not None
+
+
+def _model_on_line(line: str, model: str) -> bool:
+    """`model` appears as a whole name: groq-gpt-oss-20b is not found inside a longer model name."""
+    return re.search(rf"(?<![\w.-]){re.escape(model)}(?![\w-]|\.\w)", line) is not None
+
+
+def check_viva(page_path: str, csv_path: str, readme_path: str) -> list:
+    """Problems with the Phase 4 viva page; empty means viva-numbers-ok.
+
+    Completeness comes from the episodes_done and episodes_expected columns of the report's summary.csv
+    (summarize() emits both keys and generate_report writes every key as a column). Each language-model row
+    (provider not scripted) must be quoted on one line of the page as its name and "<done>/<expected>", so a
+    count can never be credited to the wrong model. A summary.csv without the two columns is a pre-Phase-1
+    report and fails outright."""
+    problems = []
+    with open(page_path, encoding="utf-8") as f:
+        page = f.read()
+    lines = page.splitlines()
+    problems += [f"heading {h!r} is missing" for h in VIVA_HEADINGS if not any(ln.startswith(h) for ln in lines)]
+    questions = sum(1 for ln in lines if ln.startswith("**Q"))
+    if questions < VIVA_MIN_QUESTIONS:
+        problems.append(f"{questions} question lines starting '**Q', at least {VIVA_MIN_QUESTIONS} are required")
+    glossary = sum(1 for ln in lines if ln.startswith("- **"))
+    if glossary < VIVA_MIN_GLOSSARY:
+        problems.append(f"{glossary} glossary lines starting '- **', at least {VIVA_MIN_GLOSSARY} are required")
+    for pattern in SECRET_PATTERNS:
+        if re.search(pattern, page, re.IGNORECASE):
+            problems.append(f"secret-like text found (pattern {pattern!r})")
+    for lineno, line in enumerate(lines, 1):
+        if SECRET_RE.search(line):
+            problems.append(f"key-shaped text found at {os.path.basename(page_path)}:{lineno}")
+
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fields = reader.fieldnames or []
+        rows = list(reader)
+    if not all(c in fields for c in VIVA_COUNT_COLUMNS):
+        problems.append("summary.csv lacks episodes_done/episodes_expected (not a current-engine report)")
+    else:
+        llm_rows = [r for r in rows if (r.get("provider") or "") != CONTROL_PROVIDER]
+        if not llm_rows:
+            problems.append("summary.csv has no language-model row")
+        for r in llm_rows:
+            model = (r.get("model") or "").strip()
+            done, expected = ((r.get(c) or "").strip() for c in VIVA_COUNT_COLUMNS)
+            if not (model and done.isdigit() and expected.isdigit()):
+                problems.append(f"summary.csv row {model or '?'} has no numeric episodes_done/episodes_expected")
+                continue
+            count = f"{done}/{expected}"
+            if not any(_model_on_line(ln, model) for ln in lines):
+                problems.append(f"the page does not name model {model}")
+            elif not any(_model_on_line(ln, model) and _count_on_line(ln, count) for ln in lines):
+                problems.append(f"the page does not quote {model} with {count} on one line")
+
+    with open(readme_path, encoding="utf-8") as f:
+        readme = f.read()
+    link = f"({VIVA_PAGE_NAME})"
+    if not any(link in ln and VIVA_README_STATUS in ln for ln in readme.splitlines()):
+        problems.append(f"the README has no row linking {VIVA_PAGE_NAME} with status {VIVA_README_STATUS!r}")
+    return problems
+
+
 def _finish(cmd: str, problems: list) -> int:
     if problems:
         for p in problems:
@@ -566,7 +651,20 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIR)
     p = sub.add_parser("secret-scan")
     p.add_argument("--paths", nargs="+", required=True)
+    p = sub.add_parser("viva")
+    p.add_argument("--page", required=True)
+    p.add_argument("--report-csv", required=True)
+    p.add_argument("--readme", required=True)
     args = parser.parse_args(argv)
+
+    if args.cmd == "viva":
+        problems = check_viva(args.page, args.report_csv, args.readme)
+        if problems:
+            for p in problems:
+                print(f"FAIL viva: {p}")
+            return 1
+        print("viva-numbers-ok")
+        return 0
 
     if args.cmd == "hosted":
         models = [m.strip() for m in args.models.split(",") if m.strip()] if args.models else None
