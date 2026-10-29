@@ -1,6 +1,6 @@
 """
-Deliverables CLI — python -m src.deliverables build | blocks | check
-====================================================================
+Deliverables CLI — python -m src.deliverables build | blocks | check | deck
+===========================================================================
   build [--results-root R] [--frozen F] [--reuse-frozen] [--no-docs] [--doc PATH ...]
       Freeze the Phase 4 directories into F (unless --reuse-frozen), regenerate the report,
       charts and numbers.json from the frozen copy, then (unless --no-docs) rewrite the
@@ -10,6 +10,10 @@ Deliverables CLI — python -m src.deliverables build | blocks | check
       Rewrite the generated blocks of the target docs (all present ones without --doc).
   check [--frozen F] [--doc PATH ...]
       The D-03 consistency check; ends with "deliverables-check-ok docs N" (exit 0) or exit 1.
+  deck [--frozen F] [--out P] [--template T] [--check]
+      Render the Review-3 deck from F/numbers.json and the frozen charts onto the template (unless --check),
+      then check it; ends with "DECK P slides S notes N charts C ok" (exit 0), FAIL deck lines (exit 1), or
+      "FAIL deck: python-pptx is not importable by ..." (exit 3: this interpreter cannot draw the deck).
 
 One fact per printed line, ASCII only. --doc must name one of the target docs (README.md,
 docs/SDD.md, docs/viva/04-..., docs/viva/05-...), as a path relative to the repository root.
@@ -18,7 +22,7 @@ docs/SDD.md, docs/viva/04-..., docs/viva/05-...), as a path relative to the repo
 import argparse
 import sys
 
-from src.deliverables import FROZEN_DIR, RESULTS_ROOT
+from src.deliverables import FROZEN_DIR, RESULTS_ROOT, slides
 from src.deliverables.blocks import DOC_TARGETS
 from src.deliverables.build import REPO_ROOT, DeliverablesError, apply_docs, build
 from src.deliverables.consistency import load_numbers, run_check, select_docs
@@ -34,6 +38,20 @@ def _fail(command: str, e: Exception) -> int:
     return 1
 
 
+def _deck(args) -> int:
+    try:
+        numbers = load_numbers(args.frozen)
+        lines, code = slides.run_deck(numbers, args.frozen, args.out, args.template, render=not args.check)
+    except slides.PptxUnavailable:
+        _say(slides.missing_line(sys.executable))
+        return 3
+    except (OSError, ValueError, KeyError) as e:
+        return _fail("deck", e)
+    for line in lines:
+        _say(line)
+    return code
+
+
 def main(argv: list = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m src.deliverables",
                                      description="Freeze the Phase 4 results and regenerate the Phase 5 deliverables.")
@@ -44,6 +62,11 @@ def main(argv: list = None) -> int:
     b.add_argument("--no-docs", action="store_true", help="do not touch or check the target docs")
     others = [sub.add_parser("blocks", help="rewrite the generated blocks of the target docs"),
               sub.add_parser("check", help="check every target doc against numbers.json")]
+    d = sub.add_parser("deck", help="render and check the Review-3 slide deck (python-pptx)")
+    d.add_argument("--out", default=slides.DEFAULT_OUT, help="the deck to write (default docs/OS_Level_Guardrails_Review_3.pptx)")
+    d.add_argument("--template", default=slides.DEFAULT_TEMPLATE, help="the template deck (default docs/template.pptx)")
+    d.add_argument("--check", action="store_true", help="only check the existing deck")
+    d.add_argument("--frozen", default=FROZEN_DIR, help="frozen directory (default results/phase5-final)")
     for p in [b] + others:
         p.add_argument("--frozen", default=FROZEN_DIR, help="frozen directory (default results/phase5-final)")
         p.add_argument("--doc", action="append", default=None,
@@ -57,6 +80,8 @@ def main(argv: list = None) -> int:
         except (DeliverablesError, OSError, ValueError, KeyError) as e:
             return _fail("build", e)
         return 0
+    if args.command == "deck":
+        return _deck(args)
     try:
         docs = select_docs(args.doc)
         numbers = load_numbers(args.frozen)
