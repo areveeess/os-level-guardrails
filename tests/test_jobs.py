@@ -234,6 +234,24 @@ def test_ollama_down_escalates_to_sigkill_only_for_the_owned_pid(world, tmp_path
     assert world.signals == [(77, signal.SIGTERM), (77, signal.SIGKILL)]
 
 
+def test_ollama_down_from_another_process_never_kills_a_reused_pid(world, tmp_path, monkeypatch):
+    """WR-02: `jobs ollama-down` in a process that did not start the server (_CHILDREN empty). The server exits on
+    SIGTERM and its pid is reused by another project's process during the wait: no SIGKILL may reach it."""
+    jobs_dir = str(tmp_path)
+    world.add_proc(77, environ=(MARKER.encode(),))
+    _write_pid(jobs_dir, 77)
+    assert jobs._CHILDREN == {}
+
+    def send_signal(pid, sig):
+        world.signals.append((pid, sig))
+        if sig == signal.SIGTERM:     # our server exits, init reaps it, and the pid is handed to a stranger
+            world.add_proc(pid, cmdline=(b"python3", b"other_project.py"), environ=(b"PATH=/usr/bin",))
+    monkeypatch.setattr(jobs, "_send_signal", send_signal)
+    assert jobs.stop_owned(jobs_dir) == 77
+    assert world.signals == [(77, signal.SIGTERM)]
+    assert world.procs[77]["alive"] and not os.path.exists(os.path.join(jobs_dir, "ollama.pid"))
+
+
 def test_nothing_running_prints_none(world, tmp_path, capsys):
     assert jobs.ollama_down(str(tmp_path)) == "none"
     assert world.signals == [] and "OLLAMA none" in capsys.readouterr().out

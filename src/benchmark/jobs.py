@@ -354,9 +354,14 @@ def owned_pid(jobs_dir: str, pidfile_name: str = MAIN_PIDFILE) -> Optional[int]:
 
 
 def stop_owned(jobs_dir: str, pidfile_name: str = MAIN_PIDFILE) -> Optional[int]:
-    """SIGTERM the owned pid, wait up to 30 s, SIGKILL that same pid only if it is still alive, remove the
-    pidfile. Returns the stopped pid, or None when the pidfile names nothing this project owns (nothing is
-    signalled then; a stale pidfile is removed)."""
+    """SIGTERM the owned pid, wait up to 30 s, SIGKILL that same pid only if it is still alive AND still passes
+    the ownership check, remove the pidfile. Returns the stopped pid, or None when the pidfile names nothing this
+    project owns (nothing is signalled then; a stale pidfile is removed).
+
+    Ownership is checked again right before the SIGKILL (WR-02): when another process started the server
+    (`jobs ollama-up` exits, a later `jobs ollama-down` stops it), the pid is not in _CHILDREN, so nothing holds
+    it; the server can exit on SIGTERM and the pid can be reused within the wait. The pidfile is removed only
+    after that check, because owned_pid reads it."""
     pid = owned_pid(jobs_dir, pidfile_name)
     path = os.path.join(jobs_dir, pidfile_name)
     if pid is None:
@@ -367,7 +372,7 @@ def stop_owned(jobs_dir: str, pidfile_name: str = MAIN_PIDFILE) -> Optional[int]
     deadline = _clock() + STOP_WAIT_S
     while _clock() < deadline and _pid_alive(pid):
         _sleep(0.5)
-    if _pid_alive(pid):
+    if _pid_alive(pid) and owned_pid(jobs_dir, pidfile_name) == pid:
         _send_signal(pid, signal.SIGKILL)
         _sleep(0.5)
         _pid_alive(pid)  # reap a child
