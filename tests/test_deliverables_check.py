@@ -405,6 +405,49 @@ def test_frozen_directory_key_scan(frozen_numbers, tmp_path):
     assert KEY_PREFIX + "B" not in "\n".join(lines)
 
 
+# key shapes built from pieces, so this file itself never matches the key regex
+OTHER_KEYS = ("AI" + "za" + "x1Y2z3" * 6 + "abcde",                       # Google: AIza + 35
+              "sk" + "-or-v1-" + "0a" * 20,                                  # OpenRouter
+              "s" + "k-" + "proj" + "Ab3" * 8,                               # any other sk- key
+              "h" + "f_" + "Hf9" * 11)                                       # Hugging Face token
+
+
+@pytest.mark.parametrize("key", OTHER_KEYS)
+def test_the_key_regex_knows_the_project_key_shapes(frozen_numbers, tmp_path, key):
+    frozen, numbers = frozen_numbers
+    assert consistency.SECRET_RE.search(f"value {key} here")
+    assert _scan(numbers, f"a line with {key}") == [(1, "key-shaped text")]
+    (frozen / "provider_error.txt").write_text(f"ok\nerror text {key}\n", encoding="utf-8")
+    lines, code = _check(make_repo(tmp_path), frozen, ["README.md"])
+    assert code == 1 and f"FAIL check: {build_module.posix(str(frozen))}/provider_error.txt:2: key-shaped text" in lines
+    assert key not in "\n".join(lines)
+
+
+@pytest.mark.parametrize("text", ["a risk-assessment-framework-for-agents-in-general", "hf_local_provider_module_name",
+                                  "task-oriented-dialogue-systems-are-common", "the gsk_ prefix alone"])
+def test_the_key_regex_ignores_ordinary_words(text):
+    assert not consistency.SECRET_RE.search(text)
+
+
+def test_frozen_scan_reads_utf16_and_reports_unreadable_files(frozen_numbers, tmp_path):
+    frozen, _ = frozen_numbers
+    (frozen / "wide.txt").write_bytes(f"line\nkey {OTHER_KEYS[0]}\n".encode("utf-16"))
+    lines, code = _check(make_repo(tmp_path), frozen, ["README.md"])
+    posix_frozen = build_module.posix(str(frozen))
+    assert code == 1 and f"FAIL check: {posix_frozen}/wide.txt:2: key-shaped text" in lines
+    os.remove(frozen / "wide.txt")
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        locked = frozen / "locked.txt"
+        locked.write_text("text", encoding="utf-8")
+        os.chmod(locked, 0)
+        try:
+            lines, code = _check(make_repo(tmp_path / "again"), frozen, ["README.md"])
+        finally:
+            os.chmod(locked, 0o644)
+        assert code == 1 and any(line.startswith(f"FAIL check: {posix_frozen}/locked.txt:0: unreadable")
+                                 for line in lines)
+
+
 def test_secret_regex_mirrors_run_checks():
     with open(os.path.join(REPO_ROOT, "src", "benchmark", "run_checks.py"), encoding="utf-8") as f:
         tree = ast.parse(f.read())

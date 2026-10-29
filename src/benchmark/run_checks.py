@@ -22,7 +22,8 @@ cannot drift from the report), and the README row linking the page as written.
 
 hosted labels each Groq model complete or "partial n=F ds n=K" and prints
 hosted-terminal-ok or hosted-running (D-09). secret-scan searches only the given paths
-with the one fixed regex gsk_[A-Za-z0-9]{20,}, loads no key and prints file:line only.
+with the one fixed regex SECRET_RE (Groq, Google, OpenRouter, other sk- and Hugging Face key shapes), loads no
+key and prints file:line only.
 
 default-context validates the measured Ollama default (results/phase4-jobs/
 ollama_default_context.json); context_band() turns it into the prompt_tokens band
@@ -518,7 +519,10 @@ def check_hosted(prefix: str, models: Optional[list] = None, jobs_dir: str = DEF
 
 # ── Secret scan (fixed regex, given paths only) ──
 
-SECRET_RE = re.compile(r"gsk_[A-Za-z0-9]{20,}")
+# Groq, Google (AIza), OpenRouter (sk-or-v1-), other sk- keys and Hugging Face (hf_) tokens; the deliverables check
+# keeps a byte-identical copy (pinned by a test)
+SECRET_RE = re.compile(r"gsk_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_\-]{35}|sk-or-v1-[0-9a-f]{32,}"
+                       r"|(?<![\w-])sk-[A-Za-z0-9][A-Za-z0-9_\-]{19,}|(?<!\w)hf_[A-Za-z0-9]{30,}")
 
 
 def _scan_files(paths: list) -> tuple:
@@ -542,7 +546,7 @@ def _scan_files(paths: list) -> tuple:
 
 def check_secret_scan(paths: list) -> tuple:
     """(problems, text files scanned). Each text file (no NUL byte in its first 8 KiB) is searched with the one
-    fixed regex gsk_[A-Za-z0-9]{20,}; a match is reported as file:line only, never its text. No key is loaded."""
+    fixed regex SECRET_RE; a match is reported as file:line only, never its text. No key is loaded."""
     files, problems = _scan_files(paths)
     scanned = 0
     for path in files:

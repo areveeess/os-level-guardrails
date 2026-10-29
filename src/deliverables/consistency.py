@@ -22,8 +22,11 @@ re-run keeps adding episodes until the freeze). This check makes the drift loud:
                  changes, so it must come from a claim-* block, which branches on the data (CR-01).
                  The patterns are a fixed list of the forms the docs used, not a language model: a new
                  wording of an outcome is caught only once it is added here.
-  key-shaped     text matching the fixed key regex, in a checked doc (inside blocks too) or in any
-                 text file under the frozen directory; reported as path:line only, never the text
+  key-shaped     text matching the fixed key regex (Groq gsk_, Google AIza, OpenRouter sk-or-v1-,
+                 any other sk- key and Hugging Face hf_ tokens, WR-02), in a checked doc (inside
+                 blocks too) or in any text file under the frozen directory (UTF-8, or UTF-16 with a
+                 byte-order mark); reported as path:line only, never the text. A file under the
+                 frozen directory that cannot be read is a failure, not a skip
 
 Lines inside blocks are exempt from the fraction, timestamp, percentage and outcome rules: the
 stale-block rule covers them. A paragraph is a run of plain lines outside the blocks; a blank
@@ -43,7 +46,8 @@ import re
 from src.deliverables import CONTROL_MODEL, DS_EXPECTED, FROZEN_DIR, HOSTED_MODELS
 from src.deliverables.blocks import DOC_TARGETS, REQUIRED_DOCS, BlockError, find_blocks, render_block
 
-SECRET_RE = re.compile(r"gsk_[A-Za-z0-9]{20,}")
+SECRET_RE = re.compile(r"gsk_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_\-]{35}|sk-or-v1-[0-9a-f]{32,}"
+                       r"|(?<![\w-])sk-[A-Za-z0-9][A-Za-z0-9_\-]{19,}|(?<!\w)hf_[A-Za-z0-9]{30,}")
 
 MODEL_ALIASES = {
     "qwen2.5-0.5b-agentlora": ("qwen2.5-0.5b-agentlora", "Qwen LoRA", "agentlora"),
@@ -322,9 +326,20 @@ def check_doc(path: str, display: str, numbers: dict, frozen_dir: str) -> tuple:
     return len(found), problems
 
 
+def _text_of(data: bytes):
+    """The text of a file for the key scan: UTF-16 when it starts with a byte-order mark, UTF-8 when it has no
+    NUL byte in its first 8 KiB, else None (a binary file, such as a chart)."""
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return data.decode("utf-16", "replace")
+    if b"\0" in data[:8192]:
+        return None
+    return data.decode("utf-8", "replace")
+
+
 def scan_frozen(frozen_dir: str, display: str) -> tuple:
-    """(text files scanned, ['display/rel:line: key-shaped text']) over every file under the frozen directory.
-    Files with a NUL byte in their first 8 KiB are skipped; symlinks are not followed."""
+    """(text files scanned, ['display/rel:line: key-shaped text' or 'display/rel:0: unreadable']) over every file
+    under the frozen directory. Binary files are skipped (see _text_of); symlinks are not followed; a file that
+    cannot be opened is reported, because an unscanned file could hold a key (WR-02)."""
     scanned, problems = 0, []
     for dirpath, dirnames, names in os.walk(frozen_dir):
         dirnames[:] = sorted(d for d in dirnames if not os.path.islink(os.path.join(dirpath, d)))
@@ -332,16 +347,18 @@ def scan_frozen(frozen_dir: str, display: str) -> tuple:
             path = os.path.join(dirpath, name)
             if os.path.islink(path):
                 continue
+            rel = os.path.relpath(path, frozen_dir).replace("\\", "/")
             try:
                 with open(path, "rb") as f:
                     data = f.read()
-            except OSError:
+            except OSError as e:
+                problems.append(f"{display}/{rel}:0: unreadable ({type(e).__name__}), so it was not scanned")
                 continue
-            if b"\0" in data[:8192]:
+            text = _text_of(data)
+            if text is None:
                 continue
             scanned += 1
-            rel = os.path.relpath(path, frozen_dir).replace("\\", "/")
-            for lineno, line in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
+            for lineno, line in enumerate(text.splitlines(), 1):
                 if SECRET_RE.search(line):
                     problems.append(f"{display}/{rel}:{lineno}: key-shaped text")
     return scanned, problems
