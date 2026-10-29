@@ -1147,6 +1147,16 @@ def _posix(path) -> str:
     return str(path).replace("\\", "/")
 
 
+def is_blank_fallback(how: str) -> bool:
+    """render_deck's `how` says the template could not be used and the deck is a blank 16:9 one (WR-05)."""
+    return str(how).startswith("none (")
+
+
+def blank_fallback_problem(display: str) -> str:
+    return (f"{display} was drawn on a blank 16:9 deck, not the Review template; fix the template or pass "
+            f"--allow-blank-template")
+
+
 def render_deck(spec: list, out_path: str, frozen_dir: str, template: str = DEFAULT_TEMPLATE) -> str:
     """Draw the spec into out_path (written through a temporary file); returns how the template was used.
 
@@ -1279,13 +1289,16 @@ def missing_line(executable: str) -> str:
 
 
 def run_deck(numbers: dict, frozen_dir: str, out_path: str = DEFAULT_OUT, template: str = DEFAULT_TEMPLATE,
-             render: bool = True) -> tuple:
+             render: bool = True, allow_blank_template: bool = False) -> tuple:
     """(printed lines, exit code): render (unless render=False) then check. Exit 0 with the DECK line last,
-    1 with FAIL deck lines; PptxUnavailable propagates to the caller (exit 3 there)."""
+    1 with FAIL deck lines (a deck drawn on the blank fallback is one, unless allow_blank_template, WR-05);
+    PptxUnavailable propagates to the caller (exit 3 there)."""
     lines = []
     if render:
         how = render_deck(deck_spec(numbers), out_path, frozen_dir, template)
         lines.append(f"TEMPLATE {how}")
+        if is_blank_fallback(how) and not allow_blank_template:
+            return lines + [f"FAIL deck: {blank_fallback_problem(_posix(out_path))}"], 1
     problems, counts = check_deck(out_path, numbers, frozen_dir)
     if problems:
         return lines + [f"FAIL deck: {p}" for p in problems], 1

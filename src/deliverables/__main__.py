@@ -2,17 +2,19 @@
 Deliverables CLI — python -m src.deliverables build | blocks | check | deck
 ===========================================================================
   build [--results-root R] [--frozen F] [--reuse-frozen] [--no-docs] [--doc PATH ...] [--no-deck] [--deck-out P]
+        [--allow-blank-template]
       Freeze the Phase 4 directories into F (unless --reuse-frozen), regenerate the report,
       charts and numbers.json from the frozen copy, then (unless --no-docs) rewrite the
       generated blocks of the target docs and run the check on them, then (unless --no-deck)
-      render and check the Review-3 deck. The last line is "BUILD ok" (exit 0), "FAIL build:
+      render and check the Review-3 deck (printing TEMPLATE, how the template was used; a deck drawn on the
+      blank fallback fails unless --allow-blank-template). The last line is "BUILD ok" (exit 0), "FAIL build:
       reason" (exit 1), or "FAIL deck: python-pptx is not importable by ..." (exit 3: everything
       else was written, the deck was not rebuilt).
   blocks [--frozen F] [--doc PATH ...]
       Rewrite the generated blocks of the target docs (all present ones without --doc).
   check [--frozen F] [--doc PATH ...]
       The D-03 consistency check; ends with "deliverables-check-ok docs N" (exit 0) or exit 1.
-  deck [--frozen F] [--out P] [--template T] [--check]
+  deck [--frozen F] [--out P] [--template T] [--check] [--allow-blank-template]
       Render the Review-3 deck from F/numbers.json and the frozen charts onto the template (unless --check),
       then check it; ends with "DECK P slides S notes N charts C ok" (exit 0), FAIL deck lines (exit 1), or
       "FAIL deck: python-pptx is not importable by ..." (exit 3: this interpreter cannot draw the deck).
@@ -47,7 +49,8 @@ def _fail(command: str, e: Exception) -> int:
 def _deck(args) -> int:
     try:
         numbers = load_numbers(args.frozen)
-        lines, code = slides.run_deck(numbers, args.frozen, args.out, args.template, render=not args.check)
+        lines, code = slides.run_deck(numbers, args.frozen, args.out, args.template, render=not args.check,
+                                      allow_blank_template=args.allow_blank_template)
     except slides.PptxUnavailable:
         _say(slides.missing_line(sys.executable))
         return 3
@@ -69,6 +72,8 @@ def main(argv: list = None) -> int:
     b.add_argument("--no-deck", action="store_true", help="do not render or check the Review-3 deck")
     b.add_argument("--deck-out", default=None,
                    help="the deck to write (default docs/OS_Level_Guardrails_Review_3.pptx in the repository)")
+    b.add_argument("--allow-blank-template", action="store_true",
+                   help="accept a deck drawn on a blank 16:9 deck when the template cannot be opened")
     others = [sub.add_parser("blocks", help="rewrite the generated blocks of the target docs"),
               sub.add_parser("check", help="check every target doc against numbers.json")]
     d = sub.add_parser("deck", help="render and check the Review-3 slide deck (python-pptx)")
@@ -76,6 +81,8 @@ def main(argv: list = None) -> int:
                    help="the deck to write (default docs/OS_Level_Guardrails_Review_3.pptx)")
     d.add_argument("--template", default=slides.DEFAULT_TEMPLATE, help="the template deck (default docs/template.pptx)")
     d.add_argument("--check", action="store_true", help="only check the existing deck")
+    d.add_argument("--allow-blank-template", action="store_true",
+                   help="accept a deck drawn on a blank 16:9 deck when the template cannot be opened")
     d.add_argument("--frozen", default=FROZEN_DIR, help="frozen directory (default results/phase5-final)")
     for p in [b] + others:
         p.add_argument("--frozen", default=FROZEN_DIR, help="frozen directory (default results/phase5-final)")
@@ -88,7 +95,7 @@ def main(argv: list = None) -> int:
         deck_out = args.deck_out or os.path.join(REPO_ROOT, slides.DEFAULT_OUT)
         try:
             build(args.results_root, args.frozen, reuse=args.reuse_frozen, say=_say, docs=docs, deck_out=deck_out,
-                  no_deck=args.no_deck)
+                  no_deck=args.no_deck, allow_blank_template=args.allow_blank_template)
         except DeckUnavailable as e:
             _say(str(e))
             return 3

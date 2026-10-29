@@ -408,3 +408,45 @@ def test_a_deck_check_problem_fails_the_build(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out.strip().splitlines()
     assert code == 1
     assert "FAIL deck: slide 3: the title differs from the spec" in out and out[-1].startswith("FAIL build: ")
+
+
+BLANK = "none (docs/template.pptx not found), blank 16:9"
+
+
+def test_a_blank_template_fallback_fails_the_build_unless_allowed(tmp_path, monkeypatch, capsys):
+    from src.deliverables.__main__ import main
+
+    monkeypatch.setattr(slides, "render_deck", lambda spec, out_path, frozen_dir, template: BLANK)
+    monkeypatch.setattr(slides, "check_deck", lambda path, numbers, frozen_dir: ([], dict(FAKE_COUNTS)))
+    code = main(build_args(tmp_path))
+    out = capsys.readouterr().out.strip().splitlines()
+    assert code == 1 and f"TEMPLATE {BLANK}" in out and "BUILD ok" not in out
+    assert any(line.startswith("FAIL deck: ") and "blank 16:9 deck, not the Review template" in line for line in out)
+    assert out[-1].startswith("FAIL build: ")
+    code = main(build_args(tmp_path, "--allow-blank-template"))
+    out = capsys.readouterr().out.strip().splitlines()
+    assert code == 0 and out[-1] == "BUILD ok" and f"TEMPLATE {BLANK}" in out
+
+
+def test_the_build_prints_how_the_template_was_used(tmp_path, monkeypatch, capsys):
+    from src.deliverables.__main__ import main
+
+    monkeypatch.setattr(slides, "render_deck", lambda spec, out_path, frozen_dir, template: "docs/template.pptx")
+    monkeypatch.setattr(slides, "check_deck", lambda path, numbers, frozen_dir: ([], dict(FAKE_COUNTS)))
+    assert main(build_args(tmp_path)) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert out[-3] == "TEMPLATE docs/template.pptx" and out[-2].startswith("DECK ") and out[-1] == "BUILD ok"
+
+
+def test_the_deck_command_fails_on_a_blank_template_fallback(frozen_numbers, monkeypatch, capsys):
+    from src.deliverables.__main__ import main
+
+    frozen, _ = frozen_numbers
+    monkeypatch.setattr(slides, "render_deck", lambda spec, out_path, frozen_dir, template: BLANK)
+    monkeypatch.setattr(slides, "check_deck", lambda path, numbers, frozen_dir: ([], dict(FAKE_COUNTS)))
+    out_path = str(frozen.parent / "deck.pptx")
+    assert main(["deck", "--frozen", str(frozen), "--out", out_path]) == 1
+    out = capsys.readouterr().out.strip().splitlines()
+    assert out[0] == f"TEMPLATE {BLANK}" and out[-1].startswith("FAIL deck: ")
+    assert main(["deck", "--frozen", str(frozen), "--out", out_path, "--allow-blank-template"]) == 0
+    assert capsys.readouterr().out.strip().splitlines()[-1].startswith("DECK ")

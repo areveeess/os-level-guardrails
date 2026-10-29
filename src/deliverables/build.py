@@ -619,12 +619,20 @@ def _display(path: str, repo_root: str) -> str:
     return posix(path if rel.startswith("..") or os.path.isabs(rel) else rel)
 
 
-def deck_step(numbers: dict, frozen_dir: str, deck_out: str, template: str, repo_root: str) -> list:
-    """Render and check the Review-3 deck; returns the DECK line. A check problem raises DeliverablesError after
-    the FAIL deck lines (in the error's `lines`); a missing python-pptx raises DeckUnavailable."""
+def deck_step(numbers: dict, frozen_dir: str, deck_out: str, template: str, repo_root: str,
+              allow_blank_template: bool = False) -> list:
+    """Render and check the Review-3 deck; returns the TEMPLATE and DECK lines. A deck drawn on the blank fallback
+    because the template could not be opened (WR-05), unless allow_blank_template, or a check problem raises
+    DeliverablesError with the TEMPLATE and FAIL deck lines in the error's `lines`; a missing python-pptx raises
+    DeckUnavailable."""
     display = _display(deck_out, repo_root)
     try:
-        slides.render_deck(slides.deck_spec(numbers), deck_out, frozen_dir, template)
+        how = slides.render_deck(slides.deck_spec(numbers), deck_out, frozen_dir, template)
+        template_line = f"TEMPLATE {how}"
+        if slides.is_blank_fallback(how) and not allow_blank_template:
+            error = DeliverablesError("the deck was drawn without the Review template (see the FAIL deck line)")
+            error.lines = [template_line, f"FAIL deck: {slides.blank_fallback_problem(display)}"]
+            raise error
         problems, counts = slides.check_deck(deck_out, numbers, frozen_dir)
     except slides.PptxUnavailable:
         line = slides.missing_line(sys.executable)
@@ -633,14 +641,14 @@ def deck_step(numbers: dict, frozen_dir: str, deck_out: str, template: str, repo
         raise DeckUnavailable(line)
     if problems:
         error = DeliverablesError("the deck check failed (see the FAIL deck lines)")
-        error.lines = [f"FAIL deck: {p}" for p in problems]
+        error.lines = [template_line] + [f"FAIL deck: {p}" for p in problems]
         raise error
-    return [slides.deck_line(display, counts)]
+    return [template_line, slides.deck_line(display, counts)]
 
 
 def build(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, reuse: bool = False, now=None,
           say=None, repo_root: str = REPO_ROOT, docs=None, deck_out: str = None, no_deck: bool = False,
-          template: str = None) -> list:
+          template: str = None, allow_blank_template: bool = False) -> list:
     """freeze (unless reuse) and render, then (when `docs` is a list of target docs) apply their blocks and run
     the check on them, then (when `deck_out` is given and not no_deck) render and check the deck; returns the
     printed lines (each also passed to `say`). docs=None skips the doc step and deck_out=None the deck step;
@@ -694,7 +702,8 @@ def build(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, reuse:
         numbers = load_numbers(frozen_dir)
         template = template or os.path.join(repo_root, slides.DEFAULT_TEMPLATE)
         try:
-            deck_lines = deck_step(numbers, frozen_dir, deck_out, template, repo_root)
+            deck_lines = deck_step(numbers, frozen_dir, deck_out, template, repo_root,
+                                   allow_blank_template=allow_blank_template)
         except DeckUnavailable:
             raise
         except DeliverablesError as e:
