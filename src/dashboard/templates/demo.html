@@ -15,36 +15,6 @@
     </div>
 </header>
 
-<details class="panel howto" id="how-to" open>
-    <summary><i class="ti ti-chevron-right" aria-hidden="true"></i>How to demo, in 5 minutes <span>click to fold away while presenting</span></summary>
-    <ol class="script">
-        <li>
-            <b>0:00 &nbsp;The question.</b> Open <a href="/results">Results</a> and point at the banner and the first figure.
-            <q>The panel asked us to run this on a locally made model and to compare with other models. These are the same guardrails on every agent: the two we built, local pretrained models, hosted models, and a scripted worst case.</q>
-        </li>
-        <li>
-            <b>1:00 &nbsp;A locally made model is hijacked.</b> Here, pick the story <em>Qwen LoRA is hijacked, then stopped</em> and press <kbd>Space</kbd> to step.
-            <q>Left, no guardrails: the injected instruction in the review makes the model read saved payment methods and email them out. The highlighted CANARY string is planted test data, not a real secret. Right, the same model, same case: the tool broker refuses the call because this task never needed that tool.</q>
-        </li>
-        <li>
-            <b>2:00 &nbsp;It is not about the model.</b> Pick <em>ScratchGPT, trained from zero</em>, then <em>A normal task still works</em>.
-            <q>ScratchGPT has no safety training at all, and the result is the same, because the guardrails sit between the model and the OS. And a normal task still completes, so least privilege did not break the agent.</q>
-        </li>
-        <li>
-            <b>3:00 &nbsp;The worst case.</b> Pick <em>The scripted worst case</em>.
-            <q>This is not a language model; it always obeys the injection. Two layers act: the broker refuses the tool and the policy engine refuses the network egress.</q>
-        </li>
-        <li>
-            <b>3:45 &nbsp;Live, now.</b> Below, press <em>Run simulation</em>, then open the <a href="/" target="_blank" rel="noopener">Live monitor</a> beside it.
-            <q>These are the scripted attacks from our simulation script. The policy engine decides each one live; nothing is executed. Every attack is blocked and the benign control is allowed.</q>
-        </li>
-        <li>
-            <b>4:30 &nbsp;Be honest about the layers.</b> Open <a href="/results">Results</a>, <em>Where attacks were stopped</em>.
-            <q>Namespaces and seccomp recorded zero blocks in the benchmark. That is not because they do nothing: the policy engine stops these attacks first, so nothing reaches the kernel layers. They are the backstop for what slips past the rules.</q>
-        </li>
-    </ol>
-</details>
-
 <div id="demo-root" class="stack">
     <section class="panel" aria-labelledby="h-replay">
         <div class="panel-head">

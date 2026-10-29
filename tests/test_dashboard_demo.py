@@ -121,7 +121,8 @@ def test_demo_page_renders(client):
     resp = client.get('/demo')
     assert resp.status_code == 200
     html = resp.get_data(as_text=True)
-    assert 'id="demo-root"' in html and 'id="how-to"' in html
+    assert 'id="demo-root"' in html
+    assert 'id="how-to"' not in html      # the presenter script lives in docs/DEMO_SCRIPT.md
 
 
 # ── Line-up ──
