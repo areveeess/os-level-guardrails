@@ -69,9 +69,11 @@ def lineup(numbers: dict, models_yaml: dict) -> list:
 
     rows = []
     for m in numbers.get('models') or []:
+        stop = (m.get('hosted_state') or {}).get('state') if isinstance(m.get('hosted_state'), dict) else None
         rows.append({'model': m.get('model'), 'group': group_of(m), 'family': m.get('family'),
                      'provider': m.get('provider'), 'served_as': served_as(m.get('model')),
-                     'status': m.get('status'), 'label': m.get('label'),
+                     'status': m.get('status'), 'label': m.get('label'), 'complete': m.get('complete'),
+                     'hosted_state': {'state': stop} if stop else None,
                      'episodes_done': m.get('episodes_done'), 'episodes_expected': m.get('episodes_expected')})
     for m in numbers.get('legacy') or []:
         rows.append({'model': m.get('model'), 'group': 'legacy', 'family': m.get('family'),

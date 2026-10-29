@@ -10,6 +10,7 @@
     const API = root.dataset.api;
     const FILES = root.dataset.files;
     const SVG = 'http://www.w3.org/2000/svg';
+    const L = window.GuardrailsLabels;
     const LAYERS = [
         ['tool_broker', 'Tool broker'],
         ['policy_engine', 'Policy engine'],
@@ -37,7 +38,6 @@
         return i;
     }
     function num(x) { return Number(x).toLocaleString(); }
-    function p1(x) { return x == null ? '' : Number(x).toFixed(1).replace(/\.0$/, '') + '%'; }
     function pFull(x) { return x == null ? '' : Number(x).toFixed(1) + '%'; }
 
     // Rows in numbers.json carry {pct, k, n, lo, hi}; legacy rows carry the same values flattened.
@@ -101,12 +101,13 @@
         const W = Math.max(280, wrap.clientWidth - 2);
         const stacked = W < 600;
         const labelW = stacked ? 0 : Math.min(230, W * 0.3);
-        const right = 58;
+        // Right column: each arm's value with its k/n, beside its own mark (stacked: under the name).
+        const right = stacked ? 18 : Math.min(200, Math.max(150, W * 0.18));
         const top = 26, bottom = 40;
-        const rowH = stacked ? 52 : 36;
+        const rowHeight = r => (stacked ? (r.state ? 80 : 66) : (r.state ? 58 : 44));
         const headH = 30;
         let h = top;
-        const layout = rows.map(r => { const y = h; h += r.heading ? headH : rowH; return { r, y }; });
+        const layout = rows.map(r => { const y = h; h += r.heading ? headH : rowHeight(r); return { r, y }; });
         const H = h + bottom;
         const x0 = labelW + (stacked ? 4 : 12), x1 = W - right;
         const x = v => x0 + (Math.max(0, Math.min(100, v)) / 100) * (x1 - x0);
@@ -128,25 +129,34 @@
                 svg.append(sv('text', { class: 't-group', x: stacked ? 0 : 0, y: y + 20 }, r.heading));
                 continue;
             }
+            const rowH = rowHeight(r);
             const g = sv('g', { tabindex: 0, role: 'listitem', 'aria-label':
-                `${r.label}: without guardrails ${pFull(r.off.pct)}, with guardrails ${pFull(r.on.pct)}` });
+                `${r.label}${r.state ? ', ' + r.state : ''}: ${L.armPair(r.off, r.on)}` });
             const hot = sv('rect', { class: 'row-hot', x: 0, y: y + 1, width: W, height: rowH - 2, rx: 8, opacity: 0 });
             g.append(hot);
-            const cy = stacked ? y + 34 : y + rowH / 2;
-            if (stacked) g.append(sv('text', { class: 't-label', x: 4, y: y + 15 }, r.label + (r.partial ? '  (partial)' : '')));
-            else {
-                g.append(sv('text', { class: 't-label', x: 4, y: cy + 4 }, r.label));
-                if (r.partial) g.append(sv('text', { class: 'partial-tag', x: 4, y: cy + 17 }, 'partial, not final'));
+            const cy = stacked ? y + rowH - 16 : y + rowH / 2;
+            if (stacked) {
+                g.append(sv('text', { class: 't-label', x: 4, y: y + 15 }, r.label));
+                if (r.state) g.append(sv('text', { class: 'partial-tag', x: 4, y: y + 30 }, r.state));
+                g.append(sv('text', { class: 't-val', x: 4, y: y + (r.state ? 45 : 31) }, L.armPair(r.off, r.on)));
+            } else {
+                g.append(sv('text', { class: 't-label', x: 4, y: r.state ? y + 17 : cy + 4 }, r.label));
+                if (r.state) {
+                    // Two short lines so a long tag stays inside the label column
+                    const cut = r.state.indexOf(' (');
+                    const lines = cut > 0 ? [r.state.slice(0, cut), r.state.slice(cut + 1)] : [r.state];
+                    lines.forEach((t, i) => g.append(sv('text', { class: 'partial-tag', x: 4, y: y + 32 + 13 * i }, t)));
+                }
             }
-            const yo = cy - 5, yn = cy + 5;
+            const yo = cy - 7, yn = cy + 7;
             g.append(sv('line', { class: 'ci-off', x1: x(r.off.lo), x2: x(r.off.hi), y1: yo, y2: yo }));
             g.append(sv('line', { class: 'ci-on', x1: x(r.on.lo), x2: x(r.on.hi), y1: yn, y2: yn }));
             g.append(sv('circle', { class: 'dot-off', cx: x(r.off.pct), cy: yo, r: 5 }));
             g.append(sv('circle', { class: 'dot-on', cx: x(r.on.pct), cy: yn, r: 5 }));
-            // One direct label per row: the no-guardrails value, beside its interval.
-            const lx = x(r.off.hi) + 8;
-            const fits = lx + 40 < W;
-            g.append(sv('text', { class: 't-val', x: fits ? lx : x(r.off.lo) - 8, y: yo + 4, 'text-anchor': fits ? 'start' : 'end' }, p1(r.off.pct)));
+            if (!stacked) {
+                g.append(sv('text', { class: 't-val', x: x1 + 16, y: yo + 4 }, L.armValue('off', r.off)));
+                g.append(sv('text', { class: 't-val', x: x1 + 16, y: yn + 4 }, L.armValue('on', r.on)));
+            }
             g.append(sv('rect', { class: 'hit', x: 0, y, width: W, height: rowH }));
             const rowsTip = [
                 { color: 'var(--s-off)', value: pFull(r.off.pct), label: 'no guardrails, ' + ciText(r.off) },
@@ -283,12 +293,12 @@
     }
     const COLS = ['Model', 'Episodes done', 'Attempted, no guardrails', 'Success, no guardrails', 'Success, guardrails',
                   'Blocked given attempt', 'Benign task, no guardrails', 'Benign task, guardrails', 'False positive', 'Parse errors per step'];
-    function modelRow(m) {
+    function modelRow(m, dataState) {
         const tr = el('tr');
         tr.append(modelCell(m));
         const ep = el('td');
         ep.append(el('span', 'v', `${num(m.episodes_done)}/${num(m.episodes_expected)}`));
-        if (m.label && m.label !== 'complete') ep.append(el('span', 'kn', m.label.replace(/^partial, \d+\/\d+ episodes ?/, '') || 'partial'));
+        if (!m.complete) ep.append(el('span', 'kn', L.stopText(m, dataState)));
         tr.append(ep);
         const su = metric(m, 'success_unprotected');
         const sp = metric(m, 'success_protected');
@@ -315,7 +325,7 @@
         const l2 = el('p');
         if (final) {
             l1.append(el('b', '', 'Final data. '), document.createTextNode(`Frozen at ${d.freeze_display || d.freeze_utc} (UTC).`));
-            l2.textContent = 'Partial rows are still labelled with the episodes they reached and are not ranked against complete runs.';
+            l2.textContent = 'Runs that did not finish every episode are labelled incomplete, with where they stopped, and are not ranked against complete runs.';
         } else {
             l1.append(el('b', '', 'Snapshot, not final. '),
                       document.createTextNode(`Taken ${d.snapshot_display || d.snapshot_utc} (UTC). The freeze is ${d.freeze_display || d.freeze_utc}.`));
@@ -358,7 +368,7 @@
             wrap.append(f);
         };
         fig(true, 'Attacks that succeeded with guardrails on', `${num(k)} of ${num(n)}`,
-            `attack episodes across all ${llm.length} LLM models, partial runs included`);
+            `attack episodes across all ${llm.length} LLM models, ${d.data_state === 'final' ? 'incomplete' : 'partial'} runs included`);
         if (pooled) fig(false, 'Attempted attacks blocked', pFull(pooled.pct),
             `${num(pooled.k)}/${num(pooled.n)} pooled, 95% interval [${pooled.lo}, ${pooled.hi}]`);
         if (worst) fig(false, 'Worst model without guardrails', pFull(worst.s.pct),
@@ -369,12 +379,13 @@
     }
 
     function intervalChart(d) {
-        const toRow = m => ({ label: m.model, off: metric(m, 'success_unprotected'), on: metric(m, 'success_protected'), partial: !m.complete });
+        const toRow = m => ({ label: m.model, off: metric(m, 'success_unprotected'), on: metric(m, 'success_protected'),
+                              state: L.runState(m, d.data_state) });
         const byOff = (a, b) => b.off.pct - a.off.pct;
         const complete = d.models.filter(m => isLLM(m) && m.complete).map(toRow).filter(r => r.off && r.on).sort(byOff);
         const partial = d.models.filter(m => isLLM(m) && !m.complete).map(toRow).filter(r => r.off && r.on).sort(byOff);
         const rows = [{ heading: 'Complete runs' }, ...complete];
-        if (partial.length) rows.push({ heading: 'Partial runs, not final and not ranked' }, ...partial);
+        if (partial.length) rows.push({ heading: L.incompleteHeading(d.data_state) }, ...partial);
         const ctl = d.models.find(m => m.group === 'control');
         const controlPct = ctl ? (metric(ctl, 'success_unprotected') || {}).pct : null;
         return chartPanel('Attack success, without and with guardrails',
@@ -404,7 +415,7 @@
     function headline(d) {
         const p = panel('Headline: complete runs',
             'Only models whose run finished every expected episode. Each cell is the rate, k/n episodes, and the 95% Wilson interval.');
-        const rows = d.models.filter(m => isLLM(m) && m.complete).map(modelRow);
+        const rows = d.models.filter(m => isLLM(m) && m.complete).map(m => modelRow(m, d.data_state));
         p.append(table('Headline results for complete runs', COLS, rows));
         return p;
     }
@@ -412,9 +423,8 @@
     function partial(d) {
         const ms = d.models.filter(m => isLLM(m) && !m.complete);
         if (!ms.length) return null;
-        const p = panel('Partial runs, not compared',
-            'Hosted runs stopped by free-tier quota. Their rates are not final and must not be ranked against the complete runs.');
-        p.append(table('Partial runs', COLS, ms.map(modelRow)));
+        const p = panel(L.incompleteHeading(d.data_state), L.incompleteDescription(d.data_state));
+        p.append(table(L.incompleteHeading(d.data_state), COLS, ms.map(m => modelRow(m, d.data_state))));
         return p;
     }
 
@@ -598,7 +608,7 @@
                 const li = el('li');
                 li.append(el('span', 'm', m.model));
                 const meta = [m.served_as && m.served_as !== m.model ? m.served_as : null,
-                              m.status && m.status !== 'complete' ? (m.label || m.status) : null].filter(Boolean);
+                              m.group === 'legacy' ? m.label : (m.complete === false ? L.runState(m, lineup.data_state) : null)].filter(Boolean);
                 if (meta.length) li.append(el('span', 'fam', meta.join('; ')));
                 ul.append(li);
             }
