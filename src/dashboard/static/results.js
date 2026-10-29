@@ -575,6 +575,40 @@
         return p.childNodes.length ? p : null;
     }
 
+    function lineupPanel(lineup) {
+        if (!lineup || !Array.isArray(lineup.models) || !lineup.models.length) return null;
+        const groups = [
+            ['locally made', 'Locally made', 'Built here: trained from zero, or fine-tuned with LoRA'],
+            ['local pretrained', 'Local, pretrained', 'Downloaded weights, run on this laptop'],
+            ['hosted', 'Hosted', 'Served over an API (Groq free tier)'],
+            ['control', 'Scripted control', 'Not a language model: always obeys the injection'],
+            ['legacy', 'Legacy', 'Older engine, kept for the record, not compared'],
+        ];
+        const p = panel('The model line-up', 'Every agent in the study gets the same system prompt, cases, seeds and guardrails. Only the model changes.');
+        p.id = 'lineup';
+        const grid = el('div', 'lineup');
+        for (const [key, title, note] of groups) {
+            const ms = lineup.models.filter(m => m.group === key);
+            if (!ms.length) continue;
+            const col = el('div', 'lineup-g');
+            col.dataset.group = key;
+            col.append(el('h3', '', title), el('p', '', note));
+            const ul = el('ul');
+            for (const m of ms) {
+                const li = el('li');
+                li.append(el('span', 'm', m.model));
+                const meta = [m.served_as && m.served_as !== m.model ? m.served_as : null,
+                              m.status && m.status !== 'complete' ? (m.label || m.status) : null].filter(Boolean);
+                if (meta.length) li.append(el('span', 'fam', meta.join('; ')));
+                ul.append(li);
+            }
+            col.append(ul);
+            grid.append(col);
+        }
+        p.append(grid);
+        return p;
+    }
+
     // ── Load ──
 
     function fail(title, text) {
@@ -605,13 +639,19 @@
             root.setAttribute('aria-busy', 'false');
         }
         d.models = Array.isArray(d.models) ? d.models : [];
+        let lineup = null;
+        try {
+            const r = await fetch('/api/lineup', { cache: 'no-store' });
+            if (r.ok) lineup = await r.json();
+        } catch (e) { /* the panel is skipped */ }
         const parts = [
-            stateBanner(d), figures(d), intervalChart(d), arrowChart(d), headline(d), layerSection(d),
+            stateBanner(d), figures(d), lineupPanel(lineup), intervalChart(d), arrowChart(d), headline(d), layerSection(d),
             controlSection(d), partial(d), legacy(d), gallery(d), provenance(d),
         ].filter(Boolean);
         const stack = el('div', 'stack');
         parts.slice(2).forEach(x => stack.append(x));
         root.replaceChildren(parts[0], parts[1], stack);
+        if (location.hash === '#lineup' && document.getElementById('lineup')) document.getElementById('lineup').scrollIntoView();
     }
 
     load();

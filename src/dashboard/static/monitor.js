@@ -306,8 +306,6 @@
     async function loadInfo() {
         try {
             const info = await getJSON('/api/info');
-            $('m-model').textContent = info.model;
-            $('m-model').title = info.model;
             $('m-platform').textContent = info.platform;
             $('m-kernel').textContent = info.is_linux ? 'available' : 'need Linux or WSL2';
             if (!!info.is_linux !== state.isLinux) { state.isLinux = !!info.is_linux; renderDepth(); }

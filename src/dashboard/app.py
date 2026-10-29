@@ -8,7 +8,8 @@ action was Allowed, Blocked, or Flagged.
 Usage:
   python -m src.dashboard.app
   Then open http://127.0.0.1:5000 in your browser
-  Live monitor at /, frozen Phase 5 comparison at /results (read-only, results/phase5-final/)
+  Live monitor at /, frozen Phase 5 comparison at /results (read-only, results/phase5-final/),
+  demo at /demo (recorded-episode replay and the scripted policy simulation)
 
   Safe by default: the server listens on 127.0.0.1 only, with Flask debug off.
   DASHBOARD_HOST=<addr>  listen on another interface (only on a trusted network)
@@ -23,10 +24,12 @@ import sys
 import json
 import ipaddress
 import re
+import yaml
 from urllib.parse import urlsplit
 from flask import Flask, render_template, jsonify
 from flask import request  # WR-09: Host / Origin checks
 from flask import abort, send_from_directory
+from src.dashboard import demo
 
 # Project paths
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -39,6 +42,9 @@ RESULTS_FILES = frozenset({'numbers.json', 'freeze.json', 'summary.md', 'summary
 RESULTS_CHART = re.compile(r'charts/[A-Za-z0-9_-]+\.png')
 
 app = Flask(__name__)
+
+# One scripted policy simulation at a time (see src/dashboard/demo.py)
+_simulation = demo.Simulation()
 
 
 # Cache to avoid re-reading and re-parsing unchanged log file on every 2-second poll
@@ -187,6 +193,133 @@ def get_results_file(name):
     response = send_from_directory(RESULTS_FINAL_DIR, name, max_age=0)
     response.headers['X-Content-Type-Options'] = 'nosniff'
     return response
+
+
+@app.route('/demo')
+def demo_page():
+    """Serve the demo page: recorded-episode replay and the scripted policy simulation."""
+    info = {
+        "model": _get_model_name(),
+        "platform": sys.platform,
+        "is_linux": sys.platform.startswith('linux')
+    }
+    return render_template('demo.html', info=info)
+
+
+def _frozen_numbers():
+    with open(os.path.join(RESULTS_FINAL_DIR, 'numbers.json'), 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def _numbers_or_error():
+    """(numbers, None) or (None, error response) for the frozen numbers.json."""
+    try:
+        return _frozen_numbers(), None
+    except FileNotFoundError:
+        return None, (jsonify({"error": "no frozen results", "path": "results/phase5-final/numbers.json"}), 404)
+    except (OSError, ValueError):
+        return None, (jsonify({"error": "results/phase5-final/numbers.json is unreadable"}), 500)
+
+
+@app.route('/api/lineup')
+def get_lineup():
+    """Every model of the study, grouped (locally made, local pretrained, hosted, legacy, control).
+    The live decision log records no model, so this is the only place the dashboard names models."""
+    numbers, error = _numbers_or_error()
+    if error:
+        return error
+    models_yaml = None
+    try:
+        with open(os.path.join(RESULTS_FINAL_DIR, 'inputs', 'config', 'models.yaml'), 'r', encoding='utf-8') as f:
+            models_yaml = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError):
+        pass
+    return jsonify({"models": demo.lineup(numbers, models_yaml), "data_state": numbers.get('data_state'),
+                    "snapshot_display": numbers.get('snapshot_display')})
+
+
+@app.route('/api/demo/replay')
+def get_replay_index():
+    """The replayable models (frozen runs only) and the pre-picked story episodes."""
+    numbers, error = _numbers_or_error()
+    if error:
+        return error
+    sources = demo.replay_sources(numbers, RESULTS_FINAL_DIR)
+    return jsonify({"models": sorted(sources), "stories": demo.stories(sources)})
+
+
+def _replay_path(numbers):
+    """The raw.jsonl of the requested model, looked up (never joined) from the frozen source list."""
+    model = request.args.get('model', '')
+    return demo.replay_sources(numbers, RESULTS_FINAL_DIR).get(model)
+
+
+@app.route('/api/demo/cases')
+def get_replay_cases():
+    numbers, error = _numbers_or_error()
+    if error:
+        return error
+    path = _replay_path(numbers)
+    if path is None:
+        return jsonify({"error": "unknown model"}), 404
+    return jsonify({"cases": demo.case_list(demo.load_records(path))})
+
+
+@app.route('/api/demo/episode')
+def get_replay_episode():
+    """Both arms of one recorded episode plus the case text. Query: model, case, run (0-9)."""
+    case_id = request.args.get('case', '')
+    run_text = request.args.get('run', '0')
+    if not demo.CASE_ID.fullmatch(case_id) or not run_text.isdigit() or int(run_text) > demo.MAX_RUN:
+        return jsonify({"error": "bad case or run"}), 400
+    numbers, error = _numbers_or_error()
+    if error:
+        return error
+    path = _replay_path(numbers)
+    if path is None:
+        return jsonify({"error": "unknown model"}), 404
+    arms = demo.episode(path, case_id, int(run_text))
+    case = demo.case_text(case_id)
+    if not arms or case is None:
+        return jsonify({"error": "no such episode"}), 404
+    return jsonify({"model": request.args.get('model'), "case": case, "run": int(run_text), "arms": arms})
+
+
+@app.route('/api/demo/scenarios')
+def get_scenarios():
+    """The scripted scenarios of run_attack_simulation.py (read-only list)."""
+    return jsonify({"scenarios": [{k: s[k] for k in ('id', 'description', 'action_type', 'target', 'malicious')}
+                                  for s in demo.scenarios()]})
+
+
+@app.route('/api/demo/simulate', methods=['GET', 'POST'])
+def simulate():
+    """GET: the current run. POST {"scenario": "all" | "s1".."s8"}: start one run.
+
+    Same-origin only, like /api/clear. The body may name a scenario id and nothing else; the actions
+    come from run_attack_simulation.py on the server and are only checked by the policy engine,
+    never executed. One run at a time (409 while busy); a run stops at its deadline."""
+    if request.method == 'GET':
+        return jsonify(_simulation.status())
+    if not _same_origin(request):
+        return jsonify({"error": "cross-origin request refused"}), 403
+    if request.query_string:
+        return jsonify({"error": "no query parameters accepted"}), 400
+    body = {}
+    if request.get_data():
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or set(body) - {'scenario'}:
+            return jsonify({"error": "body must be {\"scenario\": <id>}"}), 400
+    scenario = body.get('scenario', 'all')
+    if not isinstance(scenario, str) or not demo.SCENARIO_ID.fullmatch(scenario):
+        return jsonify({"error": "unknown scenario"}), 400
+    try:
+        started = _simulation.start(scenario, LOG_FILE)
+    except KeyError:
+        return jsonify({"error": "unknown scenario"}), 400
+    if not started:
+        return jsonify({"error": "a simulation is already running", "status": _simulation.status()}), 409
+    return jsonify(_simulation.status()), 202
 
 
 def _is_loopback(host: str) -> bool:

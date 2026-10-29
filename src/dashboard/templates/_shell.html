@@ -32,11 +32,12 @@
         <nav class="nav" aria-label="Views">
             <a href="/" {% if view == 'monitor' %}aria-current="page"{% endif %}><i class="ti ti-activity" aria-hidden="true"></i>Live monitor</a>
             <a href="/results" {% if view == 'results' %}aria-current="page"{% endif %}><i class="ti ti-chart-dots" aria-hidden="true"></i>Results</a>
+            <a href="/demo" {% if view == 'demo' %}aria-current="page"{% endif %}><i class="ti ti-presentation" aria-hidden="true"></i>Demo</a>
         </nav>
         <div class="facts">
             <div class="fact">
-                <span class="fact-k">Agent model</span>
-                <span class="fact-v" id="m-model" title="{{ info.model }}">{{ info.model }}</span>
+                <span class="fact-k">Models compared</span>
+                <a class="fact-v" id="m-models" href="/results#lineup">see the line-up</a>
             </div>
             <div class="fact">
                 <span class="fact-k">Monitor host</span>
@@ -83,6 +84,18 @@
     });
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', paint);
     paint();
+
+    // The study compares many models, so the rail names the line-up, never a single "agent model".
+    fetch('/api/lineup', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).then(d => {
+        if (!d || !Array.isArray(d.models)) return;
+        const current = d.models.filter(m => m.group !== 'legacy');
+        const llms = current.filter(m => m.group !== 'control').length;
+        const control = current.length - llms;
+        const local = current.filter(m => m.group === 'locally made').length;
+        const link = document.getElementById('m-models');
+        link.textContent = `${llms} LLMs${control ? ' + control' : ''}`;
+        link.title = `${local} made here. ` + current.map(m => m.model).join(', ');
+    }).catch(() => { /* keep the link */ });
 })();
 </script>
 {% block scripts %}{% endblock %}
