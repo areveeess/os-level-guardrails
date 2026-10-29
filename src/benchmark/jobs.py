@@ -303,8 +303,11 @@ def server_env(port: int, context_length: Optional[int] = None) -> dict:
 
 
 def client_env(port: int) -> dict:
-    """Environment for the `ollama` CLI talking to the server on <port>."""
-    return dict(os.environ, OLLAMA_HOST=f"{HOST}:{port}")
+    """Environment for the `ollama` CLI talking to the server on <port>: PATH, HOME and LANG plus OLLAMA_HOST, the
+    same minimal set the server gets, so the API keys load_dotenv placed in this process never reach it (IN-07)."""
+    env = {k: os.environ[k] for k in MINIMAL_ENV_KEYS if k in os.environ}
+    env["OLLAMA_HOST"] = f"{HOST}:{port}"
+    return env
 
 
 def start_owned_server(jobs_dir: str, port: int, context_length: Optional[int] = None,

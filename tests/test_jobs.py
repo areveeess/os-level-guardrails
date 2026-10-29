@@ -170,6 +170,21 @@ def test_nothing_listening_starts_one_marked_server_with_minimal_env(world, tmp_
     assert world.signals == []
 
 
+def test_ollama_cli_gets_a_minimal_environment_without_api_keys(world, tmp_path, monkeypatch):
+    """IN-07: every `ollama` CLI call gets PATH, HOME, LANG and OLLAMA_HOST only, never the API keys that
+    load_dotenv placed in this process's environment."""
+    monkeypatch.setenv("GROQ_API_KEY", "not-a-real-key")
+    monkeypatch.setenv("SOME_SECRET_LIKE_VAR", "x")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    env = jobs.client_env(11434)
+    assert env["OLLAMA_HOST"] == "127.0.0.1:11434" and env["PATH"] == "/usr/bin"
+    assert set(env) <= set(jobs.MINIMAL_ENV_KEYS) | {"OLLAMA_HOST"}
+    jobs.ollama_variants(str(tmp_path), ["ollama-qwen2.5-3b"])
+    cli_envs = [e for argv, e, _ in world.runs if argv[0] == "ollama"]
+    assert cli_envs and all(set(e) <= set(jobs.MINIMAL_ENV_KEYS) | {"OLLAMA_HOST"} for e in cli_envs)
+    assert not any("GROQ_API_KEY" in e or "SOME_SECRET_LIKE_VAR" in e for e in cli_envs)
+
+
 def test_start_without_context_length_sets_none(world, tmp_path):
     jobs.start_owned_server(str(tmp_path), 11436, None, "probe.log", "probe.pid")
     env = world.popens[0][1]
