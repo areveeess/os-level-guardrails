@@ -4,10 +4,10 @@ current_phase: 4
 current_phase_name: Full Runs - Local, Added Ollama, Hosted Resume
 status: verifying
 stopped_at: Completed 05-04-PLAN.md
-last_updated: "2026-10-29T08:52:51.543Z"
+last_updated: "2026-10-29T13:41:42.815Z"
 last_activity: 2026-10-29
 last_activity_desc: "Phase 4 executed (5/5 plans), awaiting review; Groq final regeneration after the 15:30 UTC freeze pending"
-state_head: 4bdf802263fd4f656056f27ce2d17e3462f8b1ad
+state_head: cebff4b96ae76d90b73b0d7124db2b9c686499f0
 progress:
   total_phases: 5
   completed_phases: 2
@@ -150,6 +150,7 @@ None yet.
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 261028-th2 | Remake guardrails dashboard as a reference-monitor console | 2026-10-28 | 3881dfb | [261028-th2-redesign-guardrails-dashboard-ui](./quick/261028-th2-redesign-guardrails-dashboard-ui/) |
+| 261029-qmt | Rebuild dashboard from scratch and add results view | 2026-10-29 | cebff4b | [261029-qmt-remake-dashboard-with-results-view](./quick/261029-qmt-remake-dashboard-with-results-view/) |
 
 ## Deferred Items
 
