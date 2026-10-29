@@ -4,10 +4,10 @@ current_phase: 4
 current_phase_name: Full Runs - Local, Added Ollama, Hosted Resume
 status: verifying
 stopped_at: Completed 05-04-PLAN.md
-last_updated: "2026-10-29T17:12:37.660Z"
+last_updated: "2026-10-29T17:22:53.228Z"
 last_activity: 2026-10-29
 last_activity_desc: "Phase 4 executed (5/5 plans), awaiting review; Groq final regeneration after the 15:30 UTC freeze pending"
-state_head: ff274bfffce87f74e5918ba3ff910194acf3c1cf
+state_head: dd57c142382e2778c14044c3a3aacaf50db63790
 progress:
   total_phases: 5
   completed_phases: 2
@@ -153,6 +153,7 @@ None yet.
 | 261029-qmt | Rebuild dashboard from scratch and add results view | 2026-10-29 | cebff4b | [261029-qmt-remake-dashboard-with-results-view](./quick/261029-qmt-remake-dashboard-with-results-view/) |
 | 261029-vds | Demo page for the review and the real model line-up | 2026-10-29 | c072341 | [261029-vds-demo-mode-and-model-line-up](./quick/261029-vds-demo-mode-and-model-line-up/) |
 | 4 | Move the demo script from /demo into docs/DEMO_SCRIPT.md | 2026-10-29 | ff274bf | — |
+| 5 | Results view: final-state labels for incomplete runs, arm and k/n beside each value | 2026-10-29 | dd57c14 | — |
 
 ## Deferred Items
 
