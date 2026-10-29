@@ -448,6 +448,22 @@ def test_frozen_scan_reads_utf16_and_reports_unreadable_files(frozen_numbers, tm
                                  for line in lines)
 
 
+def test_check_refuses_a_numbers_json_that_does_not_belong_to_the_freeze(frozen_numbers, capsys):
+    frozen, numbers = frozen_numbers
+    original = (frozen / "numbers.json").read_bytes()
+    edited = dict(numbers, snapshot_utc="2026-10-29T08:00:00Z")
+    (frozen / "numbers.json").write_text(json.dumps(edited), encoding="utf-8")
+    assert main(["check", "--frozen", str(frozen)]) == 1
+    assert "numbers.json does not belong to freeze.json" in capsys.readouterr().out
+    (frozen / "numbers.json").write_bytes(original)
+    raw = frozen / "sources" / "phase4-scratch-gpt" / "raw.jsonl"
+    raw.write_bytes(raw.read_bytes() + b"{}\n")
+    for command in ("check", "blocks"):
+        assert main([command, "--frozen", str(frozen)]) == 1
+        out = capsys.readouterr().out
+        assert out.startswith(f"FAIL {command}: frozen copy ") and "does not match freeze.json" in out
+
+
 def test_secret_regex_mirrors_run_checks():
     with open(os.path.join(REPO_ROOT, "src", "benchmark", "run_checks.py"), encoding="utf-8") as f:
         tree = ast.parse(f.read())

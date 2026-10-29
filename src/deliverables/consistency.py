@@ -28,6 +28,10 @@ re-run keeps adding episodes until the freeze). This check makes the drift loud:
                  byte-order mark); reported as path:line only, never the text. A file under the
                  frozen directory that cannot be read is a failure, not a skip
 
+Before any rule runs, load_numbers ties numbers.json to the frozen directory (IN-08): its snapshot,
+freeze, data state and source hashes must equal freeze.json, and every frozen raw.jsonl must still
+hash to its recorded value, so a stale or hand-edited numbers.json cannot pass the check.
+
 Lines inside blocks are exempt from the fraction, timestamp, percentage and outcome rules: the
 stale-block rule covers them. A paragraph is a run of plain lines outside the blocks; a blank
 line, a heading, a list item, a table row, a code fence and a block marker each start a new one.
@@ -39,6 +43,7 @@ name a model, because every slide line is generated. SECRET_RE is a copy of src.
 by a test), not an import: run_checks imports the provider registry, which loads API keys.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -364,9 +369,42 @@ def scan_frozen(frozen_dir: str, display: str) -> tuple:
     return scanned, problems
 
 
+TIED_KEYS = ("schema", "snapshot_utc", "freeze_utc", "data_state")
+
+
+def tie_to_freeze(frozen_dir: str, numbers: dict):
+    """Raise ValueError unless numbers.json belongs to the frozen directory's freeze.json and its frozen copies
+    (IN-08): the same snapshot, freeze and data state, the same sources with the same raw.jsonl hashes, and every
+    frozen raw.jsonl still hashing to that value. A stale or hand-edited numbers.json is never checked against."""
+    path = os.path.join(frozen_dir, "freeze.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            record = json.load(f)
+    except (OSError, ValueError) as e:
+        raise ValueError(f"cannot read {path.replace(os.sep, '/')} ({type(e).__name__}), so numbers.json is not "
+                         f"tied to a freeze")
+    want = [(s.get("name"), s.get("raw_sha256")) for s in record.get("sources") or []]
+    got = [(s.get("name"), s.get("raw_sha256")) for s in numbers.get("sources") or []]
+    if want != got or any(numbers.get(key) != record.get(key) for key in TIED_KEYS):
+        raise ValueError("numbers.json does not belong to freeze.json (run python -m src.deliverables build "
+                         "--reuse-frozen)")
+    for name, sha in want:
+        raw = os.path.join(frozen_dir, "sources", name, "raw.jsonl")
+        try:
+            with open(raw, "rb") as f:
+                ok = hashlib.sha256(f.read()).hexdigest() == sha
+        except OSError:
+            ok = False
+        if not ok:
+            raise ValueError(f"frozen copy {raw.replace(os.sep, '/')} is missing or does not match freeze.json")
+
+
 def load_numbers(frozen_dir: str) -> dict:
+    """numbers.json of the frozen directory, after tie_to_freeze (IN-08)."""
     with open(os.path.join(frozen_dir, "numbers.json"), encoding="utf-8") as f:
-        return json.load(f)
+        numbers = json.load(f)
+    tie_to_freeze(frozen_dir, numbers)
+    return numbers
 
 
 def normalize_doc(doc: str) -> str:
