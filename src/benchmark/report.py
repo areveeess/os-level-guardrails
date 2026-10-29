@@ -557,6 +557,57 @@ def _error_bars(summary: list, prefix: str) -> tuple:
     return lower, upper
 
 
+# ── Optional sections for the Phase 5 deliverables (D-02, D-04, D-05); each returns markdown lines ──
+
+CONFOUND_COLUMNS = (
+    ("Model", "model"), ("Parameters", "parameters"), ("Quantization or precision", "precision"),
+    ("Local or hosted", "placement"), ("Context window", "context"), ("Decoding", "decoding"),
+    ("Training provenance", "provenance"),
+    ("Largest prompt seen (prompt_tokens; characters for the character-level scratch-gpt)", "max_prompt"),
+)
+
+LEGACY_TITLE = "Legacy rows (older engine, not compared)"
+
+
+def confounds_lines(rows: list) -> list:
+    """'## Confounds between the models': one row per model (dicts keyed as CONFOUND_COLUMNS)."""
+    lines = ["", "## Confounds between the models", "",
+             "The models differ in more than their training, and these differences are confounds, not results: "
+             "a gap between two rows cannot be attributed to any single one of them.", "",
+             "| " + " | ".join(title for title, _ in CONFOUND_COLUMNS) + " |", "|" + "---|" * len(CONFOUND_COLUMNS)]
+    lines += ["| " + " | ".join(_cell(r.get(key, "not recorded")) for _, key in CONFOUND_COLUMNS) + " |" for r in rows]
+    return lines
+
+
+def legacy_lines(summary_rows: list) -> list:
+    """'## Legacy rows (older engine, not compared)': summary-row-shaped dicts of the October rows."""
+    lines = ["", f"## {LEGACY_TITLE}", "",
+             "These rows come from the October 2026 run under an older engine (before the Phase 1 scoring, outcome "
+             "and policy changes). They are listed with their n for transparency and are not compared, pooled or "
+             "charted.", "",
+             "| Model | Episodes done | Paired attack episodes | Success (no guardrails) | Success (guardrails) "
+             "| Benign task (no guardrails) |", "|---|---|---|---|---|---|"]
+    lines += [f"| {_cell(s['model'])} | {s['episodes_done']}/{s['episodes_expected']} | {s['attack_pairs']} "
+              f"| {_prop(s, 'success_unprotected')} | {_prop(s, 'success_protected')} "
+              f"| {_prop(s, 'benign_task_unprotected')} |" for s in summary_rows]
+    if not summary_rows:
+        lines.append("None.")
+    return lines
+
+
+def chart_lines(chart_links: list) -> list:
+    """'## Charts': (relative file, caption) pairs, one image link and caption each."""
+    lines = ["", "## Charts", ""]
+    for path, caption in chart_links:
+        lines += [f"![{_cell(caption)}]({path})", "", f"*{_cell(caption)}*", ""]
+    return lines[:-1] if chart_links else lines + ["None."]
+
+
+def threats_lines(items: list) -> list:
+    """'## Threats to validity': one bullet per item."""
+    return ["", "## Threats to validity", ""] + [f"- {_cell(item)}" for item in items]
+
+
 # Headline / partial table columns: (title, cell renderer)
 HEADLINE_COLUMNS = [
     ("Model", lambda s: _cell(s["model"])),
@@ -585,9 +636,12 @@ def _table(columns: list, summary: list) -> list:
 
 
 def write_markdown(summary: list, breakdown: list, path: str, provenance: list = None, control: dict = None,
-                   layer_blocks: list = None, preamble: list = None):
+                   layer_blocks: list = None, preamble: list = None, confounds: list = None, legacy: list = None,
+                   chart_links: list = None, threats: list = None):
     """Write summary.md. `preamble` (lines, e.g. the data state of a frozen snapshot) goes right under
-    the title with a blank line on each side; without it the report is exactly as before."""
+    the title with a blank line on each side. The optional Phase 5 sections are placed as follows:
+    `confounds` and `legacy` right after the partial table, `chart_links` after "By attack kind" and
+    `threats` right before "Provenance and data quality". Without them the report is exactly as before."""
     # The scripted control is not an LLM: it is never ranked, pooled or charted with the models.
     summary = [s for s in summary if s.get("provider") != CONTROL_PROVIDER]
     complete = [s for s in summary if s["status"] == "complete"]
@@ -654,6 +708,10 @@ def write_markdown(summary: list, breakdown: list, path: str, provenance: list =
               "These rows are shown for transparency; they have fewer usable episodes than planned and",
               "must not be ranked against the complete rows above.", ""]
     lines += _table(HEADLINE_COLUMNS, others) if others else ["None."]
+    if confounds is not None:
+        lines += confounds_lines(confounds)
+    if legacy is not None:
+        lines += legacy_lines(legacy)
 
     lines += ["", "## Outcomes per episode", "",
               "Counts include episodes later excluded by pair dropping. Format-valid rate = "
@@ -720,6 +778,10 @@ def write_markdown(summary: list, breakdown: list, path: str, provenance: list =
               "|---|---|---|---|---|---|"]
     lines += [f"| {_cell(b['model'])} | {b['kind']} | {b['episodes']} | {_prop(b, 'attempted')} | "
               f"{_prop(b, 'success_unprotected')} | {_prop(b, 'success_protected')} |" for b in breakdown]
+    if chart_links is not None:
+        lines += chart_lines(chart_links)
+    if threats is not None:
+        lines += threats_lines(threats)
     lines += _provenance_lines(provenance or [])
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
@@ -835,7 +897,8 @@ def _manifest_invocations(manifest: dict, model: str) -> int:
 
 
 def generate_report(out_dir: str, charts: bool = True, sources: list = None, expected: int = None,
-                    preamble: list = None) -> list:
+                    preamble: list = None, confounds: list = None, legacy: list = None, chart_links: list = None,
+                    threats: list = None) -> list:
     """Write the report into out_dir from its raw.jsonl, or from several result
     directories (`sources`, e.g. one per model run in parallel).
 
@@ -843,8 +906,9 @@ def generate_report(out_dir: str, charts: bool = True, sources: list = None, exp
     argument, then the manifest.json of the directory a model's rows came from (the
     largest, if a model appears in several), then DEFAULT_EXPECTED_EPISODES.
 
-    `preamble` (optional lines) is placed under the report title (see write_markdown); the
-    Phase 5 deliverables build uses it for the snapshot time and data state."""
+    `preamble` (optional lines) is placed under the report title; `confounds`, `legacy`, `chart_links`
+    and `threats` add the Phase 5 sections (see write_markdown). `charts` still only turns the three
+    report charts on or off. The Phase 5 deliverables build passes all of them."""
     os.makedirs(out_dir, exist_ok=True)
     rows = []
     manifest_expected, invocations = {}, {}
@@ -877,7 +941,8 @@ def generate_report(out_dir: str, charts: bool = True, sources: list = None, exp
         writer.writerows(summary)
     write_markdown(summary, breakdown, os.path.join(out_dir, "summary.md"),
                    provenance=provenance_summary(rows, invocations), control=control_summary(rows, control_models),
-                   layer_blocks=layer_blocks, preamble=preamble)
+                   layer_blocks=layer_blocks, preamble=preamble, confounds=confounds, legacy=legacy,
+                   chart_links=chart_links, threats=threats)
     llm_summary = [s for s in summary if s["provider"] != CONTROL_PROVIDER]
     if charts and llm_summary:
         write_charts(llm_summary, os.path.join(out_dir, "charts"))

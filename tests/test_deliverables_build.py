@@ -19,7 +19,7 @@ import pytest
 from src import deliverables
 from src.deliverables import build as build_module
 from src.deliverables.__main__ import main
-from tests.test_report import make_row, write_raw
+from tests.test_report import make_row, section, write_raw
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -117,6 +117,13 @@ def tree_bytes(directory):
             with open(path, "rb") as f:
                 out[os.path.relpath(path, directory)] = f.read()
     return out
+
+
+@pytest.fixture(autouse=True)
+def no_chart_drawing(monkeypatch):
+    """Chart drawing is tested in test_deliverables_sections.py; here it is stubbed (text layout in the WSL
+    matplotlib takes about 20 s per chart set)."""
+    monkeypatch.setattr(build_module.charts, "write_phase5_charts", lambda numbers, chart_dir: {})
 
 
 @pytest.fixture
@@ -248,8 +255,10 @@ def test_report_has_data_line_and_no_legacy_rows(built):
     first = text.splitlines()
     assert first[0] == "# Benchmark summary" and first[1] == ""
     assert "2026-10-29T07:00Z" in first[2] and "snapshot" in first[2]
+    ranked = text.split("## Headline: complete runs")[1].split("## Confounds between the models")[0]
     for legacy in ("gemini-flash-lite", "gemma-4-31b"):
-        assert legacy not in text
+        assert legacy in section(text, "Legacy rows (older engine, not compared)")     # own table only (D-02)
+        assert legacy not in ranked
         assert legacy not in (frozen / "summary.csv").read_text(encoding="utf-8")
         assert legacy not in (frozen / "layer_blocks.csv").read_text(encoding="utf-8")
     headline = text.split("## Headline: complete runs")[1].split("## Outcomes per episode")[0]

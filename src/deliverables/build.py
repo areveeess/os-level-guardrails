@@ -9,8 +9,9 @@ freeze  Copies every source directory into a sibling staging directory, then swa
         error the staging directory is removed and the old frozen directory is kept.
 render  Regenerates summary.md, summary.csv and layer_blocks.csv through
         src/benchmark/report.py from the frozen current-engine copies only (the legacy
-        copies never reach the headline, D-02), then writes numbers.json, the one
-        source of numbers for every document (D-03). numbers.json is a pure function of
+        copies reach only their own labelled table, D-02), with the confounds, legacy,
+        charts and threats-to-validity sections (D-04), draws the three D-05 charts and
+        writes numbers.json, the one source of numbers for every document (D-03). numbers.json is a pure function of
         the frozen directory: nothing in it depends on the clock or git state at render
         time, so re-rendering a frozen directory rewrites it byte-identically.
 build   freeze (unless reuse) then render; returns the printed lines.
@@ -26,9 +27,11 @@ import subprocess
 from collections import Counter
 
 from src.benchmark.outcomes import classify_llm_error, classify_outcome
-from src.benchmark.report import (CONTROL_PROVIDER, LAYERS, POOLED_LABEL, control_summary, generate_report,
-                                  kind_breakdown, layer_block_summary, load_rows_counted)
+from src.benchmark.report import (CONTROL_PROVIDER, DEFAULT_EXPECTED_EPISODES, LAYERS, POOLED_LABEL,
+                                  control_summary, generate_report, kind_breakdown, layer_block_summary,
+                                  load_rows_counted, read_manifest, summarize)
 from src.benchmark.stats import prop_fields
+from src.deliverables import charts, sections
 from src.deliverables import (CONTROL_MODEL, COPY_FILES, CURRENT_SOURCES, FREEZE_UTC, FROZEN_DIR,
                               HOSTED_MODELS, LEGACY_SOURCES, LOCAL_MODELS, MODEL_ORDER, RESULTS_ROOT)
 
@@ -237,6 +240,20 @@ def load_frozen_rows(paths: list) -> list:
     return rows
 
 
+def _manifest_expected(paths: list, rows: list) -> dict:
+    """{model: planned episodes} by generate_report's rule: the largest manifest value over the directories the
+    model's rows came from (a model without one gets the report default)."""
+    expected = {}
+    for path in paths:
+        manifest = read_manifest(path) or {}
+        planned = manifest.get("expected_episodes_per_model")
+        if type(planned) is not int or planned <= 0:
+            continue
+        for model in dict.fromkeys(r["model"] for r in load_rows_counted(os.path.join(path, "raw.jsonl"))[0]):
+            expected[model] = max(expected.get(model, 0), planned)
+    return expected or {m: DEFAULT_EXPECTED_EPISODES for m in dict.fromkeys(r["model"] for r in rows)}
+
+
 def _validate_models(rows: list):
     models = set(r["model"] for r in rows)
     known = set(MODEL_ORDER) | {CONTROL_MODEL}
@@ -331,6 +348,7 @@ def build_numbers(record: dict, rows: list, summary: list, frozen_dir: str) -> d
             "pairs_complete": s["pairs_complete"],
             "infra_errors": s["infra_errors"],
             "attack_pairs": s["attack_pairs"],
+            "format_failures": {arm: s[f"outcomes_{arm}_format_failure"] for arm in ("unprotected", "protected")},
             "metrics": _metrics(s),
             "by_kind": {b["kind"]: {"episodes": b["episodes"], **{p: v for p, v in _metrics(b).items()}}
                         for b in breakdown if b["model"] == model},
@@ -364,14 +382,31 @@ def build_numbers(record: dict, rows: list, summary: list, frozen_dir: str) -> d
     }
 
 
-def render(frozen_dir: str = FROZEN_DIR) -> dict:
-    """Regenerate the report and numbers.json from the frozen directory; returns numbers."""
+def render(frozen_dir: str = FROZEN_DIR, repo_root: str = REPO_ROOT) -> dict:
+    """Regenerate the report, the three charts and numbers.json from the frozen directory; returns numbers.
+
+    The numbers are computed first (the threats section quotes them), then the report is written through
+    generate_report; its own summary must equal the one the numbers came from, or the build fails."""
     record = read_freeze(frozen_dir)
     paths = [source_dir(frozen_dir, s["name"]) for s in record["sources"] if s["group"] in ("current", "control")]
     rows = load_frozen_rows(paths)
     _validate_models(rows)
-    summary = generate_report(frozen_dir, charts=False, sources=paths, preamble=preamble_lines(record))
+    summary = summarize(rows, expected=_manifest_expected(paths, rows))
     numbers = build_numbers(record, rows, summary, frozen_dir)
+    llm_rows = [r for r in rows if r["model"] != CONTROL_MODEL]
+    legacy = sections.legacy_summary(frozen_dir) if any(s["group"] == "legacy" for s in record["sources"]) else []
+    numbers["confounds"] = sections.confound_rows(frozen_dir, llm_rows, repo_root=repo_root)
+    numbers["legacy"] = legacy
+    numbers["local_training"] = sections.local_training(repo_root)
+    numbers["threats"] = sections.threat_items(numbers, legacy)
+    links = charts.chart_links()
+    numbers["charts"] = [{"file": path, "caption": caption} for path, caption in links]
+    report_summary = generate_report(frozen_dir, charts=False, sources=paths, preamble=preamble_lines(record),
+                                     confounds=numbers["confounds"], legacy=legacy, chart_links=links,
+                                     threats=numbers["threats"])
+    if report_summary != summary:
+        raise DeliverablesError("the report's summary differs from the summary numbers.json was built from")
+    charts.write_phase5_charts(numbers, os.path.join(frozen_dir, "charts"))
     _write_atomic(os.path.join(frozen_dir, NUMBERS_FILE), _json_bytes(numbers))
     return numbers
 
@@ -379,7 +414,7 @@ def render(frozen_dir: str = FROZEN_DIR) -> dict:
 # ── Build ──
 
 def build(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, reuse: bool = False, now=None,
-          say=None) -> list:
+          say=None, repo_root: str = REPO_ROOT) -> list:
     """freeze (unless reuse) and render; returns the printed lines (each also passed to `say`)."""
     lines = []
 
@@ -395,11 +430,12 @@ def build(results_root: str = RESULTS_ROOT, frozen_dir: str = FROZEN_DIR, reuse:
     emit(f"{word} {record['snapshot_display']} state {record['data_state']} sources {len(record['sources'])}")
     for s in record["sources"]:
         emit(f"SOURCE {s['name']} lines {s['raw_lines']} sha256 {s['raw_sha256'][:12]}")
-    numbers = render(frozen_dir)
+    numbers = render(frozen_dir, repo_root=repo_root)
     models = sum(1 for m in numbers["models"] if m["group"] != "control")
     controls = sum(1 for m in numbers["models"] if m["group"] == "control")
-    legacy = sum(1 for s in record["sources"] if s["group"] == "legacy")
-    emit(f"REPORT {posix(os.path.join(frozen_dir, 'summary.md'))} models {models} control {controls} legacy {legacy}")
+    emit(f"REPORT {posix(os.path.join(frozen_dir, 'summary.md'))} models {models} control {controls} "
+         f"legacy {len(numbers['legacy'])}")
+    emit(f"CHARTS {len(numbers['charts'])}")
     emit(f"NUMBERS {posix(os.path.join(frozen_dir, NUMBERS_FILE))}")
     emit("BUILD ok")
     return lines
