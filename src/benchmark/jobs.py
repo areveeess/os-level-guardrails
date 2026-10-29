@@ -815,7 +815,11 @@ def stop_own_child(proc, wait_s: float = FREEZE_STOP_WAIT_S) -> None:
 
 def run_child_until(argv: list, progress: str, deadline) -> int:
     """Run the benchmark child, polling it every CHILD_POLL_S; at the deadline stop only that child, log the
-    freeze line and return DONE_FREEZE (7)."""
+    freeze line and return DONE_FREEZE (7). The clock is checked before the spawn too (WR-03): nothing is
+    launched at or after the deadline, whatever the caller did before."""
+    if _now() >= deadline:
+        _append(progress, f"FREEZE not launched {_utc_now()} (D-09)\n")
+        return DONE_FREEZE
     proc = _spawn(argv, progress)
     while True:
         code = proc.poll()
@@ -834,7 +838,10 @@ def run(model: str, out_dir: str, smoke: bool = False, jobs_dir: str = DEFAULT_J
     GPU models pass the read-only preflight first (done code 5 when it never passes). Ollama models need the
     measured default context (jobs ollama-default-probe) and get start and end context evidence. With a
     deadline (FREEZE_UTC for the Phase 4 queue) the child is polled and, at the deadline, only that child is
-    stopped and bench.done is 7; nothing is launched when the deadline has already passed."""
+    stopped and bench.done is 7; nothing is launched when the deadline has already passed. The deadline is
+    checked again after the preflight (it can wait 6 x 300 s) and after the Ollama setup (server start,
+    variant, long-prompt probes), so a launch that starts shortly before the freeze cannot start a child
+    after it (WR-03); a server this run started is still stopped by the finally block."""
     cfg = model_config(model)
     deadline = _parse_utc(deadline) if deadline is not None else None
     out_dir = os.path.abspath(out_dir)
@@ -851,16 +858,25 @@ def run(model: str, out_dir: str, smoke: bool = False, jobs_dir: str = DEFAULT_J
     if os.path.exists(done_path):
         os.remove(done_path)
     progress = os.path.join(out_dir, "progress.log")
-    if deadline is not None and _now() >= deadline:
-        print(f"FREEZE {model}: not launched (D-09)")
-        _append(progress, f"=== invocation {_utc_now()} model {model} ===\nFREEZE not launched (D-09)\n")
+
+    def freeze_reached(stage: str) -> bool:
+        """True (and the freeze line and done code 7 written) when the deadline has passed."""
+        if deadline is None or _now() < deadline:
+            return False
+        print(f"FREEZE {model}: not launched (D-09{stage})")
+        _append(progress, f"=== invocation {_utc_now()} model {model} ===\nFREEZE not launched (D-09{stage})\n")
         _write_done(out_dir, DONE_FREEZE)
+        return True
+
+    if freeze_reached(""):
         return DONE_FREEZE
     if needs_gpu_preflight(cfg) and not preflight_with_rechecks(out_dir):
         print("preflight never passed; not starting the benchmark")
         _append(progress, f"=== invocation {_utc_now()} model {model} ===\npreflight never passed\n")
         _write_done(out_dir, DONE_PREFLIGHT)
         return DONE_PREFLIGHT
+    if freeze_reached(", reached during the preflight"):
+        return DONE_FREEZE
     started_server, state = False, None
     try:
         if ollama:
@@ -875,6 +891,8 @@ def run(model: str, out_dir: str, smoke: bool = False, jobs_dir: str = DEFAULT_J
                 _append(progress, f"=== invocation {_utc_now()} model {model} ===\nFAIL ollama setup: {e}\n")
                 _write_done(out_dir, DONE_OLLAMA_SETUP)
                 return DONE_OLLAMA_SETUP
+            if freeze_reached(", reached during the Ollama setup"):
+                return DONE_FREEZE
         _append(progress, f"=== invocation {_utc_now()} model {model} ===\n")
         if deadline is None:
             code, _ = _run(benchmark_argv(model, out_dir, smoke), timeout=7 * 24 * 3600, stdout_path=progress)

@@ -821,6 +821,56 @@ def test_run_after_the_deadline_launches_nothing(clock, tmp_path, monkeypatch):
     assert spawned == [] and (tmp_path / "out" / "bench.done").read_text().strip() == "7"
 
 
+def test_freeze_passing_during_the_preflight_launches_nothing(machine, clock, tmp_path, monkeypatch):
+    """WR-03: the GPU is busy at the first reading, the freeze passes during the recheck wait, the next reading
+    passes. No child may start after the freeze."""
+    readings = [(0, "GPU, 6000, 100, 6144\n"), (0, "GPU, 1000, 5064, 6144\n")]
+    machine.run_results[("nvidia-smi",)] = lambda argv: readings.pop(0) if len(readings) > 1 else readings[0]
+    monkeypatch.setattr(jobs, "PREFLIGHT_WAIT_S", 300)
+    spawned = []
+    monkeypatch.setattr(jobs, "_spawn", lambda argv, path: spawned.append(argv) or FakeChild(clock))
+    clock.base = FREEZE - datetime.timedelta(seconds=100)
+    out = tmp_path / "out"
+    assert jobs.run("scratch-gpt", str(out), jobs_dir=str(tmp_path / "jobs"), deadline=FREEZE) == 7
+    assert spawned == [] and clock.popens == [] and clock.signals == []
+    assert (out / "preflight.log").read_text().count("result ok") == 1      # the preflight did pass, after the freeze
+    assert (out / "bench.done").read_text().strip() == "7"
+    assert "FREEZE not launched" in (out / "progress.log").read_text()
+
+
+def test_freeze_passing_during_the_ollama_setup_launches_nothing_and_stops_our_server(run_world, clock, tmp_path,
+                                                                                       monkeypatch):
+    """WR-03: the Ollama setup (server start, variant, long prompts) can take many minutes. When the freeze passes
+    during it, no child starts, the end evidence is not captured and the server this run started is stopped."""
+    original = jobs.capture_start_evidence
+
+    def slow_evidence(*args, **kwargs):
+        data = original(*args, **kwargs)
+        clock.now += 1800                                               # the long-prompt probes took 30 minutes
+        return data
+    monkeypatch.setattr(jobs, "capture_start_evidence", slow_evidence)
+    spawned = []
+    monkeypatch.setattr(jobs, "_spawn", lambda argv, path: spawned.append(argv) or FakeChild(clock))
+    clock.base = FREEZE - datetime.timedelta(minutes=10)
+    out = tmp_path / "out"
+    assert jobs.run("ollama-qwen2.5-3b", str(out), jobs_dir=str(tmp_path / "jobs"), deadline=FREEZE) == 7
+    assert spawned == [] and not (out / "ollama_ps_end.json").exists()
+    assert clock.signals == [(4000, signal.SIGTERM)]                    # only the server this run started
+    assert (out / "bench.done").read_text().strip() == "7"
+    assert "FREEZE not launched" in (out / "progress.log").read_text()
+
+
+def test_run_child_until_checks_the_deadline_before_spawning(clock, tmp_path, monkeypatch):
+    """WR-03: run_child_until checks the clock before _spawn, not only after the first poll."""
+    spawned = []
+    monkeypatch.setattr(jobs, "_spawn", lambda argv, path: spawned.append(argv) or FakeChild(clock))
+    progress = str(tmp_path / "progress.log")
+    clock.base = FREEZE
+    assert jobs.run_child_until(["python", "run_benchmark.py"], progress, FREEZE) == 7
+    assert spawned == [] and clock.signals == []
+    assert "FREEZE not launched" in open(progress, encoding="utf-8").read()
+
+
 # ── status ──
 
 def _tree(root):
