@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 4
 current_phase_name: Full Runs - Local, Added Ollama, Hosted Resume
 status: verifying
-stopped_at: Completed 05-03-PLAN.md
-last_updated: "2026-10-29T08:19:15.502Z"
+stopped_at: Completed 05-04-PLAN.md
+last_updated: "2026-10-29T08:52:51.543Z"
 last_activity: 2026-10-29
 last_activity_desc: "Phase 4 executed (5/5 plans), awaiting review; Groq final regeneration after the 15:30 UTC freeze pending"
-state_head: 258c99f245c29d51598e29042d53be0e5746061c
+state_head: 4bdf802263fd4f656056f27ce2d17e3462f8b1ad
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 21
-  completed_plans: 20
+  completed_plans: 21
   percent: 40
 ---
 
@@ -77,6 +77,7 @@ Progress: [████░░░░░░] 40% (Phases 1-2 complete; Phases 3-4 
 | Phase 05 P01 | 50min | 3 tasks | 11 files |
 | Phase 05 P02 | 15min | 3 tasks | 2 files |
 | Phase 05 P03 | 45min | 3 tasks | 3 files |
+| Phase 05 P04 | 33min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -124,6 +125,7 @@ Recent decisions affecting current work:
 - [Phase 05]: 05-01: unscoped deliverables check fails on viva page 04 until plan 05-03 (expected baseline); use --doc README.md --doc docs/SDD.md meanwhile
 - [Phase 05]: 05-02: README and SDD quote result numbers only through generated blocks; SDD 3.0 adds 5.13-5.15, 7.3 (9 blocks) and Appendix C; SDD PDF/DOCX export is a manual step (needs network)
 - [Phase 05]: 05-03: viva page 05 Part F answers point to Part D for every result number; page 04 prose quotes no Groq or pooled number (only generated blocks do)
+- [Phase 05]: 05-04: Review-3 deck uses the template's plain BLANK layout (its layouts carry gradient decoration) with the chart surface background and one blue accent; build draws the deck only when the CLI passes deck_out
 
 ### Pending Todos
 
@@ -159,6 +161,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-29T08:19:14.254Z
-Stopped at: Completed 05-03-PLAN.md
+Last session: 2026-10-29T08:52:50.236Z
+Stopped at: Completed 05-04-PLAN.md
 Resume file: None

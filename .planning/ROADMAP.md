@@ -140,7 +140,7 @@ Plans:
   3. The README and the IEEE 1016 SDD describe the multi-LLM + local-model system and its results (no longer Gemini-only), and a Review-3 slide deck presents the reviewer remark, the local models and the comparison results.
   4. `docs/viva/` is complete: theory notes for OS security (reference monitor, access matrix, capabilities, namespaces, seccomp-bpf), LLM foundations (transformers, training, LoRA, decoding), prompt injection and defenses, and evaluation statistics, plus likely examiner questions with answers; every earlier phase's page is present and this phase adds the Q&A and threats-to-validity page.
 
-**Plans**: 3/4 plans executed
+**Plans**: 4/4 plans executed
 
 Plans:
 **Wave 1**
@@ -149,7 +149,7 @@ Plans:
 **Wave 2** *(blocked on Wave 1 completion)*
 - [x] 05-02-PLAN.md — README and SDD 3.0 for the multi-LLM and local-model system, result numbers only in generated blocks, check passes; SDD PDF/DOCX export left as a manual step (wave 2)
 - [x] 05-03-PLAN.md — Viva page 05 (prompt injection and defenses, evaluation statistics, confounds and threats, results, defend the result, 30+ examiner Q&A) and the viva index; viva page 04 Part C converted to generated blocks and its code-review section filled from 04-REVIEW-FIX (wave 2)
-- [ ] 05-04-PLAN.md — Review-3 deck generator (src/deliverables/slides.py, python-pptx on Windows py -3.12, template-based, 15 slides with notes, deck check) wired into the one-command build (wave 2)
+- [x] 05-04-PLAN.md — Review-3 deck generator (src/deliverables/slides.py, python-pptx on Windows py -3.12, template-based, 15 slides with notes, deck check) wired into the one-command build (wave 2)
 
 ## Progress
 
@@ -162,4 +162,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (the `hf_local` provi
 | 2. Local Data Foundation & ScratchGPT | 4/4 | Complete    | 2026-10-22 |
 | 3. Qwen LoRA & hf_local Provider | 4/4 | In Progress | - |
 | 4. Full Runs - Local, Added Ollama, Hosted Resume | 5/5 | In Progress | - |
-| 5. Comparison Report & Deliverables | 3/4 | In Progress | - |
+| 5. Comparison Report & Deliverables | 4/4 | In Progress | - |
